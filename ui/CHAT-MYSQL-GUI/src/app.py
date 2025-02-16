@@ -219,7 +219,7 @@ def main():
                 user="ltmptpysnd_R00tMin3",
                 password="Hell0W0rlD#12",
                 host="server25.shared.spaceship.host",
-                port="2083",
+                port="3306",
                 database="ltmptpysnd_school_store_db"
             )
             st.session_state.db = db
