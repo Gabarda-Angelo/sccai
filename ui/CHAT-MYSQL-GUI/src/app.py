@@ -33,8 +33,7 @@ if LANGCHAIN_TRACING_V2:
 
 # Initialize the database connection
 def init_database(user: str, password: str, host: str, port: str, database: str) -> SQLDatabase:
-    db_uri = f"mysql+mysqlconnector://ltmptpysnd_R00tMin3:Hell0W0rlD#12@bookstoreadmin.shop:localhost:3306/ltmptpysnd_school_store_db"
-
+    db_uri = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}"
     return SQLDatabase.from_uri(db_uri)
 
 # Validate and clean SQL queries (e.g., fix escaped underscores)
@@ -219,8 +218,8 @@ def main():
             db = init_database(
                 user="ltmptpysnd_R00tMin3",
                 password="Hell0W0rlD#12",
-                host="bookstoreadmin.shop",
-                port="localhost:3306",
+                host="server25.shared.spaceship.host",
+                port="2083",
                 database="ltmptpysnd_school_store_db"
             )
             st.session_state.db = db
