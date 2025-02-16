@@ -197,7 +197,7 @@ def main():
         st.session_state.chat_history = [AIMessage(content="Hello! I'm the SCC School Store assistant. How may I help you today?")]
     
     with st.sidebar:
-        st.image("ui/CHAT-MYSQL-GUI/src/img/  SCC.png", caption="SCC School Store Chat", use_container_width=True)
+        st.image("ui/CHAT-MYSQL-GUI/src/img/SCC.png", caption="SCC School Store Chat", use_container_width=True)
 
         with st.spinner("Connecting to database..."):
             db = init_database(
@@ -225,9 +225,9 @@ def main():
         for question in questions:
             if st.button(question):
                 st.session_state.chat_history.append(HumanMessage(content=question))
-                with st.chat_message("Human", avatar="ui/CHAT-MYSQL-GUI/src/img/  human_icon.jpeg"):
+                with st.chat_message("Human", avatar="ui/CHAT-MYSQL-GUI/src/img/human_icon.jpeg"):
                     st.markdown(question)
-                with st.chat_message("AI", avatar="ui/CHAT-MYSQL-GUI/src/img/  ai_icon.jpeg"):
+                with st.chat_message("AI", avatar="ui/CHAT-MYSQL-GUI/src/img/ai_icon.jpeg"):
                     response = get_response(question, st.session_state.db, st.session_state.chat_history)
                     st.markdown(response)
                 st.session_state.chat_history.append(AIMessage(content=response))
@@ -235,19 +235,19 @@ def main():
     # Display the chat history
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
-            with st.chat_message("AI", avatar="ui/CHAT-MYSQL-GUI/src/img/  ai_icon.jpeg"):
+            with st.chat_message("AI", avatar="ui/CHAT-MYSQL-GUI/src/img/ai_icon.jpeg"):
                 st.markdown(message.content)
         elif isinstance(message, HumanMessage):
-            with st.chat_message("Human", avatar="ui/CHAT-MYSQL-GUI/src/img/  human_icon.jpeg"):
+            with st.chat_message("Human", avatar="ui/CHAT-MYSQL-GUI/src/img/human_icon.jpeg"):
                 st.markdown(message.content)
     
     # Chat input section
     user_query = st.chat_input("Type a message...")
     if user_query is not None and user_query.strip() != "":
         st.session_state.chat_history.append(HumanMessage(content=user_query))
-        with st.chat_message("Human", avatar="ui/CHAT-MYSQL-GUI/src/img/  human_icon.jpeg"):
+        with st.chat_message("Human", avatar="ui/CHAT-MYSQL-GUI/src/img/human_icon.jpeg"):
             st.markdown(user_query)
-        with st.chat_message("AI", avatar="ui/CHAT-MYSQL-GUI/src/img/  ai_icon.jpeg"):
+        with st.chat_message("AI", avatar="ui/CHAT-MYSQL-GUI/src/img/ai_icon.jpeg"):
             response = get_response(user_query, st.session_state.db, st.session_state.chat_history)
             st.markdown(response)
         st.session_state.chat_history.append(AIMessage(content=response))
