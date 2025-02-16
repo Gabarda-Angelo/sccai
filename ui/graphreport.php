@@ -26,9 +26,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['date_1']) && !empty(
         // We'll use the full datetime values for filtering.
         $startDateTime = $d1->format('Y-m-d H:i:s');
         $endDateTime   = $d2->format('Y-m-d H:i:s');
-        // For display, we show just the date part.
-        $displayStartDate = $d1->format('Y-m-d');
-        $displayEndDate   = $d2->format('Y-m-d');
+        // For display in the picker, use the same m/d/Y format.
+        $displayStartDate = $d1->format('m/d/Y');
+        $displayEndDate   = $d2->format('m/d/Y');
     } else {
         // If parsing fails, fall back (not recommended)
         $displayStartDate = $_POST['date_1'];
@@ -41,13 +41,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['date_1']) && !empty(
     $minQuery  = $pdo->query("SELECT MIN(created_at) AS first_datetime FROM invoices");
     $minResult = $minQuery->fetch(PDO::FETCH_ASSOC);
     if (!empty($minResult['first_datetime'])) {
-        $displayStartDate = date("Y-m-d", strtotime($minResult['first_datetime']));
+        $displayStartDate = date("m/d/Y", strtotime($minResult['first_datetime']));
     } else {
-        $displayStartDate = date('Y-m-d');
+        $displayStartDate = date('m/d/Y');
     }
-    $displayEndDate = date('Y-m-d');
-    $startDateTime  = $displayStartDate . " 00:00:00";
-    $endDateTime    = $displayEndDate . " 23:59:59";
+    $displayEndDate = date('m/d/Y');
+    // Convert the display dates back to Y-m-d for filtering
+    $startDateTime  = date('Y-m-d', strtotime($displayStartDate)) . " 00:00:00";
+    $endDateTime    = date('Y-m-d', strtotime($displayEndDate)) . " 23:59:59";
 }
 
 // --- Decide Grouping: Hourly if same day; Daily if multiple days ---
@@ -164,8 +165,6 @@ if ($_SESSION['role'] == "Admin" || $_SESSION['role'] == "Owner") {
           $ttl[] = $row['total'];
           $labelArr[] = $row['label'];
       }
-      // Debug output (uncomment if needed)
-      // echo "<pre>"; print_r($labelArr); print_r($ttl); echo "</pre>";
 
       // --- Average Order Value (AOV) Data using created_at ---
       $aovData = [];
@@ -179,6 +178,7 @@ if ($_SESSION['role'] == "Admin" || $_SESSION['role'] == "Owner") {
           $aovData['labels'][] = $row['label'];
           $aovData['aov'][]    = $row['aov'];
       }
+
       // --- Product Performance Data (overall, no time grouping) ---
       $productData = [];
       $productQuery = $pdo->prepare("SELECT p.product_name, SUM(d.quantity) AS total_qty 
@@ -199,7 +199,9 @@ if ($_SESSION['role'] == "Admin" || $_SESSION['role'] == "Owner") {
       <div class="row">
         <div class="col-lg-12">
           <div class="card card-danger card-outline">
-            <div class="card-header"><h5 class="m-0">Earnings (<?= htmlspecialchars($labelArr[0] ?? '') ?> - <?= htmlspecialchars(end($labelArr) ?? '') ?>)</h5></div>
+            <div class="card-header">
+              <h5 class="m-0">Earnings (<?= htmlspecialchars($labelArr[0] ?? '') ?> - <?= htmlspecialchars(end($labelArr) ?? '') ?>)</h5>
+            </div>
             <div class="card-body">
               <canvas id="earningChart" style="height: 250px"></canvas>
             </div>
