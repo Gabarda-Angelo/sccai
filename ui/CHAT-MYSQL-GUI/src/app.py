@@ -26,8 +26,11 @@ logging.basicConfig(
     ]
 )
 
+
+
 # Load environment variables
-load_dotenv(override=True)
+load_dotenv("/workspaces/sccai/.env", override=True)
+print("DEBUG: SSH_PRIVATE_KEY =", os.getenv("SSH_PRIVATE_KEY")[:50] if os.getenv("SSH_PRIVATE_KEY") else "None")
 
 # Model configuration
 proposal_models = [
@@ -163,11 +166,11 @@ Escape table or column names only if absolutely necessary.
     prompt = ChatPromptTemplate.from_template(template)
 
     proposal_llms = [ChatGroq(model=model, temperature=0, api_key=os.getenv("GROQ_API_KEY"))
-                     for model in proposal_models]
+                    for model in proposal_models]
 
     proposal_chain = RunnableParallel(
         **{f"proposal_{i}": prompt | llm | StrOutputParser()
-           for i, llm in enumerate(proposal_llms)}
+          for i, llm in enumerate(proposal_llms)}
     )
 
     aggregator_template = """
@@ -222,11 +225,11 @@ Guidelines:
 
     response_proposals = RunnableParallel(
         **{f"proposal_{i}": response_prompt | llm | StrOutputParser()
-           for i, llm in enumerate([
-               ChatGroq(model=model, temperature=0.2,
-                        api_key=os.getenv("GROQ_API_KEY"))
-               for model in proposal_models
-           ])}
+          for i, llm in enumerate([
+              ChatGroq(model=model, temperature=0.2,
+                      api_key=os.getenv("GROQ_API_KEY"))
+              for model in proposal_models
+          ])}
     )
 
     response_aggregator_template = """
@@ -274,7 +277,7 @@ Return ONLY the final response without any metadata or explanations.
 
 def main():
     st.set_page_config(page_title="SCC School Store",
-                       page_icon=":speech_balloon:", layout="wide")
+                      page_icon=":speech_balloon:", layout="wide")
     st.title("Chat with SCC School Store AI")
 
     st.markdown(""" 
