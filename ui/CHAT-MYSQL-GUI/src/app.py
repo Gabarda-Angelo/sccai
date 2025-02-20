@@ -1,4 +1,7 @@
-# app.py
+import time
+import logging
+import json
+from dotenv import load_dotenv
 import os
 import re
 import streamlit as st
@@ -39,7 +42,7 @@ aggregator_model = "llama3-70b-8192"
 def validate_env():
     required_vars = [
         "GROQ_API_KEY", "SSH_HOST", "SSH_PORT", "SSH_USERNAME",
-        "SSH_PRIVATE_KEY_PATH", "DB_USER", "DB_PASSWORD", "DB_NAME"
+        "SSH_PRIVATE_KEY", "DB_USER", "DB_PASSWORD", "DB_NAME"
     ]
     missing = [var for var in required_vars if not os.getenv(var)]
     if missing:
@@ -63,10 +66,17 @@ def init_database_via_ssh():
     ssh_host = os.getenv("SSH_HOST")
     ssh_port = int(os.getenv("SSH_PORT", 21098))
     ssh_username = os.getenv("SSH_USERNAME")
-    ssh_pkey = os.getenv("SSH_PRIVATE_KEY_PATH")
+    ssh_key_path = "/tmp/id_rsa_sccstore"  # Temporary path for Streamlit Cloud
+    ssh_key_content = os.getenv("SSH_PRIVATE_KEY")
+    ssh_key_password = os.getenv("SSH_PRIVATE_KEY_PASSWORD") or None
     db_user = os.getenv("DB_USER")
     db_password = os.getenv("DB_PASSWORD")
     db_name = os.getenv("DB_NAME")
+
+    # Write SSH private key to a temporary file
+    with open(ssh_key_path, "w") as f:
+        f.write(ssh_key_content)
+    os.chmod(ssh_key_path, 0o600)
 
     tunnel_process = None
 
@@ -74,12 +84,15 @@ def init_database_via_ssh():
         nonlocal tunnel_process
         tunnel_cmd = [
             "ssh",
-            "-i", ssh_pkey,
+            "-i", ssh_key_path,
             "-L", "5522:127.0.0.1:3306",
             "-p", str(ssh_port),
             f"{ssh_username}@{ssh_host}",
             "-N"
         ]
+        if ssh_key_password:
+            tunnel_cmd.insert(1, "-o")
+            tunnel_cmd.insert(2, f"PasswordAuthentication={ssh_key_password}")
         tunnel_process = subprocess.Popen(tunnel_cmd)
         tunnel_process.wait()
 
@@ -99,7 +112,7 @@ def init_database_via_ssh():
 
     # Database connection with retry logic
     max_retries = 3
-    delay = 1  # Start with a 1-second delay
+    delay = 1
     for attempt in range(max_retries):
         try:
             db_uri = f"mysql+mysqlconnector://{db_user}:{db_password}@127.0.0.1:5522/{db_name}?allow_local_infile=true"
@@ -117,9 +130,8 @@ def init_database_via_ssh():
             logging.warning(f"Connection attempt {attempt+1} failed, retrying in {delay} seconds...")
             st.warning(f"Connection attempt {attempt+1} failed, retrying in {delay} seconds...")
             time.sleep(delay)
-            delay *= 2  # Double the delay for next retry
+            delay *= 2
 
-# Rest of the code remains unchanged
 def validate_sql_query(query: str) -> str:
     return re.sub(r"\\_", "_", query)
 
@@ -260,24 +272,9 @@ Return ONLY the final response without any metadata or explanations.
         "chat_history": chat_history,
     })
 
-# Function to load the header HTML from header.php
-def load_header():
-    try:
-        with open("..header.php", "r", encoding="utf-8") as f:
-            header_html = f.read()
-        # If needed, you can extract only a portion of header_html.
-        return header_html
-    except Exception as e:
-        return f"<!-- Error loading header.php: {e} -->"
-
-# Main Streamlit app
 def main():
-    st.set_page_config(page_title="SCC School Store", page_icon=":speech_balloon:", layout="wide")
-    
-    # Display the header component from header.php
-    header_html = load_header()
-    st.markdown(header_html, unsafe_allow_html=True)
-    
+    st.set_page_config(page_title="SCC School Store",
+                       page_icon=":speech_balloon:", layout="wide")
     st.title("Chat with SCC School Store AI")
 
     st.markdown(""" 
@@ -316,7 +313,7 @@ def main():
                 {str(e)}
                 
                 Troubleshooting steps:
-                1. Verify SSH credentials in .env file
+                1. Verify SSH credentials in .env file or Streamlit Cloud secrets
                 2. Check server firewall settings
                 3. Confirm database credentials
                 4. Test network connectivity
@@ -370,10 +367,6 @@ def main():
         st.session_state.chat_history.append(AIMessage(content=response))
         with st.chat_message("AI"):
             st.markdown(response)
-
-    # Optional cleanup (typically handled by Codespaces shutdown)
-    # if 'tunnel_process' in st.session_state:
-    #     st.session_state.tunnel_process.terminate()
 
 if __name__ == "__main__":
     main()
