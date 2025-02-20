@@ -11,11 +11,10 @@ from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.utilities import SQLDatabase
 from langchain_groq import ChatGroq
-from sshtunnel import SSHTunnelForwarder, BaseSSHTunnelForwarderError
-import sshtunnel
+import subprocess
+import threading
 import socket
 from sqlalchemy import text
-from contextlib import closing
 
 # Configure logging
 logging.basicConfig(
@@ -26,7 +25,6 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-sshtunnel.DEFAULT_LOGLEVEL = logging.DEBUG
 
 # Load environment variables
 load_dotenv(override=True)
@@ -40,7 +38,7 @@ proposal_models = [
 ]
 aggregator_model = "llama3-70b-8192"
 
-
+# Validate environment variables
 def validate_env():
     required_vars = [
         "GROQ_API_KEY", "SSH_HOST", "SSH_PORT", "SSH_USERNAME",
@@ -51,108 +49,82 @@ def validate_env():
         raise EnvironmentError(
             f"Missing required environment variables: {', '.join(missing)}")
 
-
 validate_env()
 
+# Helper function to check if a port is open
+def is_port_open(host, port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        try:
+            s.connect((host, port))
+            return True
+        except:
+            return False
 
-def validate_sql_query(query: str) -> str:
-    return re.sub(r"\\_", "_", query)
-
-
+# Function to initialize database connection via SSH tunnel
 def init_database_via_ssh():
     ssh_host = os.getenv("SSH_HOST")
     ssh_port = int(os.getenv("SSH_PORT", 21098))
     ssh_username = os.getenv("SSH_USERNAME")
     ssh_pkey = os.getenv("SSH_PRIVATE_KEY_PATH")
-    # With your key now without a passphrase, this will be empty or None
-    ssh_key_password = os.getenv("SSH_PRIVATE_KEY_PASSWORD") or None
+    db_user = os.getenv("DB_USER")
+    db_password = os.getenv("DB_PASSWORD")
+    db_name = os.getenv("DB_NAME")
 
-    # Enhanced network diagnostics
-    try:
-        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-            sock.settimeout(15)
-            result = sock.connect_ex((ssh_host, ssh_port))
+    tunnel_process = None
 
-            st.markdown(f"""
-            **Network Diagnostics:**
-            - Target Server: `{ssh_host}:{ssh_port}`
-            - Resolved IP: `{socket.gethostbyname(ssh_host)}`
-            - Connection Result: `{result} ({os.strerror(result)})`
-            """)
+    def run_tunnel():
+        nonlocal tunnel_process
+        tunnel_cmd = [
+            "ssh",
+            "-i", ssh_pkey,
+            "-L", "5522:127.0.0.1:3306",
+            "-p", str(ssh_port),
+            f"{ssh_username}@{ssh_host}",
+            "-N"
+        ]
+        tunnel_process = subprocess.Popen(tunnel_cmd)
+        tunnel_process.wait()
 
-            if result != 0:
-                st.error("""
-                **Critical Connectivity Issue**
-                1. Verify server firewall allows port 21098
-                2. Check network outbound rules
-                3. Confirm SSH service is running
-                """)
-                raise ConnectionError(
-                    f"SSH server unreachable (error code: {result})")
+    tunnel_thread = threading.Thread(target=run_tunnel)
+    tunnel_thread.start()
 
-    except Exception as e:
-        st.error(f"Network pre-check failed: {str(e)}")
-        raise
-
-    server = SSHTunnelForwarder(
-        (ssh_host, ssh_port),
-        ssh_username=ssh_username,
-        ssh_pkey=ssh_pkey,
-        ssh_private_key_password=ssh_key_password,
-        remote_bind_address=("127.0.0.1", 3306),
-        local_bind_address=("127.0.0.1", 5522),  # Explicitly set local port
-        set_keepalive=30,
-        allow_agent=False,
-    )
-
-    try:
-        server.start()
-        st.success(
-            f"SSH tunnel established on local port {server.local_bind_port}")
-        logging.info(f"Tunnel status: {server.tunnel_is_up()}")
-    except BaseSSHTunnelForwarderError as e:
-        st.error(f"""
-        **SSH Connection Failed**
-        Possible issues:
-        - Invalid credentials
-        - Network restrictions
-        - Firewall blocking
-        - Key format issues
-        
-        Technical details: {str(e)}
-        """)
-        raise
+    # Wait for tunnel to establish
+    for _ in range(10):
+        if is_port_open("127.0.0.1", 5522):
+            break
+        time.sleep(1)
+    else:
+        st.error("SSH tunnel failed to establish after 10 seconds.")
+        if tunnel_process:
+            tunnel_process.terminate()
+        raise ConnectionError("SSH tunnel failed to establish")
 
     # Database connection with retry logic
     max_retries = 3
-    delay = 1  # start with a 1-second delay
+    delay = 1  # Start with a 1-second delay
     for attempt in range(max_retries):
         try:
-            # Attempt to connect to the database
-            db_user = os.getenv("DB_USER")
-            db_password = os.getenv("DB_PASSWORD")
-            db_name = os.getenv("DB_NAME")
             db_uri = f"mysql+mysqlconnector://{db_user}:{db_password}@127.0.0.1:5522/{db_name}?allow_local_infile=true"
             db = SQLDatabase.from_uri(db_uri)
             with db._engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
-
             st.success("Database connection validated!")
-            return db, server
-
+            return db, tunnel_process
         except Exception as e:
             if attempt == max_retries - 1:
-                st.error(
-                    f"Database connection failed after {max_retries} attempts: {str(e)}")
-                server.stop()  # Use stop() to close the tunnel properly
+                st.error(f"Database connection failed after {max_retries} attempts: {str(e)}")
+                if tunnel_process:
+                    tunnel_process.terminate()
                 raise
-            logging.warning(
-                f"Connection attempt {attempt+1} failed, retrying in {delay} seconds...")
-            st.warning(
-                f"Connection attempt {attempt+1} failed, retrying in {delay} seconds...")
+            logging.warning(f"Connection attempt {attempt+1} failed, retrying in {delay} seconds...")
+            st.warning(f"Connection attempt {attempt+1} failed, retrying in {delay} seconds...")
             time.sleep(delay)
-            delay *= 2  # double the delay for next retry
+            delay *= 2  # Double the delay for next retry
 
+# Rest of the code remains unchanged
+def validate_sql_query(query: str) -> str:
+    return re.sub(r"\\_", "_", query)
 
 def get_sql_chain(db):
     template = """
@@ -209,8 +181,7 @@ Return ONLY the final SQL query without any explanations or formatting.
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
 
     return (
-        RunnablePassthrough.assign(
-            schema=lambda _: json.dumps(db.get_table_info, indent=2))
+        RunnablePassthrough.assign(schema=lambda _: json.dumps(db.get_table_info, indent=2))
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
             question=lambda x: x["question"],
@@ -220,7 +191,6 @@ Return ONLY the final SQL query without any explanations or formatting.
         | ChatGroq(model=aggregator_model, temperature=0, api_key=os.getenv("GROQ_API_KEY"))
         | StrOutputParser()
     )
-
 
 def get_response(user_query: str, db: SQLDatabase, chat_history: list):
     sql_chain = get_sql_chain(db)
@@ -293,7 +263,6 @@ Return ONLY the final response without any metadata or explanations.
         "chat_history": chat_history,
     })
 
-
 def main():
     st.set_page_config(page_title="SCC School Store",
                        page_icon=":speech_balloon:", layout="wide")
@@ -323,13 +292,12 @@ def main():
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/SCC.png", use_container_width=True)
 
-        if 'db' not in st.session_state or 'tunnel' not in st.session_state:
+        if 'db' not in st.session_state or 'tunnel_process' not in st.session_state:
             try:
                 with st.spinner("Establishing secure connection..."):
-                    db, tunnel = init_database_via_ssh()
+                    db, tunnel_process = init_database_via_ssh()
                     st.session_state.db = db
-                    st.session_state.tunnel = tunnel
-
+                    st.session_state.tunnel_process = tunnel_process
             except Exception as e:
                 st.error(f"""
                 **Critical Connection Failure**
@@ -341,8 +309,8 @@ def main():
                 3. Confirm database credentials
                 4. Test network connectivity
                 """)
-                if 'tunnel' in st.session_state:
-                    st.session_state.tunnel.stop()
+                if 'tunnel_process' in st.session_state:
+                    st.session_state.tunnel_process.terminate()
                 st.stop()
 
         questions = [
@@ -391,10 +359,9 @@ def main():
         with st.chat_message("AI"):
             st.markdown(response)
 
-    # Cleanup on app exit
-    if 'tunnel' in st.session_state:
-        st.session_state.tunnel.stop()
-
+    # Optional cleanup (typically handled by Codespaces shutdown)
+    # if 'tunnel_process' in st.session_state:
+    #     st.session_state.tunnel_process.terminate()
 
 if __name__ == "__main__":
     main()
