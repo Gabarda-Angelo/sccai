@@ -1,7 +1,4 @@
-import time
-import logging
-import json
-from dotenv import load_dotenv
+# app.py
 import os
 import re
 import streamlit as st
@@ -263,9 +260,24 @@ Return ONLY the final response without any metadata or explanations.
         "chat_history": chat_history,
     })
 
+# Function to load the header HTML from header.php
+def load_header():
+    try:
+        with open("..header.php", "r", encoding="utf-8") as f:
+            header_html = f.read()
+        # If needed, you can extract only a portion of header_html.
+        return header_html
+    except Exception as e:
+        return f"<!-- Error loading header.php: {e} -->"
+
+# Main Streamlit app
 def main():
-    st.set_page_config(page_title="SCC School Store",
-                       page_icon=":speech_balloon:", layout="wide")
+    st.set_page_config(page_title="SCC School Store", page_icon=":speech_balloon:", layout="wide")
+    
+    # Display the header component from header.php
+    header_html = load_header()
+    st.markdown(header_html, unsafe_allow_html=True)
+    
     st.title("Chat with SCC School Store AI")
 
     st.markdown(""" 

@@ -22,13 +22,13 @@ if (!$invoice) {
     die("Invoice not found");
 }
 
-// Create PDF object and generate the invoice
-$pdf = new FPDF('P','mm', array(80,200));
+// Create PDF object (custom size: 80 x 200 mm)
+$pdf = new FPDF('P', 'mm', array(80,200));
 $pdf->AddPage();
 
-// Header
+// ----- Header -----
 $pdf->SetFont('Arial', 'B', 16);
-$pdf->Cell(60, 8, 'SCHOOL STORE', 1, 1, 'C');
+$pdf->Cell(60, 8, 'SCHOOL STORE', 0, 1, 'C');
 
 $pdf->SetFont('Arial', 'B', 8);
 $pdf->Cell(60, 5, 'Contact: (555) 123-4567', 0, 1, 'C');
@@ -36,31 +36,31 @@ $pdf->Cell(60, 5, 'Email: store@school.edu', 0, 1, 'C');
 $pdf->Line(7, 28, 72, 28);
 $pdf->Ln(2);
 
-// Invoice Info
-$pdf->SetFont('Arial','BI', 8);
+// ----- Invoice Information -----
+$pdf->SetFont('Arial', 'BI', 8);
 $pdf->Cell(20, 4, 'Bill No:', 0, 0);
-$pdf->SetFont('Courier','BI', 8);
+$pdf->SetFont('Courier', 'BI', 8);
 $pdf->Cell(40, 4, $invoice->invoice_id, 0, 1);
 
-$pdf->SetFont('Arial','BI', 8);
+$pdf->SetFont('Arial', 'BI', 8);
 $pdf->Cell(20, 4, 'Date:', 0, 0);
-$pdf->SetFont('Courier','BI', 8);
+$pdf->SetFont('Courier', 'BI', 8);
 $pdf->Cell(40, 4, $invoice->order_date . ' ' . $invoice->order_time, 0, 1);
 
-$pdf->SetFont('Arial','BI', 8);
+$pdf->SetFont('Arial', 'BI', 8);
 $pdf->Cell(20, 4, 'Cashier:', 0, 0);
-$pdf->SetFont('Courier','BI', 8);
+$pdf->SetFont('Courier', 'BI', 8);
 $pdf->Cell(40, 4, $invoice->first_name . ' ' . $invoice->last_name, 0, 1);
 
-// Table Header
-$pdf->SetX(7);
-$pdf->SetFont('Courier', 'B', 8);
-$pdf->Cell(34,5, 'PRODUCT', 1, 0, 'C');
-$pdf->Cell(11,5, 'QTY', 1, 0, 'C');
-$pdf->Cell(14,5, 'PRICE', 1, 0, 'C');
-$pdf->Cell(14,5, 'TOTAL', 1, 1, 'C');
+$pdf->SetFont('Arial', 'BI', 8);
+$pdf->Cell(20, 4, 'Payment:', 0, 0);
+$pdf->SetFont('Courier', 'BI', 8);
+$pdf->Cell(40, 4, $invoice->payment_type, 0, 1);
 
-// Invoice Items
+$pdf->Ln(3);
+
+// ----- Invoice Items (Plain Text List) -----
+$pdf->SetFont('Helvetica', '', 8);
 $itemsQuery = $pdo->prepare("
     SELECT d.*, p.product_name 
     FROM invoice_details d
@@ -70,62 +70,56 @@ $itemsQuery = $pdo->prepare("
 $itemsQuery->execute([':id' => $id]);
 
 while ($item = $itemsQuery->fetch(PDO::FETCH_OBJ)) {
-    $pdf->SetX(7);
-    $pdf->SetFont('Helvetica','', 8);
-    $pdf->Cell(34,5, substr($item->product_name, 0, 20), 1, 0, 'L');
-    $pdf->Cell(11,5, $item->quantity, 1, 0, 'C');
-    $pdf->Cell(14,5, number_format($item->unit_price, 2), 1, 0, 'C');
-    $pdf->Cell(14,5, number_format($item->total_price, 2), 1, 1, 'C');
+    $line  = substr($item->product_name, 0, 20);
+    $line .= " | Qty: " . $item->quantity;
+    $line .= " | Price: " . number_format($item->unit_price, 2);
+    $line .= " | Total: " . number_format($item->total_price, 2);
+    $pdf->MultiCell(65, 4, $line, 0, 'L');
 }
 
-// Calculations
+$pdf->Ln(2);
+
+// ----- Totals (Plain Text) -----
+$pdf->SetFont('Courier', 'B', 8);
+$pdf->Cell(40, 4, 'SUBTOTAL:', 0, 0, 'L');
+$pdf->Cell(25, 4, number_format($invoice->subtotal, 2), 0, 1, 'R');
+
 $discountAmount = $invoice->subtotal * ($invoice->discount / 100);
+$pdf->Cell(40, 4, 'DISCOUNT (' . $invoice->discount . '%):', 0, 0, 'L');
+$pdf->Cell(25, 4, number_format($discountAmount, 2), 0, 1, 'R');
 
-// Totals
-$pdf->SetX(7);
-$pdf->SetFont('Courier','B',8);
-$pdf->Cell(45,5,'SUBTOTAL',1,0,'C');
-$pdf->Cell(20,5, number_format($invoice->subtotal,2), 1, 1, 'C');
+$pdf->Cell(40, 4, 'TOTAL:', 0, 0, 'L');
+$pdf->Cell(25, 4, number_format($invoice->total, 2), 0, 1, 'R');
 
-$pdf->SetX(7);
-$pdf->Cell(45,5, 'DISCOUNT ('.$invoice->discount.'%)', 1,0,'C');
-$pdf->Cell(20,5, number_format($discountAmount,2), 1, 1, 'C');
+$pdf->Cell(40, 4, 'PAID:', 0, 0, 'L');
+$pdf->Cell(25, 4, number_format($invoice->paid, 2), 0, 1, 'R');
 
-$pdf->SetX(7);
-$pdf->Cell(45,5,'TOTAL',1,0,'C');
-$pdf->Cell(20,5, number_format($invoice->total,2), 1, 1, 'C');
+$pdf->Cell(40, 4, 'BALANCE DUE:', 0, 0, 'L');
+$pdf->Cell(25, 4, number_format($invoice->due, 2), 0, 1, 'R');
 
-$pdf->SetX(7);
-$pdf->Cell(45,5,'PAID',1,0,'C');
-$pdf->Cell(20,5, number_format($invoice->paid,2), 1, 1, 'C');
-
-$pdf->SetX(7);
-$pdf->Cell(45,5,'BALANCE DUE',1,0,'C');
-$pdf->Cell(20,5, number_format($invoice->due,2), 1, 1, 'C');
-
-// Footer
+// ----- Footer -----
 $pdf->Ln(3);
 $pdf->SetX(7);
-$pdf->SetFont('Arial','I',6);
-$pdf->MultiCell(65,3, "Thank you for your purchase!\nReturns accepted within 7 days with receipt", 0, 'C');
+$pdf->SetFont('Arial', 'I', 6);
+$pdf->MultiCell(65, 3, "Thank you for your purchase!\nReturns accepted within 7 days with receipt", 0, 'C');
 
-// Instead of outputting the PDF directly, capture the PDF data as a string
-$pdfString = $pdf->Output('S', 'invoice_'.$id.'.pdf');
+// Capture PDF as string and encode it for embedding
+$pdfString = $pdf->Output('S', 'invoice_' . $invoice->invoice_id . '.pdf');
 $base64PDF = base64_encode($pdfString);
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Invoice #<?= $invoice->invoice_id ?></title>
-    <!-- Include Bootstrap CSS if not already available -->
-    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-    <style>
-        body { margin: 20px; }
-        .pdf-container { width: 100%; height: 90vh; }
-    </style>
+  <meta charset="UTF-8">
+  <title>Invoice #<?= $invoice->invoice_id ?></title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Optional Bootstrap CSS for styling -->
+  <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+  <style>
+      body { margin: 20px; }
+      .pdf-container { width: 100%; height: 90vh; }
+  </style>
 </head>
 <body>
 <div class="container">
@@ -134,7 +128,6 @@ $base64PDF = base64_encode($pdfString);
         <!-- Embed the PDF using a data URI -->
         <embed src="data:application/pdf;base64,<?= $base64PDF ?>" type="application/pdf" width="100%" height="100%">
     </div>
-    <!-- Go Back Button (adjust the href as needed, e.g., pos.php or orderlist.php) -->
     <a href="pos.php" class="btn btn-primary">Go Back</a>
 </div>
 </body>
