@@ -8,7 +8,12 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 
 # Access secrets from Streamlit Cloud
-API_URL = st.secrets["API_URL"]  # e.g., "https://bookstoreadmin.shop/bookstoreapi.php"
+try:
+    API_URL = st.secrets["API_URL"]
+except KeyError:
+    st.error(
+        "Missing API_URL secret. Please add it in the Streamlit Cloud app settings.")
+    st.stop()
 API_KEY = st.secrets["API_KEY"]  # e.g., "x7k9p2m4q8v3n6t1j5"
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
@@ -22,6 +27,8 @@ proposal_models = [
 aggregator_model = "llama3-70b-8192"
 
 # Function to fetch data from API
+
+
 def fetch_data_from_api(action, params=None):
     try:
         payload = {"action": action, "key": API_KEY}
@@ -40,6 +47,8 @@ def fetch_data_from_api(action, params=None):
         return None
 
 # Mixture of Agents: SQL query generation
+
+
 def get_sql_chain():
     template = """
     You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
@@ -65,7 +74,8 @@ def get_sql_chain():
     """
     prompt = ChatPromptTemplate.from_template(template)
 
-    proposal_llms = [ChatGroq(model=model, temperature=0, api_key=GROQ_API_KEY) for model in proposal_models]
+    proposal_llms = [ChatGroq(
+        model=model, temperature=0, api_key=GROQ_API_KEY) for model in proposal_models]
 
     proposal_chain = RunnableParallel(
         **{f"proposal_{i}": prompt | llm | StrOutputParser() for i, llm in enumerate(proposal_llms)}
@@ -105,10 +115,14 @@ def get_sql_chain():
     )
 
 # Function to get response via API
+
+
 def get_response(user_query: str, chat_history: list):
     sql_chain = get_sql_chain()
-    query = sql_chain.invoke({"question": user_query, "chat_history": chat_history})
-    st.write(f"Generated SQL Query: {query}")  # Debugging, remove in production
+    query = sql_chain.invoke(
+        {"question": user_query, "chat_history": chat_history})
+    # Debugging, remove in production
+    st.write(f"Generated SQL Query: {query}")
 
     # Send the generated query to the API
     data = fetch_data_from_api("execute_query", {"query": query})
@@ -128,7 +142,8 @@ def get_response(user_query: str, chat_history: list):
         response_prompt = ChatPromptTemplate.from_template(response_template)
 
         chain = (
-            RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
+            RunnablePassthrough.assign(
+                response=lambda _: json.dumps(data, indent=2))
             | response_prompt
             | ChatGroq(model=aggregator_model, temperature=0.2, api_key=GROQ_API_KEY)
             | StrOutputParser()
@@ -141,8 +156,11 @@ def get_response(user_query: str, chat_history: list):
     return "Sorry, I couldn’t retrieve the data. Please try again."
 
 # Streamlit UI
+
+
 def main():
-    st.set_page_config(page_title="SCC School Store", page_icon=":speech_balloon:", layout="wide")
+    st.set_page_config(page_title="SCC School Store",
+                       page_icon=":speech_balloon:", layout="wide")
     st.title("Chat with SCC School Store AI")
 
     st.markdown("""
@@ -162,7 +180,8 @@ def main():
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
-            AIMessage(content="Hello! I'm a SCC School Store assistant. Ask me anything about your store."),
+            AIMessage(
+                content="Hello! I'm a SCC School Store assistant. Ask me anything about your store."),
         ]
 
     with st.sidebar:
@@ -182,12 +201,15 @@ def main():
         st.markdown("### Quick Queries")
         for question in questions:
             if st.button(question):
-                st.session_state.chat_history.append(HumanMessage(content=question))
+                st.session_state.chat_history.append(
+                    HumanMessage(content=question))
                 with st.chat_message("Human"):
                     st.markdown(question)
                 with st.spinner("Generating response..."):
-                    response = get_response(question, st.session_state.chat_history)
-                st.session_state.chat_history.append(AIMessage(content=response))
+                    response = get_response(
+                        question, st.session_state.chat_history)
+                st.session_state.chat_history.append(
+                    AIMessage(content=response))
                 with st.chat_message("AI"):
                     st.markdown(response)
 
@@ -211,6 +233,7 @@ def main():
         st.session_state.chat_history.append(AIMessage(content=response))
         with st.chat_message("AI"):
             st.markdown(response)
+
 
 if __name__ == "__main__":
     main()
