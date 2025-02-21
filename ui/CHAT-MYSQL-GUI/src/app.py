@@ -7,7 +7,17 @@ from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 
-# Access secrets from Streamlit Cloud
+# Access secrets from Streamlit Cloud 
+
+
+import streamlit as st
+
+if "API_URL" in st.secrets:
+    st.write("API_URL is set")
+else:
+    st.write("API_URL is not set")
+
+
 try:
     API_URL = st.secrets["API_URL"]
 except KeyError:
