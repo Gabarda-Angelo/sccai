@@ -1,10 +1,6 @@
 import time
 import logging
 import json
-from dotenv import load_dotenv
-import os
-import re
-import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
@@ -15,6 +11,9 @@ import subprocess
 import threading
 import socket
 from sqlalchemy import text
+import os
+import re
+import streamlit as st
 
 # Configure logging
 logging.basicConfig(
@@ -25,13 +24,6 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
-
-
-# Load environment variables
-# Load .env if it exists locally, otherwise rely on Streamlit secrets
-load_dotenv()  # Looks for .env in current directory
-print("DEBUG: SSH_PRIVATE_KEY =", os.getenv("SSH_PRIVATE_KEY")[:50] if os.getenv("SSH_PRIVATE_KEY") else "None")
 
 # Model configuration
 proposal_models = [
@@ -72,7 +64,6 @@ def init_database_via_ssh():
     ssh_username = os.getenv("SSH_USERNAME")
     ssh_key_path = "/tmp/id_rsa_sccstore"  # Temporary path for Streamlit Cloud
     ssh_key_content = os.getenv("SSH_PRIVATE_KEY")
-    ssh_key_password = os.getenv("SSH_PRIVATE_KEY_PASSWORD") or None
     db_user = os.getenv("DB_USER")
     db_password = os.getenv("DB_PASSWORD")
     db_name = os.getenv("DB_NAME")
@@ -94,9 +85,6 @@ def init_database_via_ssh():
             f"{ssh_username}@{ssh_host}",
             "-N"
         ]
-        if ssh_key_password:
-            tunnel_cmd.insert(1, "-o")
-            tunnel_cmd.insert(2, f"PasswordAuthentication={ssh_key_password}")
         tunnel_process = subprocess.Popen(tunnel_cmd)
         tunnel_process.wait()
 
@@ -317,7 +305,7 @@ def main():
                 {str(e)}
                 
                 Troubleshooting steps:
-                1. Verify SSH credentials in .env file or Streamlit Cloud secrets
+                1. Verify SSH credentials in secrets
                 2. Check server firewall settings
                 3. Confirm database credentials
                 4. Test network connectivity
