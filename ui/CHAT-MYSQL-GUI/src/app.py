@@ -10,7 +10,9 @@ from langchain_groq import ChatGroq
 # Access secrets from Streamlit Cloud 
 
 
-import streamlit as st
+import streamlit as st 
+
+st.write("All available secrets:", list(st.secrets.keys()))
 
 if "API_URL" in st.secrets:
     st.write("API_URL is set")
