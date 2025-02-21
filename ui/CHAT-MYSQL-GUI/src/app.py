@@ -12,6 +12,15 @@ from langchain_groq import ChatGroq
 
 import streamlit as st 
 
+
+# Add at the top of app.py after imports
+st.write("Verified Secrets:", {
+    "API_URL_EXISTS": "API_URL" in st.secrets,
+    "API_KEY_EXISTS": "API_KEY" in st.secrets,
+    "GROQ_EXISTS": "GROQ_API_KEY" in st.secrets
+})
+
+
 st.write("All available secrets:", list(st.secrets.keys()))
 
 if "API_URL" in st.secrets:
