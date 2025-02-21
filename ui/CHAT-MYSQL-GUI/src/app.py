@@ -29,7 +29,8 @@ logging.basicConfig(
 
 
 # Load environment variables
-load_dotenv("/workspaces/sccai/.env", override=True)
+# Load .env if it exists locally, otherwise rely on Streamlit secrets
+load_dotenv()  # Looks for .env in current directory
 print("DEBUG: SSH_PRIVATE_KEY =", os.getenv("SSH_PRIVATE_KEY")[:50] if os.getenv("SSH_PRIVATE_KEY") else "None")
 
 # Model configuration
