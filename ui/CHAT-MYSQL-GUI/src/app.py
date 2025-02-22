@@ -11,14 +11,12 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 
 def main():
-    # Initialize page config
     st.set_page_config(
         page_title="AcaSquad AI",
         page_icon=":speech_balloon:",
         layout="wide"
     )
 
-    # UI Components
     st.title("Chat with our AcaSquad AI")
     st.markdown("""
     <style>
@@ -33,16 +31,13 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # Chat history initialization
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
             AIMessage(content="Hello! I will be your assistant. Ask me anything about your store."),
         ]
 
-    # Sidebar components
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
-
         quick_queries = [
             "What are the best-selling products?",
             "Show me the sales data for last month.",
@@ -53,16 +48,12 @@ def main():
             "How many products do we have?",
             "What are the product categories we have?"
         ]
-
         st.markdown("### Quick Queries")
         for q in quick_queries:
             if st.button(q):
                 handle_query(q)
 
-    # Display chat history
     display_chat_history()
-
-    # User input handling
     user_query = st.chat_input("Type a message...")
     if user_query:
         handle_query(user_query)
@@ -84,7 +75,11 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            # Debugging: Show raw data and DataFrame
+            st.write("DEBUG: Raw Data:", data)
+            st.write("DEBUG: DataFrame:", df)
             chart_type, columns = determine_chart_type(query, df)
+            st.write(f"DEBUG: Chart Type: {chart_type}, Columns: {columns}")
             if chart_type:
                 st.markdown(f"### {chart_type.capitalize()} Chart")
                 try:
@@ -97,7 +92,7 @@ def handle_query(query: str):
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         st.pyplot(fig)
                 except Exception as e:
-                    st.write("Unable to display chart.")
+                    st.write(f"Chart rendering failed: {str(e)}")
             # Display table if data is structured
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
@@ -142,7 +137,6 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
             error_msg = data.get('error', 'Unknown error')
             st.error(f"API Error: {error_msg}")
             return None
-
     except requests.RequestException as e:
         st.error(f"Connection error: {str(e)}")
         return None
@@ -237,7 +231,6 @@ def get_response(user_query: str, chat_history: list):
         "chat_history": chat_history
     })
 
-    # Clean and validate SQL query
     query = raw_query.split(";")[0] + ";"
     query = query.replace("```sql", "").replace("```", "").strip()
     query = "\n".join([line for line in query.split("\n")
@@ -282,39 +275,41 @@ def get_response(user_query: str, chat_history: list):
     return natural_response, data
 
 def determine_chart_type(query, df):
-    if df.empty:
+    if df.empty or len(df.columns) < 2:
         return None, None
 
     columns = df.columns.tolist()
+    query_lower = query.lower()
 
-    # Check for date columns
+    # Convert potential numeric columns to numeric type
+    for col in columns:
+        df[col] = pd.to_numeric(df[col], errors='ignore')
+
+    # Identify date, numerical, and categorical columns
     date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
-
-    # Check for numerical columns
-    numerical_columns = df.select_dtypes(include=['number']).columns.tolist()
-
-    # Check for categorical columns
+    numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
-    # Keyword hints in query
-    query_lower = query.lower()
-    if any(word in query_lower for word in ['over time', 'trend', 'monthly', 'daily']):
-        if date_columns and numerical_columns:
-            return 'line', (date_columns[0], numerical_columns[0])
-    elif any(word in query_lower for word in ['distribution', 'share', 'percentage']):
-        if categorical_columns and numerical_columns:
-            total = df[numerical_columns[0]].sum()
-            if abs(total - 100) < 1e-6 or 'percent' in numerical_columns[0].lower():
-                return 'pie', (categorical_columns[0], numerical_columns[0])
-    elif any(word in query_lower for word in ['top', 'best', 'most', 'ranking']):
-        if categorical_columns and numerical_columns:
-            return 'bar', (categorical_columns[0], numerical_columns[0])
+    # Debugging: Show column types
+    st.write(f"DEBUG: Date Columns: {date_columns}")
+    st.write(f"DEBUG: Numerical Columns: {numerical_columns}")
+    st.write(f"DEBUG: Categorical Columns: {categorical_columns}")
 
-    # Default checks
-    if date_columns and numerical_columns:
+    # Chart type determination
+    if any(word in query_lower for word in ['over time', 'trend', 'monthly', 'daily']) and date_columns and numerical_columns:
         return 'line', (date_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
+    elif any(word in query_lower for word in ['distribution', 'share', 'percentage']) and categorical_columns and numerical_columns:
+        total = df[numerical_columns[0]].sum()
+        if total > 0:  # Ensure there's meaningful data for a pie chart
+            return 'pie', (categorical_columns[0], numerical_columns[0])
+    elif any(word in query_lower for word in ['top', 'best', 'most', 'ranking']) and categorical_columns and numerical_columns:
         return 'bar', (categorical_columns[0], numerical_columns[0])
+
+    # Default: Try bar chart if we have categorical and numerical data
+    if categorical_columns and numerical_columns:
+        return 'bar', (categorical_columns[0], numerical_columns[0])
+    elif date_columns and numerical_columns:
+        return 'line', (date_columns[0], numerical_columns[0])
 
     return None, None
 
