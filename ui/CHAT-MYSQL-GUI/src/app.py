@@ -60,7 +60,7 @@ def main():
 
 def handle_query(query: str):
     st.session_state.chat_history.append(HumanMessage(content=query))
-    with st.chat_message("Human"):
+    with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
 
     with st.spinner("Analyzing your query..."):
@@ -71,15 +71,11 @@ def handle_query(query: str):
             data = None
 
     st.session_state.chat_history.append(AIMessage(content=natural_response))
-    with st.chat_message("AI"):
+    with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
-            # Debugging: Show raw data and DataFrame
-            st.write("DEBUG: Raw Data:", data)
-            st.write("DEBUG: DataFrame:", df)
             chart_type, columns = determine_chart_type(query, df)
-            st.write(f"DEBUG: Chart Type: {chart_type}, Columns: {columns}")
             if chart_type:
                 st.markdown(f"### {chart_type.capitalize()} Chart")
                 try:
@@ -100,10 +96,10 @@ def handle_query(query: str):
 def display_chat_history():
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
-            with st.chat_message("AI"):
+            with st.chat_message("AI", avatar="dist/img/ai.png"):
                 st.markdown(message.content)
         elif isinstance(message, HumanMessage):
-            with st.chat_message("Human"):
+            with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
 
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
@@ -289,11 +285,6 @@ def determine_chart_type(query, df):
     date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
-
-    # Debugging: Show column types
-    st.write(f"DEBUG: Date Columns: {date_columns}")
-    st.write(f"DEBUG: Numerical Columns: {numerical_columns}")
-    st.write(f"DEBUG: Categorical Columns: {categorical_columns}")
 
     # Chart type determination
     if any(word in query_lower for word in ['over time', 'trend', 'monthly', 'daily']) and date_columns and numerical_columns:
