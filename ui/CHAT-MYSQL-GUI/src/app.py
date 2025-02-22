@@ -37,10 +37,8 @@ def main():
     st.markdown("""
     <style>
     .stChatInput {
-        position: fixed;
-        bottom: 0;
-        width: 100%;
-        background-color: white;
+        bottom: 20px;  /* Adjust this value to move it up or down */
+        left: 10%;     /* Center it horizontally by offsetting from the left */
         z-index: 1000;
     }
     .stChatMessage {
