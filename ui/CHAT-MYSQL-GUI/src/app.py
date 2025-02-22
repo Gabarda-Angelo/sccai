@@ -69,7 +69,7 @@ def main():
 
 def handle_query(query: str):
     st.session_state.chat_history.append(HumanMessage(content=query))
-    with st.chat_message("Human", avatar="../dist/img/Human.png"):
+    with st.chat_message("Human"):
         st.markdown(query)
 
     with st.spinner("Analyzing your query..."):
@@ -80,7 +80,7 @@ def handle_query(query: str):
             data = None
 
     st.session_state.chat_history.append(AIMessage(content=natural_response))
-    with st.chat_message("AI", avatar="../dist/img/ai.png"):
+    with st.chat_message("AI"):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
@@ -105,10 +105,10 @@ def handle_query(query: str):
 def display_chat_history():
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
-            with st.chat_message("AI", avatar="../dist/img/ai.png"):
+            with st.chat_message("AI"):
                 st.markdown(message.content)
         elif isinstance(message, HumanMessage):
-            with st.chat_message("Human", avatar="../dist/img/Human.png"):
+            with st.chat_message("Human"):
                 st.markdown(message.content)
 
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
