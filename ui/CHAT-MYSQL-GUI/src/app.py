@@ -38,6 +38,15 @@ def main():
 
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
+        # Back button to redirect to the specified URL
+        st.markdown("""
+        <a href="https://bookstoreadmin.shop/ui/pos.php" target="_self" style="text-decoration: none;">
+            <button style="width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer;">
+                Back
+            </button>
+        </a>
+        """, unsafe_allow_html=True)
+        
         quick_queries = [
             "What are the best-selling products?",
             "Show me the sales data for last month.",
@@ -48,9 +57,6 @@ def main():
             "How many products do we have?",
             "What are the product categories we have?"
         ]
-        st.markdown("""
-    <button onclick="window.location.href='https://bookstoreadmin.shop/ui/pos.php';" style="background-color: #f63366; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer;">Back</button>
-    """, unsafe_allow_html=True)
         st.markdown("### Quick Queries")
         for q in quick_queries:
             if st.button(q):
