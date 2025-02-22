@@ -75,6 +75,7 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            # Debugging: Show raw data and DataFrame
             st.write("DEBUG: Raw Data:", data)
             st.write("DEBUG: DataFrame:", df)
             chart_type, columns = determine_chart_type(query, df)
@@ -85,7 +86,6 @@ def handle_query(query: str):
                     if chart_type == 'bar':
                         st.bar_chart(df.set_index(columns[0])[columns[1]])
                     elif chart_type == 'line':
-                        df[columns[0]] = pd.to_datetime(df[columns[0]], errors='coerce')
                         st.line_chart(df.set_index(columns[0])[columns[1]])
                     elif chart_type == 'pie':
                         fig, ax = plt.subplots()
@@ -93,6 +93,7 @@ def handle_query(query: str):
                         st.pyplot(fig)
                 except Exception as e:
                     st.write(f"Chart rendering failed: {str(e)}")
+            # Display table if data is structured
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
 
@@ -130,7 +131,7 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
             st.error(f"Invalid JSON response: {response.text[:200]}...")
             return None
 
-        if data.get("status") == "success"):
+        if data.get("status") == "success":
             return data["data"]
         else:
             error_msg = data.get('error', 'Unknown error')
@@ -280,34 +281,35 @@ def determine_chart_type(query, df):
     columns = df.columns.tolist()
     query_lower = query.lower()
 
-    # Convert potential numeric and date columns
+    # Convert potential numeric columns to numeric type
     for col in columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
-        if 'date' in col.lower():
-            df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    date_columns = [col for col in columns if pd.api.types.is_datetime64_any_dtype(df[col])]
+    # Identify date, numerical, and categorical columns
+    date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    categorical_columns = df.select_dtypes(exclude=['int64', 'float64', 'datetime64']).columns.tolist()
+    categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
+    # Debugging: Show column types
     st.write(f"DEBUG: Date Columns: {date_columns}")
     st.write(f"DEBUG: Numerical Columns: {numerical_columns}")
     st.write(f"DEBUG: Categorical Columns: {categorical_columns}")
 
-    # Line chart: Time-based data
-    if date_columns and numerical_columns:
-        if any(word in query_lower for word in ['over time', 'trend', 'month', 'day', 'sales data']):
-            return 'line', (date_columns[0], numerical_columns[0])
-
-    # Pie chart: Proportional data
-    if categorical_columns and numerical_columns:
-        if any(word in query_lower for word in ['distribution', 'share', 'percentage', 'categories']):
+    # Chart type determination
+    if any(word in query_lower for word in ['over time', 'trend', 'monthly', 'daily']) and date_columns and numerical_columns:
+        return 'line', (date_columns[0], numerical_columns[0])
+    elif any(word in query_lower for word in ['distribution', 'share', 'percentage']) and categorical_columns and numerical_columns:
+        total = df[numerical_columns[0]].sum()
+        if total > 0:  # Ensure there's meaningful data for a pie chart
             return 'pie', (categorical_columns[0], numerical_columns[0])
+    elif any(word in query_lower for word in ['top', 'best', 'most', 'ranking']) and categorical_columns and numerical_columns:
+        return 'bar', (categorical_columns[0], numerical_columns[0])
 
-    # Bar chart: Categorical comparison
+    # Default: Try bar chart if we have categorical and numerical data
     if categorical_columns and numerical_columns:
-        if any(word in query_lower for word in ['top', 'best', 'most', 'ranking']) or True:  # Default to bar
-            return 'bar', (categorical_columns[0], numerical_columns[0])
+        return 'bar', (categorical_columns[0], numerical_columns[0])
+    elif date_columns and numerical_columns:
+        return 'line', (date_columns[0], numerical_columns[0])
 
     return None, None
 
