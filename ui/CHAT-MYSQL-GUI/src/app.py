@@ -1,6 +1,8 @@
 import streamlit as st
 import requests
 import json
+import pandas as pd
+import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -80,9 +82,25 @@ def handle_query(query: str):
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI"):
         st.markdown(natural_response)
-        # Display table if data is structured (multiple rows or columns)
-        if data and isinstance(data, list) and len(data) >= 1 and (len(data) > 1 or len(data[0].keys()) > 1):
-            st.table(data)
+        if data and isinstance(data, list) and len(data) >= 1:
+            df = pd.DataFrame(data)
+            chart_type, columns = determine_chart_type(query, df)
+            if chart_type:
+                st.markdown(f"### {chart_type.capitalize()} Chart")
+                try:
+                    if chart_type == 'bar':
+                        st.bar_chart(df.set_index(columns[0])[columns[1]])
+                    elif chart_type == 'line':
+                        st.line_chart(df.set_index(columns[0])[columns[1]])
+                    elif chart_type == 'pie':
+                        fig, ax = plt.subplots()
+                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                        st.pyplot(fig)
+                except Exception as e:
+                    st.write("Unable to display chart.")
+            # Display table if data is structured
+            if len(df) > 1 or len(df.columns) > 1:
+                st.table(df)
 
 def display_chat_history():
     for message in st.session_state.chat_history:
@@ -262,6 +280,43 @@ def get_response(user_query: str, chat_history: list):
     })
 
     return natural_response, data
+
+def determine_chart_type(query, df):
+    if df.empty:
+        return None, None
+
+    columns = df.columns.tolist()
+
+    # Check for date columns
+    date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
+
+    # Check for numerical columns
+    numerical_columns = df.select_dtypes(include=['number']).columns.tolist()
+
+    # Check for categorical columns
+    categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
+
+    # Keyword hints in query
+    query_lower = query.lower()
+    if any(word in query_lower for word in ['over time', 'trend', 'monthly', 'daily']):
+        if date_columns and numerical_columns:
+            return 'line', (date_columns[0], numerical_columns[0])
+    elif any(word in query_lower for word in ['distribution', 'share', 'percentage']):
+        if categorical_columns and numerical_columns:
+            total = df[numerical_columns[0]].sum()
+            if abs(total - 100) < 1e-6 or 'percent' in numerical_columns[0].lower():
+                return 'pie', (categorical_columns[0], numerical_columns[0])
+    elif any(word in query_lower for word in ['top', 'best', 'most', 'ranking']):
+        if categorical_columns and numerical_columns:
+            return 'bar', (categorical_columns[0], numerical_columns[0])
+
+    # Default checks
+    if date_columns and numerical_columns:
+        return 'line', (date_columns[0], numerical_columns[0])
+    elif categorical_columns and numerical_columns:
+        return 'bar', (categorical_columns[0], numerical_columns[0])
+
+    return None, None
 
 if __name__ == "__main__":
     main()
