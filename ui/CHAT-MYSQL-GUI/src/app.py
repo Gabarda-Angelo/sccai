@@ -72,13 +72,17 @@ def handle_query(query: str):
 
     with st.spinner("Analyzing your query..."):
         try:
-            response = get_response(query, st.session_state.chat_history)
+            natural_response, data = get_response(query, st.session_state.chat_history)
         except Exception as e:
-            response = f"An error occurred: {str(e)}"
+            natural_response = f"An error occurred: {str(e)}"
+            data = None
 
-    st.session_state.chat_history.append(AIMessage(content=response))
+    st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI"):
-        st.markdown(response)
+        st.markdown(natural_response)
+        # Display table if data is structured (multiple rows or columns)
+        if data and isinstance(data, list) and len(data) >= 1 and (len(data) > 1 or len(data[0].keys()) > 1):
+            st.table(data)
 
 def display_chat_history():
     for message in st.session_state.chat_history:
@@ -208,7 +212,7 @@ def get_sql_chain():
         | StrOutputParser()
     )
 
-def get_response(user_query: str, chat_history: list) -> str:
+def get_response(user_query: str, chat_history: list):
     sql_chain = get_sql_chain()
     raw_query = sql_chain.invoke({
         "question": user_query,
@@ -223,11 +227,11 @@ def get_response(user_query: str, chat_history: list) -> str:
 
     if not query.lower().startswith("select"):
         st.error(f"Invalid query generated: {query}")
-        return "Failed to generate valid database query. Please try again."
+        return "Failed to generate valid database query. Please try again.", None
 
     data = fetch_data_from_api("execute_query", {"query": query})
     if not data:
-        return "Couldn't retrieve data. Please try again or rephrase your question."
+        return "Couldn't retrieve data. Please try again or rephrase your question.", None
 
     response_template = """
     Generate a natural language response based on:
@@ -242,6 +246,7 @@ def get_response(user_query: str, chat_history: list) -> str:
     4. Use bullet points for lists.
     5. Mention any data limitations.
     6. Keep under 200 words.
+    7. Use markdown formatting (e.g., **bold**, *italics*, - bullets) to enhance readability.
     """
 
     chain = (
@@ -251,10 +256,12 @@ def get_response(user_query: str, chat_history: list) -> str:
         | StrOutputParser()
     )
 
-    return chain.invoke({
+    natural_response = chain.invoke({
         "question": user_query,
         "chat_history": chat_history,
     })
+
+    return natural_response, data
 
 if __name__ == "__main__":
     main()
