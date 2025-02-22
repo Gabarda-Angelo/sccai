@@ -40,7 +40,7 @@ def main():
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
         # Back button to redirect to the specified URL
         st.markdown("""
-        <a href="https://bookstoreadmin.shop/ui/pos.php" target="_self" style="text-decoration: none;">
+        <a href="https://bookstoreadmin.shop/" target="_self" style="text-decoration: none;">
             <button style="width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer;">
                 Back
             </button>
