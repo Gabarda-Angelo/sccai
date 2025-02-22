@@ -57,7 +57,7 @@ def main():
 
     # Sidebar components
     with st.sidebar:
-        st.image("ui/CHAT-MYSQL-GUI/src/img/SCC.png", use_container_width=True)
+        st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
         
         questions = [
             "What are the best-selling products?",
