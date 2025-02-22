@@ -1,21 +1,22 @@
 import streamlit as st
 import requests
 import json
+from urllib.parse import quote  # Added for URL encoding
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 
-# Initialize page config first - critical for Streamlit
 def main():
+    # Initialize page config first
     st.set_page_config(
         page_title="SCC School Store",
         page_icon=":speech_balloon:",
         layout="wide"
     )
     
-    # Debugging section (can be removed after verification)
+    # Debugging section
     st.write("Secrets Verification:", {
         "API_URL": "API_URL" in st.secrets,
         "API_KEY": "API_KEY" in st.secrets,
@@ -30,15 +31,6 @@ def main():
     except KeyError as e:
         st.error(f"Missing required secret: {str(e)}")
         st.stop()
-
-    # Model configuration
-    proposal_models = [
-        "llama3-8b-8192",
-        "mixtral-8x7b-32768",
-        "llama3-70b-8192",
-        "gemma2-9b-it",
-    ]
-    aggregator_model = "llama3-70b-8192"
 
     # UI Components
     st.title("Chat with SCC School Store AI")
@@ -116,6 +108,9 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
     try:
         payload = {"action": action, "key": st.secrets["API_KEY"]}
         if params:
+            # URL encode the query parameter
+            if 'query' in params:
+                params['query'] = quote(params['query'])
             payload.update(params)
         
         response = requests.get(
@@ -215,7 +210,8 @@ def get_response(user_query: str, chat_history: list) -> str:
         "chat_history": chat_history
     })
     
-    # st.write(f"Generated SQL: {query}")  # Debugging
+    # Debugging: Uncomment to see generated SQL
+    # st.write(f"Generated SQL: {query}")
     
     data = fetch_data_from_api("execute_query", {"query": query})
     if not data:
