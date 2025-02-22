@@ -9,36 +9,20 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 
 def main():
-    # Initialize page config first
+    # Initialize page config
     st.set_page_config(
         page_title="AcaSquad AI",
         page_icon=":speech_balloon:",
         layout="wide"
     )
 
-    # Debugging section
-    if st.secrets.get("DEBUG_MODE", False):
-        st.write("Secrets Verification:", {
-            "API_URL": "API_URL" in st.secrets,
-            "API_KEY": "API_KEY" in st.secrets,
-            "GROQ_API_KEY": "GROQ_API_KEY" in st.secrets
-        })
-
-    try:
-        API_URL = st.secrets["API_URL"]
-        API_KEY = st.secrets["API_KEY"]
-        GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-    except KeyError as e:
-        st.error(f"Missing required secret: {str(e)}")
-        st.stop()
-
     # UI Components
     st.title("Chat with our AcaSquad AI")
     st.markdown("""
     <style>
     .stChatInput {
-        bottom: 20px;  /* Adjust this value to move it up or down */
-        left: 10%;     /* Center it horizontally by offsetting from the left */
+        bottom: 20px;
+        left: 10%;
         z-index: 1000;
     }
     .stChatMessage {
@@ -110,12 +94,9 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
         payload = {"action": action, "key": st.secrets["API_KEY"]}
         if params:
             if 'query' in params:
-                st.session_state.last_query = params['query']  # Store for debugging
+                st.session_state.last_query = params['query']
                 params['query'] = quote(params['query'])
             payload.update(params)
-        
-        if st.secrets.get("DEBUG_API", False):
-            st.write("Sending payload:", payload)
 
         response = requests.get(
             st.secrets["API_URL"],
@@ -123,7 +104,6 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
             timeout=15
         )
 
-        # Handle empty responses
         if not response.text.strip():
             st.error("Received empty response from API")
             return None
@@ -244,9 +224,6 @@ def get_response(user_query: str, chat_history: list) -> str:
     if not query.lower().startswith("select"):
         st.error(f"Invalid query generated: {query}")
         return "Failed to generate valid database query. Please try again."
-
-    if st.secrets.get("DEBUG_SQL", False):
-        st.write(f"Final SQL Query: ```sql\n{query}\n```")
 
     data = fetch_data_from_api("execute_query", {"query": query})
     if not data:
