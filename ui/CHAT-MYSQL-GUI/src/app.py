@@ -11,7 +11,7 @@ from langchain_groq import ChatGroq
 def main():
     # Initialize page config first
     st.set_page_config(
-        page_title="SCC School Store",
+        page_title="AcaSquad AI",
         page_icon=":speech_balloon:",
         layout="wide"
     )
@@ -33,7 +33,7 @@ def main():
         st.stop()
 
     # UI Components
-    st.title("Chat with SCC School Store AI")
+    st.title("Chat with our AcaSquad AI")
     st.markdown("""
     <style>
     .stChatInput {
@@ -50,12 +50,12 @@ def main():
     # Chat history initialization
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
-            AIMessage(content="Hello! I'm a SCC School Store assistant. Ask me anything about your store."),
+            AIMessage(content="Hello! I will be your assistant. Ask me anything about your store."),
         ]
 
     # Sidebar components
     with st.sidebar:
-        st.image("ui/CHAT-MYSQL-GUI/src/img/SCC.png", use_container_width=True)
+        st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
 
         quick_queries = [
             "What are the best-selling products?",
