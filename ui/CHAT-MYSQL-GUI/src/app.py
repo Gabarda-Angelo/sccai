@@ -48,6 +48,9 @@ def main():
             "How many products do we have?",
             "What are the product categories we have?"
         ]
+        st.markdown("""
+    <button onclick="window.location.href='https://bookstoreadmin.shop/ui/pos.php';" style="background-color: #f63366; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer;">Back</button>
+    """, unsafe_allow_html=True)
         st.markdown("### Quick Queries")
         for q in quick_queries:
             if st.button(q):
