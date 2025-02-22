@@ -33,7 +33,7 @@ def main():
         st.stop()
 
     # UI Components
-    st.title("Chat with SCC School Store AI")
+    st.title("Chat with AcaSquad AI")
     st.markdown("""
     <style>
     .stChatInput {
@@ -52,7 +52,7 @@ def main():
     # Initialize chat history
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
-            AIMessage(content="Hello! I'm a SCC School Store assistant. Ask me anything about your store."),
+            AIMessage(content="Hello! I'm a AcaSquad AI assistant. Ask me anything about your store."),
         ]
 
     # Sidebar components
