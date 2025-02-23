@@ -183,8 +183,9 @@ def get_sql_chain():
     - Filter data based on conditions mentioned in the question.
     - Order results if the question suggests a specific order.
     - Assume the most common interpretation if the question is ambiguous, and add a comment (e.g., -- Assuming...) in the query.
-    - For questions about who created an account, consider the 'created_at' and 'employee_id' fields.
+    - For questions about who created an account, consider the 'created_at' and 'employee_id' fields in the 'employees' table.
     - For sales inventory details, consider joining invoices, invoice_details, and products.
+    - Avoid referencing non-existent tables or columns, such as 'customers', as there is no customer data in the schema.
     - Provide only the SQL query as output, without explanations.
 
     **User Question:** {question}
@@ -244,14 +245,14 @@ def get_sql_chain():
 
 def get_response(user_query: str, chat_history: list):
     time_keywords = ["current time", "what time is it", "date and time", "today's date", "now", "time today", "date today"]
-    data_keywords = ["sales", "invoice", "details", "product", "category", "stock", "revenue", "order", "employee", "customer",
-                     "payment", "quantity", "price", "total", "subtotal", "discount", "due", "paid", "inventory",
+    data_keywords = ["sales", "invoice", "details", "product", "category", "stock", "revenue", "order", "employee", "payment",
+                     "quantity", "price", "total", "subtotal", "discount", "due", "paid", "inventory",
                      "log", "detail", "list", "show", "provide", "get", "fetch", "retrieve"]
 
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"Your Current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
@@ -294,6 +295,8 @@ def get_response(user_query: str, chat_history: list):
         6. Keep under 200 words.
         7. Use markdown formatting (e.g., **bold**, *italics*, - bullets) to enhance readability.
         8. When mentioning monetary values, use the peso sign (₱) instead of the dollar sign.
+        9. Avoid referencing non-existent data, such as 'customers', as there is no customer data in the schema.
+        10. For follow-up questions (e.g., "Why do you say so?"), reference the previous query and results from the conversation history.
         """
 
         chain = (
@@ -317,16 +320,13 @@ def determine_chart_type(query, df):
     columns = df.columns.tolist()
     query_lower = query.lower()
 
-    # Convert columns to numeric where possible
     for col in columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
 
-    # Identify date, numerical, and categorical columns
     date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
-    # Expanded keywords
     time_keywords = ['over time', 'trend', 'monthly', 'daily', 'weekly', 'yearly', 'history', 'progress']
     distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
     ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
@@ -340,13 +340,10 @@ def determine_chart_type(query, df):
     elif any(word in query_lower for word in ranking_keywords) and categorical_columns and numerical_columns:
         return 'bar', (categorical_columns[0], numerical_columns[0])
 
-    # Default to bar if categorical and numerical
     if categorical_columns and numerical_columns:
         return 'bar', (categorical_columns[0], numerical_columns[0])
-    # Default to line if date and numerical
     elif date_columns and numerical_columns:
         return 'line', (date_columns[0], numerical_columns[0])
-    # Default to pie if only numerical
     elif len(numerical_columns) >= 1 and len(categorical_columns) >= 1:
         return 'pie', (categorical_columns[0], numerical_columns[0])
 
