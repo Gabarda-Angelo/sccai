@@ -228,8 +228,11 @@ def get_sql_chain():
     )
 
 def get_response(user_query: str, chat_history: list):
-    # Check if the user is asking for the current date and time
-    if "date" in user_query.lower() and "time" in user_query.lower() and "today" in user_query.lower():
+    # Define keywords/phrases indicating a request for the current date and time
+    time_keywords = ["current time", "what time is it", "date and time", "today's date", "now", "time today", "date today"]
+    
+    # Check if the query contains any of these keywords (case-insensitive)
+    if any(keyword in user_query.lower() for keyword in time_keywords):
         from datetime import datetime
         import pytz
         singapore_tz = pytz.timezone('Asia/Singapore')
@@ -237,7 +240,7 @@ def get_response(user_query: str, chat_history: list):
         natural_response = f"The current date and time is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
-        # Existing logic for other queries
+        # Logic for other queries remains unchanged
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
             "question": user_query,
