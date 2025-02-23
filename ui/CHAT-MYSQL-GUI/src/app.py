@@ -39,6 +39,8 @@ def main():
             AIMessage(
                 content="Hello! I will be your assistant. Ask me anything about your store."),
         ]
+    if "user_query_input" not in st.session_state:
+        st.session_state.user_query_input = ""
 
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
@@ -153,14 +155,14 @@ def main():
                     st.rerun()
 
     display_chat_history()
-    
-    # Updated input section
-    user_query = st.text_input("Type your query", key="user_query_input")
-    if st.button("Send"):
-        if user_query:
-            handle_query(user_query)
-            st.session_state.user_query_input = ""
-            st.rerun()
+
+    # Updated input section without Send button
+    user_query = st.text_input("Type your query here and press Enter", key="user_query_input", value=st.session_state.user_query_input)
+    if user_query and user_query != st.session_state.get("last_submitted_query", ""):
+        handle_query(user_query)
+        st.session_state.last_submitted_query = user_query
+        st.session_state.user_query_input = ""  # Clear the input after submission
+        st.rerun()
 
 
 def handle_query(query: str):
