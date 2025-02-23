@@ -39,8 +39,6 @@ def main():
             AIMessage(
                 content="Hello! I will be your assistant. Ask me anything about your store."),
         ]
-    if "user_query_input" not in st.session_state:
-        st.session_state.user_query_input = ""
 
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
@@ -52,7 +50,7 @@ def main():
 
         st.markdown("### Quick Queries")
 
-        # Sales Performance
+        # Organized into expandable categories
         with st.expander("📈 Sales Performance", expanded=True):
             sales_queries = [
                 "What are the best-selling products of all time?",
@@ -69,10 +67,8 @@ def main():
             ]
             for q in sales_queries:
                 if st.button(q, key=f"sales_{q}"):
-                    st.session_state.user_query_input = q
-                    st.rerun()
+                    handle_query(q)
 
-        # Inventory Management
         with st.expander("📦 Inventory Management"):
             inventory_queries = [
                 "Which products are out of stock?",
@@ -86,10 +82,8 @@ def main():
             ]
             for q in inventory_queries:
                 if st.button(q, key=f"inv_{q}"):
-                    st.session_state.user_query_input = q
-                    st.rerun()
+                    handle_query(q)
 
-        # Employee Performance
         with st.expander("👥 Employee Performance"):
             employee_queries = [
                 "Who is the top-performing employee this month?",
@@ -101,10 +95,8 @@ def main():
             ]
             for q in employee_queries:
                 if st.button(q, key=f"emp_{q}"):
-                    st.session_state.user_query_input = q
-                    st.rerun()
+                    handle_query(q)
 
-        # Financial Insights
         with st.expander("💰 Financial Insights"):
             financial_queries = [
                 "Give me the sales invoices details for today.",
@@ -119,10 +111,8 @@ def main():
             ]
             for q in financial_queries:
                 if st.button(q, key=f"fin_{q}"):
-                    st.session_state.user_query_input = q
-                    st.rerun()
+                    handle_query(q)
 
-        # Store Operations
         with st.expander("🏪 Store Operations"):
             ops_queries = [
                 "What is the busiest hour of the day for sales?",
@@ -135,10 +125,8 @@ def main():
             ]
             for q in ops_queries:
                 if st.button(q, key=f"ops_{q}"):
-                    st.session_state.user_query_input = q
-                    st.rerun()
+                    handle_query(q)
 
-        # Miscellaneous Insights
         with st.expander("🔍 Miscellaneous Insights"):
             misc_queries = [
                 "What is the profit margin for [specific product]?",
@@ -151,18 +139,12 @@ def main():
             ]
             for q in misc_queries:
                 if st.button(q, key=f"misc_{q}"):
-                    st.session_state.user_query_input = q
-                    st.rerun()
+                    handle_query(q)
 
     display_chat_history()
-
-    # Updated input section without Send button
-    user_query = st.text_input("Type your query here and press Enter", key="user_query_input", value=st.session_state.user_query_input)
-    if user_query and user_query != st.session_state.get("last_submitted_query", ""):
+    user_query = st.chat_input("Type a message...")
+    if user_query:
         handle_query(user_query)
-        st.session_state.last_submitted_query = user_query
-        st.session_state.user_query_input = ""  # Clear the input after submission
-        st.rerun()
 
 
 def handle_query(query: str):
