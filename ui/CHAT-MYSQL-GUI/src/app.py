@@ -9,6 +9,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
+import datetime
+import pytz
 
 def main():
     st.set_page_config(
@@ -38,7 +40,6 @@ def main():
 
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
-        # Back button to redirect to the specified URL
         st.markdown("""
     <a href="https://bookstoreadmin.shop/ui/pos.php" target="_blank" style="display: inline-block; width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer; color:white; text-align:center; text-decoration: none;">
         Back
@@ -96,7 +97,6 @@ def handle_query(query: str):
                         st.pyplot(fig)
                 except Exception as e:
                     st.write(f"Chart rendering failed: {str(e)}")
-            # Display table if data is structured
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
 
@@ -160,12 +160,18 @@ def get_sql_chain():
     You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
     Based on the provided table schema, generate an accurate SQL query to answer the user's question.
 
-    Database Schema:
+    **Database Schema:**
     {schema}
 
-    Conversation History: {chat_history}
+    **Current date in Singapore:** {current_sg_date} (format: YYYY-MM-DD)
+    **Current datetime in Singapore:** {current_sg_datetime} (format: YYYY-MM-DD HH:MM:SS)
 
-    Instructions:
+    **Conversation History:** {chat_history}
+
+    **Instructions:**
+    - When the user mentions "today," use the current date in Singapore, e.g., WHERE order_date = '{current_sg_date}'.
+    - If the user specifies a time range up to the current time, use appropriate conditions, e.g., 
+      WHERE order_date < '{current_sg_date}' OR (order_date = '{current_sg_date}' AND order_time <= SUBSTRING('{current_sg_datetime}', 12, 8)).
     - Use appropriate joins when data from multiple tables is needed.
     - Consider foreign key relationships between tables.
     - Use aggregate functions (e.g., SUM, COUNT, AVG) if the question implies summarization.
@@ -174,7 +180,7 @@ def get_sql_chain():
     - Assume the most common interpretation if the question is ambiguous, and add a comment (e.g., -- Assuming...) in the query.
     - Provide only the SQL query as output, without explanations.
 
-    User Question: {question}
+    **User Question:** {question}
     """
 
     prompt = ChatPromptTemplate.from_template(template)
@@ -200,8 +206,8 @@ def get_sql_chain():
     Synthesize the best SQL query from these proposals:
     {proposals}
 
-    Original Question: {question}
-    Schema: {schema}
+    **Original Question:** {question}
+    **Schema:** {schema}
 
     Return ONLY the final SQL query without any explanations or formatting.
     The query must:
@@ -215,7 +221,9 @@ def get_sql_chain():
 
     return (
         RunnablePassthrough.assign(
-            schema=lambda _: schema
+            schema=lambda _: schema,
+            current_sg_date=lambda x: x["current_sg_date"],
+            current_sg_datetime=lambda x: x["current_sg_datetime"]
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -228,54 +236,71 @@ def get_sql_chain():
     )
 
 def get_response(user_query: str, chat_history: list):
-    sql_chain = get_sql_chain()
-    raw_query = sql_chain.invoke({
-        "question": user_query,
-        "chat_history": chat_history
-    })
+    time_keywords = ["current time", "what time is it", "date and time", "today's date", "now", "time today", "date today"]
+    data_keywords = ["sales", "invoice", "details", "product", "category", "stock", "revenue", "order", "employee", "customer",
+                     "payment", "quantity", "price", "total", "subtotal", "discount", "due", "paid", "inventory",
+                     "log", "detail", "list", "show", "provide", "get", "fetch", "retrieve"]
 
-    query = raw_query.split(";")[0] + ";"
-    query = query.replace("```sql", "").replace("```", "").strip()
-    query = "\n".join([line for line in query.split("\n")
-                      if not line.strip().startswith(("--", "#", "/*"))])
+    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        current_time = datetime.datetime.now(singapore_tz)
+        natural_response = f"Your current date and time is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        return natural_response, None
+    else:
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        now_sg = datetime.datetime.now(singapore_tz)
+        current_sg_date = now_sg.strftime('%Y-%m-%d')
+        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
-    if not query.lower().startswith("select"):
-        st.error(f"Invalid query generated: {query}")
-        return "Failed to generate valid database query. Please try again.", None
+        sql_chain = get_sql_chain()
+        raw_query = sql_chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+            "current_sg_date": current_sg_date,
+            "current_sg_datetime": current_sg_datetime
+        })
 
-    data = fetch_data_from_api("execute_query", {"query": query})
-    if not data:
-        return "Couldn't retrieve data. Please try again or rephrase your question.", None
+        query = raw_query.split(";")[0] + ";"
+        query = query.replace("```sql", "").replace("```", "").strip()
+        query = "\n".join([line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))])
 
-    response_template = """
-    Generate a natural language response based on:
-    - Question: {question}
-    - Results: {response}
-    - History: {chat_history}
+        if not query.lower().startswith("select"):
+            st.error(f"Invalid query generated: {query}")
+            return "Failed to generate valid database query. Please try again.", None
 
-    Guidelines:
-    1. If results are empty, suggest possible reasons or alternative queries.
-    2. Be clear and concise.
-    3. Highlight key numbers or trends.
-    4. Use bullet points for lists.
-    5. Mention any data limitations.
-    6. Keep under 200 words.
-    7. Use markdown formatting (e.g., **bold**, *italics*, - bullets) to enhance readability.
-    """
+        data = fetch_data_from_api("execute_query", {"query": query})
+        if not data:
+            return "Couldn't retrieve data. Please try again or rephrase your question.", None
 
-    chain = (
-        RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
-        | ChatPromptTemplate.from_template(response_template)
-        | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
-        | StrOutputParser()
-    )
+        response_template = """
+        Generate a natural language response based on:
+        - **Question:** {question}
+        - **Results:** {response}
+        - **History:** {chat_history}
 
-    natural_response = chain.invoke({
-        "question": user_query,
-        "chat_history": chat_history,
-    })
+        **Guidelines:**
+        1. If results are empty, suggest possible reasons or alternative queries.
+        2. Be clear and concise.
+        3. Highlight key numbers or trends.
+        4. Use bullet points for lists.
+        5. Mention any data limitations.
+        6. Keep under 200 words.
+        7. Use markdown formatting (e.g., **bold**, *italics*, - bullets) to enhance readability.
+        """
 
-    return natural_response, data
+        chain = (
+            RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
+            | ChatPromptTemplate.from_template(response_template)
+            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+            | StrOutputParser()
+        )
+
+        natural_response = chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+        })
+
+        return natural_response, data
 
 def determine_chart_type(query, df):
     if df.empty or len(df.columns) < 2:
@@ -284,26 +309,22 @@ def determine_chart_type(query, df):
     columns = df.columns.tolist()
     query_lower = query.lower()
 
-    # Convert potential numeric columns to numeric type
     for col in columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
 
-    # Identify date, numerical, and categorical columns
     date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
-    # Chart type determination
     if any(word in query_lower for word in ['over time', 'trend', 'monthly', 'daily']) and date_columns and numerical_columns:
         return 'line', (date_columns[0], numerical_columns[0])
     elif any(word in query_lower for word in ['distribution', 'share', 'percentage']) and categorical_columns and numerical_columns:
         total = df[numerical_columns[0]].sum()
-        if total > 0:  # Ensure there's meaningful data for a pie chart
+        if total > 0:
             return 'pie', (categorical_columns[0], numerical_columns[0])
     elif any(word in query_lower for word in ['top', 'best', 'most', 'ranking']) and categorical_columns and numerical_columns:
         return 'bar', (categorical_columns[0], numerical_columns[0])
 
-    # Default: Try bar chart if we have categorical and numerical data
     if categorical_columns and numerical_columns:
         return 'bar', (categorical_columns[0], numerical_columns[0])
     elif date_columns and numerical_columns:
@@ -319,6 +340,5 @@ hide_streamlit_style = """
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 </style>
-
 """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True) 
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
