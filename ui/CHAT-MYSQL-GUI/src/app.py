@@ -228,71 +228,54 @@ def get_sql_chain():
     )
 
 def get_response(user_query: str, chat_history: list):
-    # Time-related keywords/phrases
-    time_keywords = ["current time", "what time is it", "date and time", "today's date", "now", "time today", "date today"]
-    
-    # Data-related keywords
-    data_keywords = ["sales", "invoice", "product", "category", "stock", "revenue", "order", "employee", "customer", 
-                     "payment", "quantity", "price", "total", "subtotal", "discount", "due", "paid", "inventory", 
-                     "log", "detail", "list", "show", "provide", "get", "fetch", "retrieve"]
-    
-    # Check if query is only about time (contains time keywords, no data keywords)
-    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
-        from datetime import datetime
-        import pytz
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        current_time = datetime.now(singapore_tz)
-        natural_response = f"The current date and time in Singapore is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
-        return natural_response, None
-    else:
-        # Process as a regular data query
-        sql_chain = get_sql_chain()
-        raw_query = sql_chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history
-        })
+    sql_chain = get_sql_chain()
+    raw_query = sql_chain.invoke({
+        "question": user_query,
+        "chat_history": chat_history
+    })
 
-        query = raw_query.split(";")[0] + ";"
-        query = query.replace("```sql", "").replace("```", "").strip()
-        query = "\n".join([line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))])
+    query = raw_query.split(";")[0] + ";"
+    query = query.replace("```sql", "").replace("```", "").strip()
+    query = "\n".join([line for line in query.split("\n")
+                      if not line.strip().startswith(("--", "#", "/*"))])
 
-        if not query.lower().startswith("select"):
-            st.error(f"Invalid query generated: {query}")
-            return "Failed to generate valid database query. Please try again.", None
+    if not query.lower().startswith("select"):
+        st.error(f"Invalid query generated: {query}")
+        return "Failed to generate valid database query. Please try again.", None
 
-        data = fetch_data_from_api("execute_query", {"query": query})
-        if not data:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None
+    data = fetch_data_from_api("execute_query", {"query": query})
+    if not data:
+        return "Couldn't retrieve data. Please try again or rephrase your question.", None
 
-        response_template = """
-        Generate a natural language response based on:
-        - Question: {question}
-        - Results: {response}
-        - History: {chat_history}
+    response_template = """
+    Generate a natural language response based on:
+    - Question: {question}
+    - Results: {response}
+    - History: {chat_history}
 
-        Guidelines:
-        1. If results are empty, suggest possible reasons or alternative queries.
-        2. Be clear and concise.
-        3. Highlight key numbers or trends.
-        4. Use bullet points for lists.
-        5. Mention any data limitations.
-        6. Keep under 200 words.
-        7. Use markdown formatting (e.g., **bold**, *italics*, - bullets).
-        """
+    Guidelines:
+    1. If results are empty, suggest possible reasons or alternative queries.
+    2. Be clear and concise.
+    3. Highlight key numbers or trends.
+    4. Use bullet points for lists.
+    5. Mention any data limitations.
+    6. Keep under 200 words.
+    7. Use markdown formatting (e.g., **bold**, *italics*, - bullets) to enhance readability.
+    """
 
-        chain = (
-            RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
-            | ChatPromptTemplate.from_template(response_template)
-            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
-            | StrOutputParser()
-        )
+    chain = (
+        RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
+        | ChatPromptTemplate.from_template(response_template)
+        | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+        | StrOutputParser()
+    )
 
-        natural_response = chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-        })
+    natural_response = chain.invoke({
+        "question": user_query,
+        "chat_history": chat_history,
+    })
 
-        return natural_response, data
+    return natural_response, data
 
 def determine_chart_type(query, df):
     if df.empty or len(df.columns) < 2:
