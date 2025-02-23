@@ -249,7 +249,7 @@ def get_response(user_query: str, chat_history: list):
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"The current date and time in Singapore is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        natural_response = f"Your Current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
