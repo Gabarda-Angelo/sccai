@@ -83,6 +83,11 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            # Rename monetary columns to include peso sign
+            monetary_columns = ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]
+            for col in monetary_columns:
+                if col in df.columns:
+                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 st.markdown(f"### {chart_type.capitalize()} Chart")
@@ -244,7 +249,7 @@ def get_response(user_query: str, chat_history: list):
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"Your current date and time is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        natural_response = f"The current date and time in Singapore is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
@@ -272,6 +277,7 @@ def get_response(user_query: str, chat_history: list):
         if not data:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None
 
+        # Updated response_template with peso sign instruction
         response_template = """
         Generate a natural language response based on:
         - **Question:** {question}
@@ -286,6 +292,7 @@ def get_response(user_query: str, chat_history: list):
         5. Mention any data limitations.
         6. Keep under 200 words.
         7. Use markdown formatting (e.g., **bold**, *italics*, - bullets) to enhance readability.
+        8. When mentioning monetary values, use the peso sign (₱) instead of the dollar sign.
         """
 
         chain = (
