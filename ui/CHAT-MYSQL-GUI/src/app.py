@@ -36,9 +36,12 @@ def main():
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
-            AIMessage(
-                content="Hello! I will be your assistant. Ask me anything about your store."),
+            AIMessage(content="Hello! I will be your assistant. Ask me anything about your store."),
         ]
+
+    # Initialize query input state
+    if "query_input" not in st.session_state:
+        st.session_state.query_input = ""
 
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
@@ -47,10 +50,10 @@ def main():
             Back
         </a>
         """, unsafe_allow_html=True)
-
+        
         st.markdown("### Quick Queries")
-
-        # Organized into expandable categories
+        
+        # Sales Performance
         with st.expander("📈 Sales Performance", expanded=True):
             sales_queries = [
                 "What are the best-selling products of all time?",
@@ -67,8 +70,9 @@ def main():
             ]
             for q in sales_queries:
                 if st.button(q, key=f"sales_{q}"):
-                    handle_query(q)
+                    st.session_state.query_input = q
 
+        # Inventory Management
         with st.expander("📦 Inventory Management"):
             inventory_queries = [
                 "Which products are out of stock?",
@@ -82,8 +86,9 @@ def main():
             ]
             for q in inventory_queries:
                 if st.button(q, key=f"inv_{q}"):
-                    handle_query(q)
+                    st.session_state.query_input = q
 
+        # Employee Performance
         with st.expander("👥 Employee Performance"):
             employee_queries = [
                 "Who is the top-performing employee this month?",
@@ -95,8 +100,9 @@ def main():
             ]
             for q in employee_queries:
                 if st.button(q, key=f"emp_{q}"):
-                    handle_query(q)
+                    st.session_state.query_input = q
 
+        # Financial Insights
         with st.expander("💰 Financial Insights"):
             financial_queries = [
                 "Give me the sales invoices details for today.",
@@ -111,8 +117,9 @@ def main():
             ]
             for q in financial_queries:
                 if st.button(q, key=f"fin_{q}"):
-                    handle_query(q)
+                    st.session_state.query_input = q
 
+        # Store Operations
         with st.expander("🏪 Store Operations"):
             ops_queries = [
                 "What is the busiest hour of the day for sales?",
@@ -125,8 +132,9 @@ def main():
             ]
             for q in ops_queries:
                 if st.button(q, key=f"ops_{q}"):
-                    handle_query(q)
+                    st.session_state.query_input = q
 
+        # Miscellaneous Insights
         with st.expander("🔍 Miscellaneous Insights"):
             misc_queries = [
                 "What is the profit margin for [specific product]?",
@@ -139,12 +147,50 @@ def main():
             ]
             for q in misc_queries:
                 if st.button(q, key=f"misc_{q}"):
-                    handle_query(q)
+                    st.session_state.query_input = q
+
+    # Hidden element to store the query value
+    st.markdown(f"""
+    <div id="query-container" style="display: none;">{st.session_state.query_input}</div>
+    """, unsafe_allow_html=True)
+
+    # JavaScript to populate the chat input
+    st.markdown("""
+    <script>
+    function updateChatInput() {
+        const queryContainer = document.getElementById('query-container');
+        const chatInput = document.querySelector('.stChatInput textarea');
+        
+        if (chatInput && queryContainer) {
+            chatInput.value = queryContainer.textContent;
+            // Trigger input event to update Streamlit's state
+            const event = new Event('input', { bubbles: true });
+            chatInput.dispatchEvent(event);
+        }
+    }
+    
+    // Run on initial load and after Streamlit updates
+    setTimeout(updateChatInput, 100);
+    </script>
+    """, unsafe_allow_html=True)
 
     display_chat_history()
-    user_query = st.chat_input("Type a message...")
+    
+    # Chat input with managed state
+    user_query = st.chat_input("Type a message...", key="chat_input")
     if user_query:
         handle_query(user_query)
+        # Clear the query input after submission
+        st.session_state.query_input = ""
+
+def display_chat_history():
+    for message in st.session_state.chat_history:
+        if isinstance(message, AIMessage):
+            with st.chat_message("AI", avatar="dist/img/ai.png"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("Human", avatar="dist/img/Human.png"):
+                st.markdown(message.content)
 
 
 def handle_query(query: str):
