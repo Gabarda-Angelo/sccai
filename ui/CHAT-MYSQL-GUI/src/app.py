@@ -141,10 +141,10 @@ def main():
                 if st.button(q, key=f"misc_{q}"):
                     handle_query(q)
 
-        display_chat_history()
-        user_query = st.chat_input("Type a message...")
-        if user_query:
-            handle_query(user_query)
+    display_chat_history()
+    user_query = st.chat_input("Type a message...")
+    if user_query:
+        handle_query(user_query)
 
 
 def handle_query(query: str):
