@@ -183,6 +183,8 @@ def get_sql_chain():
     - Filter data based on conditions mentioned in the question.
     - Order results if the question suggests a specific order.
     - Assume the most common interpretation if the question is ambiguous, and add a comment (e.g., -- Assuming...) in the query.
+    - For questions about who created an account, consider the 'created_at' and 'employee_id' fields.
+    - For sales inventory details, consider joining invoices, invoice_details, and products.
     - Provide only the SQL query as output, without explanations.
 
     **User Question:** {question}
@@ -277,7 +279,6 @@ def get_response(user_query: str, chat_history: list):
         if not data:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None
 
-        # Updated response_template with peso sign instruction
         response_template = """
         Generate a natural language response based on:
         - **Question:** {question}
@@ -316,26 +317,38 @@ def determine_chart_type(query, df):
     columns = df.columns.tolist()
     query_lower = query.lower()
 
+    # Convert columns to numeric where possible
     for col in columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
 
+    # Identify date, numerical, and categorical columns
     date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
-    if any(word in query_lower for word in ['over time', 'trend', 'monthly', 'daily']) and date_columns and numerical_columns:
+    # Expanded keywords
+    time_keywords = ['over time', 'trend', 'monthly', 'daily', 'weekly', 'yearly', 'history', 'progress']
+    distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
+    ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
+
+    if any(word in query_lower for word in time_keywords) and date_columns and numerical_columns:
         return 'line', (date_columns[0], numerical_columns[0])
-    elif any(word in query_lower for word in ['distribution', 'share', 'percentage']) and categorical_columns and numerical_columns:
+    elif any(word in query_lower for word in distribution_keywords) and categorical_columns and numerical_columns:
         total = df[numerical_columns[0]].sum()
         if total > 0:
             return 'pie', (categorical_columns[0], numerical_columns[0])
-    elif any(word in query_lower for word in ['top', 'best', 'most', 'ranking']) and categorical_columns and numerical_columns:
+    elif any(word in query_lower for word in ranking_keywords) and categorical_columns and numerical_columns:
         return 'bar', (categorical_columns[0], numerical_columns[0])
 
+    # Default to bar if categorical and numerical
     if categorical_columns and numerical_columns:
         return 'bar', (categorical_columns[0], numerical_columns[0])
+    # Default to line if date and numerical
     elif date_columns and numerical_columns:
         return 'line', (date_columns[0], numerical_columns[0])
+    # Default to pie if only numerical
+    elif len(numerical_columns) >= 1 and len(categorical_columns) >= 1:
+        return 'pie', (categorical_columns[0], numerical_columns[0])
 
     return None, None
 
