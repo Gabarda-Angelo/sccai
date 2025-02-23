@@ -228,19 +228,24 @@ def get_sql_chain():
     )
 
 def get_response(user_query: str, chat_history: list):
-    # Define keywords/phrases indicating a request for the current date and time
+    # Time-related keywords/phrases
     time_keywords = ["current time", "what time is it", "date and time", "today's date", "now", "time today", "date today"]
     
-    # Check if the query contains any of these keywords (case-insensitive)
-    if any(keyword in user_query.lower() for keyword in time_keywords):
+    # Data-related keywords
+    data_keywords = ["sales", "invoice", "product", "category", "stock", "revenue", "order", "employee", "customer", 
+                     "payment", "quantity", "price", "total", "subtotal", "discount", "due", "paid", "inventory", 
+                     "log", "detail", "list", "show", "provide", "get", "fetch", "retrieve"]
+    
+    # Check if query is only about time (contains time keywords, no data keywords)
+    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         from datetime import datetime
         import pytz
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.now(singapore_tz)
-        natural_response = f"The current date and time is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        natural_response = f"The current date and time in Singapore is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
-        # Logic for other queries remains unchanged
+        # Process as a regular data query
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
             "question": user_query,
@@ -249,8 +254,7 @@ def get_response(user_query: str, chat_history: list):
 
         query = raw_query.split(";")[0] + ";"
         query = query.replace("```sql", "").replace("```", "").strip()
-        query = "\n".join([line for line in query.split("\n")
-                          if not line.strip().startswith(("--", "#", "/*"))])
+        query = "\n".join([line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))])
 
         if not query.lower().startswith("select"):
             st.error(f"Invalid query generated: {query}")
@@ -273,7 +277,7 @@ def get_response(user_query: str, chat_history: list):
         4. Use bullet points for lists.
         5. Mention any data limitations.
         6. Keep under 200 words.
-        7. Use markdown formatting (e.g., **bold**, *italics*, - bullets) to enhance readability.
+        7. Use markdown formatting (e.g., **bold**, *italics*, - bullets).
         """
 
         chain = (
