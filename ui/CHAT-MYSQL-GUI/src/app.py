@@ -11,15 +11,65 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import bcrypt
+import mysql.connector
+from mysql.connector import Error
 
+# Set page configuration at the top (runs once)
+st.set_page_config(
+    page_title="AcaSquad AI",
+    page_icon=":speech_balloon:",
+    layout="wide"
+)
 
-def main():
-    st.set_page_config(
-        page_title="AcaSquad AI",
-        page_icon=":speech_balloon:",
-        layout="wide"
-    )
+# Database connection function
+def get_db_connection():
+    try:
+        connection = mysql.connector.connect(
+            host=st.secrets["database"]["host"],
+            database=st.secrets["database"]["database"],
+            user=st.secrets["database"]["user"],
+            password=st.secrets["database"]["password"]
+        )
+        if connection.is_connected():
+            return connection
+    except Error as e:
+        st.error(f"Error connecting to database: {e}")
+        return None
 
+# Credential verification function
+def check_credentials(email, password):
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT employee_id, first_name, last_name, email, password_hash, role FROM employees WHERE email = %s", (email,))
+        employee = cursor.fetchone()
+        cursor.close()
+        connection.close()
+        if employee and bcrypt.checkpw(password.encode('utf-8'), employee['password_hash'].encode('utf-8')):
+            return employee
+    return None
+
+# Login page function
+def login_page():
+    st.title("Login to AcaSquad AI")
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        user = check_credentials(email, password)
+        if user:
+            if user['role'] in ['Admin', 'Owner']:
+                st.session_state['logged_in'] = True
+                st.session_state['user'] = user
+                st.success("Login successful. Redirecting to the main app...")
+                st.experimental_rerun()
+            else:
+                st.error("You don't have permission to access this app.")
+        else:
+            st.error("Invalid email or password")
+
+# Main app function (replaces original main())
+def main_app():
     st.title("Chat with our AcaSquad AI")
     st.markdown("""
     <style>
@@ -42,6 +92,10 @@ def main():
 
     with st.sidebar:
         st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
+        if st.button("Logout"):
+            st.session_state['logged_in'] = False
+            st.session_state.pop('user', None)
+            st.experimental_rerun()
         st.markdown("""
         <a href="https://bookstoreadmin.shop/ui/pos.php" target="_blank" style="display: inline-block; width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer; color:white; text-align:center; text-decoration: none;">
             Back
@@ -49,8 +103,6 @@ def main():
         """, unsafe_allow_html=True)
 
         st.markdown("### Quick Queries")
-
-        # Organized into expandable categories
         with st.expander("📈 Sales Performance", expanded=True):
             sales_queries = [
                 "What are the best-selling products of all time?",
@@ -146,7 +198,7 @@ def main():
     if user_query:
         handle_query(user_query)
 
-
+# Existing functions (unchanged)
 def handle_query(query: str):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
@@ -165,7 +217,6 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
-            # Rename monetary columns to include peso sign
             monetary_columns = ["subtotal", "total", "unit_price",
                                 "sale_price", "purchase_price", "total_price", "paid", "due"]
             for col in monetary_columns:
@@ -189,7 +240,6 @@ def handle_query(query: str):
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
 
-
 def display_chat_history():
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
@@ -198,7 +248,6 @@ def display_chat_history():
         elif isinstance(message, HumanMessage):
             with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
-
 
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
     try:
@@ -234,7 +283,6 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
     except requests.RequestException as e:
         st.error(f"Connection error: {str(e)}")
         return None
-
 
 def get_sql_chain():
     schema = """
@@ -330,7 +378,6 @@ def get_sql_chain():
         | StrOutputParser()
     )
 
-
 def get_response(user_query: str, chat_history: list):
     time_keywords = ["current time", "what time is it", "date and time",
                      "today's date", "now", "time today", "date today"]
@@ -404,7 +451,6 @@ def get_response(user_query: str, chat_history: list):
 
         return natural_response, data
 
-
 def determine_chart_type(query, df):
     if df.empty or len(df.columns) < 2:
         return None, None
@@ -446,10 +492,23 @@ def determine_chart_type(query, df):
 
     return None, None
 
+# App entry point
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
 
-if __name__ == "__main__":
-    main()
+if not st.session_state['logged_in']:
+    login_page()
+else:
+    if st.session_state['user']['role'] in ['Admin', 'Owner']:
+        main_app()
+    else:
+        st.error("You don't have permission to access this app.")
+        if st.button("Back to Login"):
+            st.session_state['logged_in'] = False
+            st.session_state.pop('user', None)
+            st.experimental_rerun()
 
+# Hide Streamlit style
 hide_streamlit_style = """
 <style>
 #MainMenu {visibility: hidden;}
