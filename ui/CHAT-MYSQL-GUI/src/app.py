@@ -12,189 +12,196 @@ from langchain_groq import ChatGroq
 import datetime
 import pytz
 
-# Set page config (must be first Streamlit command)
-st.set_page_config(
-    page_title="AcaSquad AI",
-    page_icon=":speech_balloon:",
-    layout="wide"
-)
-
-# Initialize session state for authentication
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-    st.session_state.user = None
-
-# Function to authenticate user via API
-def authenticate(email, password):
+def authenticate_user(email: str, password: str) -> dict:
+    """
+    Call the API (bookstoreapi.php with action=login) to authenticate the user.
+    Returns the user data if successful, otherwise None.
+    """
     try:
-        response = requests.post(
+        payload = {
+            "action": "login",
+            "key": st.secrets["API_KEY"],
+            "email": email,
+            "password": password
+        }
+        response = requests.get(
             st.secrets["API_URL"],
-            params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
-            data={"email": email, "password": password}
+            params=payload,
+            timeout=15
         )
-        if response.status_code == 200:
+        if not response.text.strip():
+            st.error("Received empty response from API during login")
+            return None
+
+        try:
             data = response.json()
-            if data.get("status") == "success":
-                st.session_state.authenticated = True
-                st.session_state.user = data["data"]
-                return True
-            else:
-                st.error("Invalid email or password")
+        except json.JSONDecodeError:
+            st.error(f"Invalid JSON response during login: {response.text[:200]}...")
+            return None
+
+        if data.get("status") == "success":
+            return data["data"]
         else:
-            st.error(f"Authentication failed: {response.status_code}")
-    except Exception as e:
-        st.error(f"Error during authentication: {str(e)}")
-    return False
+            error_msg = data.get("error", "Unknown login error")
+            st.error(f"Login Error: {error_msg}")
+            return None
+    except requests.RequestException as e:
+        st.error(f"Connection error during login: {str(e)}")
+        return None
 
 def main():
-    if not st.session_state.authenticated:
-        # Display login form
-        st.title("Login to AcaSquad AI")
-        with st.form("login_form"):
-            email = st.text_input("Email", placeholder="Enter your email")
-            password = st.text_input("Password", type="password", placeholder="Enter your password")
-            submit = st.form_submit_button("Sign In")
-            if submit:
-                if authenticate(email, password):
-                    st.rerun()
-    else:
-        # Role-based access control
-        user_role = st.session_state.user["role"]
-        if user_role in ["Owner", "Admin"]:
-            st.title("Chat with our AcaSquad AI")
-            st.markdown("""
-            <style>
-            .stChatInput {
-                bottom: 20px;
-                left: 10%;
-                z-index: 1000;
-            }
-            .stChatMessage {
-                margin-bottom: 20px;
-            }
-            </style>
-            """, unsafe_allow_html=True)
+    st.set_page_config(
+        page_title="AcaSquad AI",
+        page_icon=":speech_balloon:",
+        layout="wide"
+    )
+    
+    # --- Authentication Check ---
+    if "user" not in st.session_state:
+        st.title("Login")
+        st.markdown("Please log in to access the AcaSquad AI")
+        email = st.text_input("Email", placeholder="Enter your email")
+        password = st.text_input("Password", type="password", placeholder="Enter your password")
+        if st.button("Login"):
+            user_data = authenticate_user(email, password)
+            if user_data:
+                # Check role; deny access if role is 'Cashier'
+                if user_data.get("role") == "Cashier":
+                    st.error("Access denied. You do not have permission to access this page. Please contact the Admin.")
+                else:
+                    st.session_state.user = user_data
+                    st.success("Logged in successfully!")
+                    st.experimental_rerun()
+        return  # Stop further execution until logged in
 
-            if "chat_history" not in st.session_state:
-                st.session_state.chat_history = [
-                    AIMessage(
-                        content="Hello! I will be your assistant. Ask me anything about your store."),
-                ]
+    # --- End Authentication ---
 
-            with st.sidebar:
-                st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
-                st.write(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({user_role})")
-                if st.button("Logout"):
-                    st.session_state.authenticated = False
-                    st.session_state.user = None
-                    st.rerun()
-                st.markdown("""
-                <a href="https://bookstoreadmin.shop/ui/pos.php" target="_blank" style="display: inline-block; width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer; color:white; text-align:center; text-decoration: none;">
-                    Back
-                </a>
-                """, unsafe_allow_html=True)
+    # Main chat interface starts here:
+    st.title("Chat with our AcaSquad AI")
+    st.markdown("""
+    <style>
+    .stChatInput {
+        bottom: 20px;
+        left: 10%;
+        z-index: 1000;
+    }
+    .stChatMessage {
+        margin-bottom: 20px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-                st.markdown("### Quick Queries")
-                with st.expander("📈 Sales Performance", expanded=True):
-                    sales_queries = [
-                        "What are the best-selling products of all time?",
-                        "What are the top 5 best-selling products this month?",
-                        "Which product has the highest sales this week?",
-                        "What are the best-selling products in each category?",
-                        "Show me the sales trend over the past year.",
-                        "What is the daily sales trend for this month?",
-                        "Which day of the week has the highest sales?",
-                        "What is the total revenue this year?",
-                        "What is the total revenue for today?",
-                        "What is the average daily revenue this month?",
-                        "What is the revenue breakdown by product category?"
-                    ]
-                    for q in sales_queries:
-                        if st.button(q, key=f"sales_{q}"):
-                            handle_query(q)
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = [
+            AIMessage(
+                content="Hello! I will be your assistant. Ask me anything about your store."
+            ),
+        ]
 
-                with st.expander("📦 Inventory Management"):
-                    inventory_queries = [
-                        "Which products are out of stock?",
-                        "Which products are below the reorder level?",
-                        "What is the current stock level for [specific product]?",
-                        "What is the total value of current inventory?",
-                        "What is the value of inventory by category?",
-                        "How many products do we have in total?",
-                        "What are the product categories we have?",
-                        "List all products added in the last 30 days."
-                    ]
-                    for q in inventory_queries:
-                        if st.button(q, key=f"inv_{q}"):
-                            handle_query(q)
+    with st.sidebar:
+        st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
+        st.markdown("""
+        <a href="https://bookstoreadmin.shop/ui/pos.php" target="_blank" style="display: inline-block; width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer; color:white; text-align:center; text-decoration: none;">
+            Back
+        </a>
+        """, unsafe_allow_html=True)
 
-                with st.expander("👥 Employee Performance"):
-                    employee_queries = [
-                        "Who is the top-performing employee this month?",
-                        "What are the total sales by each employee this week?",
-                        "Which employee has the highest number of transactions today?",
-                        "Who is currently logged in?",
-                        "What are the login and logout times for [specific employee] today?",
-                        "How many times has each employee logged in this month?"
-                    ]
-                    for q in employee_queries:
-                        if st.button(q, key=f"emp_{q}"):
-                            handle_query(q)
+        st.markdown("### Quick Queries")
+        # (Sidebar quick queries remain unchanged...)
+        with st.expander("📈 Sales Performance", expanded=True):
+            sales_queries = [
+                "What are the best-selling products of all time?",
+                "What are the top 5 best-selling products this month?",
+                "Which product has the highest sales this week?",
+                "What are the best-selling products in each category?",
+                "Show me the sales trend over the past year.",
+                "What is the daily sales trend for this month?",
+                "Which day of the week has the highest sales?",
+                "What is the total revenue this year?",
+                "What is the total revenue for today?",
+                "What is the average daily revenue this month?",
+                "What is the revenue breakdown by product category?"
+            ]
+            for q in sales_queries:
+                if st.button(q, key=f"sales_{q}"):
+                    handle_query(q)
 
-                with st.expander("💰 Financial Insights"):
-                    financial_queries = [
-                        "Give me the sales invoices details for today.",
-                        "List all invoices from last week.",
-                        "What is the total amount due from unpaid invoices?",
-                        "What is the average transaction value this month?",
-                        "What is the most common payment method used?",
-                        "What percentage of transactions are paid by cash?",
-                        "How many transactions were made by card this week?",
-                        "What is the total discount given this month?",
-                        "Which products have the highest discounts applied?"
-                    ]
-                    for q in financial_queries:
-                        if st.button(q, key=f"fin_{q}"):
-                            handle_query(q)
+        with st.expander("📦 Inventory Management"):
+            inventory_queries = [
+                "Which products are out of stock?",
+                "Which products are below the reorder level?",
+                "What is the current stock level for [specific product]?",
+                "What is the total value of current inventory?",
+                "What is the value of inventory by category?",
+                "How many products do we have in total?",
+                "What are the product categories we have?",
+                "List all products added in the last 30 days."
+            ]
+            for q in inventory_queries:
+                if st.button(q, key=f"inv_{q}"):
+                    handle_query(q)
 
-                with st.expander("🏪 Store Operations"):
-                    ops_queries = [
-                        "What is the busiest hour of the day for sales?",
-                        "Which day of the week has the highest foot traffic?",
-                        "What is the average number of transactions per day?",
-                        "What is the average time between login and first transaction for employees?",
-                        "How many transactions were completed in the last hour?",
-                        "Show me the inventory changes for [specific product] this week.",
-                        "What are the most recent inventory adjustments?"
-                    ]
-                    for q in ops_queries:
-                        if st.button(q, key=f"ops_{q}"):
-                            handle_query(q)
+        with st.expander("👥 Employee Performance"):
+            employee_queries = [
+                "Who is the top-performing employee this month?",
+                "What are the total sales by each employee this week?",
+                "Which employee has the highest number of transactions today?",
+                "Who is currently logged in?",
+                "What are the login and logout times for [specific employee] today?",
+                "How many times has each employee logged in this month?"
+            ]
+            for q in employee_queries:
+                if st.button(q, key=f"emp_{q}"):
+                    handle_query(q)
 
-                with st.expander("🔍 Miscellaneous Insights"):
-                    misc_queries = [
-                        "What is the profit margin for [specific product]?",
-                        "How many units of [specific product] were sold this month?",
-                        "What is the sales history for [specific product]?",
-                        "Which product category has the highest sales this year?",
-                        "What is the average price of products in each category?",
-                        "Which products should we reorder soon?",
-                        "How many products are within 10% of their reorder level?"
-                    ]
-                    for q in misc_queries:
-                        if st.button(q, key=f"misc_{q}"):
-                            handle_query(q)
+        with st.expander("💰 Financial Insights"):
+            financial_queries = [
+                "Give me the sales invoices details for today.",
+                "List all invoices from last week.",
+                "What is the total amount due from unpaid invoices?",
+                "What is the average transaction value this month?",
+                "What is the most common payment method used?",
+                "What percentage of transactions are paid by cash?",
+                "How many transactions were made by card this week?",
+                "What is the total discount given this month?",
+                "Which products have the highest discounts applied?"
+            ]
+            for q in financial_queries:
+                if st.button(q, key=f"fin_{q}"):
+                    handle_query(q)
 
-            display_chat_history()
-            user_query = st.chat_input("Type a message...")
-            if user_query:
-                handle_query(user_query)
-        else:
-            st.error("Sorry, you can't access this. Please contact the Admin.")
-            if st.button("Logout"):
-                st.session_state.authenticated = False
-                st.session_state.user = None
-                st.rerun()
+        with st.expander("🏪 Store Operations"):
+            ops_queries = [
+                "What is the busiest hour of the day for sales?",
+                "Which day of the week has the highest foot traffic?",
+                "What is the average number of transactions per day?",
+                "What is the average time between login and first transaction for employees?",
+                "How many transactions were completed in the last hour?",
+                "Show me the inventory changes for [specific product] this week.",
+                "What are the most recent inventory adjustments?"
+            ]
+            for q in ops_queries:
+                if st.button(q, key=f"ops_{q}"):
+                    handle_query(q)
+
+        with st.expander("🔍 Miscellaneous Insights"):
+            misc_queries = [
+                "What is the profit margin for [specific product]?",
+                "How many units of [specific product] were sold this month?",
+                "What is the sales history for [specific product]?",
+                "Which product category has the highest sales this year?",
+                "What is the average price of products in each category?",
+                "Which products should we reorder soon?",
+                "How many products are within 10% of their reorder level?"
+            ]
+            for q in misc_queries:
+                if st.button(q, key=f"misc_{q}"):
+                    handle_query(q)
+
+    display_chat_history()
+    user_query = st.chat_input("Type a message...")
+    if user_query:
+        handle_query(user_query)
 
 def handle_query(query: str):
     st.session_state.chat_history.append(HumanMessage(content=query))
@@ -203,8 +210,7 @@ def handle_query(query: str):
 
     with st.spinner("Analyzing your query..."):
         try:
-            natural_response, data = get_response(
-                query, st.session_state.chat_history)
+            natural_response, data = get_response(query, st.session_state.chat_history)
         except Exception as e:
             natural_response = f"An error occurred: {str(e)}"
             data = None
@@ -214,6 +220,7 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            # Rename monetary columns to include peso sign
             monetary_columns = ["subtotal", "total", "unit_price",
                                 "sale_price", "purchase_price", "total_price", "paid", "due"]
             for col in monetary_columns:
@@ -390,8 +397,8 @@ def get_response(user_query: str, chat_history: list):
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-DD')
-        current_sg_datetime = now_sg.strftime('%Y-%m-DD %H:%M:%S')
+        current_sg_date = now_sg.strftime('%Y-%m-%d')
+        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
@@ -403,8 +410,7 @@ def get_response(user_query: str, chat_history: list):
 
         query = raw_query.split(";")[0] + ";"
         query = query.replace("```sql", "").replace("```", "").strip()
-        query = "\n".join([line for line in query.split(
-            "\n") if not line.strip().startswith(("--", "#", "/*"))])
+        query = "\n".join([line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))])
 
         if not query.lower().startswith("select"):
             st.error(f"Invalid query generated: {query}")
@@ -458,18 +464,13 @@ def determine_chart_type(query, df):
     for col in columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
 
-    date_columns = [col for col in columns if 'date' in col.lower(
-    ) or pd.api.types.is_datetime64_any_dtype(df[col])]
-    numerical_columns = df.select_dtypes(
-        include=['int64', 'float64']).columns.tolist()
+    date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
+    numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
-    time_keywords = ['over time', 'trend', 'monthly',
-                     'daily', 'weekly', 'yearly', 'history', 'progress']
-    distribution_keywords = ['distribution', 'share',
-                             'percentage', 'proportion', 'breakdown']
-    ranking_keywords = ['top', 'best', 'most',
-                        'ranking', 'leaderboard', 'highest', 'lowest']
+    time_keywords = ['over time', 'trend', 'monthly', 'daily', 'weekly', 'yearly', 'history', 'progress']
+    distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
+    ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
 
     if any(word in query_lower for word in time_keywords) and date_columns and numerical_columns:
         return 'line', (date_columns[0], numerical_columns[0])
