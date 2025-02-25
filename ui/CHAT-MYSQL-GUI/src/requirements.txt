@@ -1,10 +1,12 @@
-python-dotenv>=0.21.0
+python-dotenv>=0.21.0  # Optional, if using .env files
 streamlit>=1.16.0
 langchain-core>=0.1.0
 langchain-community>=0.1.0
 langchain-groq>=0.1.0
-SQLAlchemy>=1.4
+SQLAlchemy>=1.4  # Optional, unused unless you prefer it
 mysql-connector-python>=8.0
 pandas>=1.5.0
 matplotlib>=3.7.0
 requests>=2.28.0
+bcrypt>=3.2.0  # Added for password hashing
+pytz>=2022.1  # Already in your original code for timezone handling
