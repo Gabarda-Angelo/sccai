@@ -63,15 +63,15 @@ def main():
         email = st.text_input("Email", placeholder="Enter your email")
         password = st.text_input("Password", type="password", placeholder="Enter your password")
         if st.button("Login"):
-    user_data = authenticate_user(email, password)
-    if user_data:
-        # Check role; deny access if role is 'Cashier'
-        if user_data.get("role") == "Cashier":
-            st.error("Access denied. You do not have permission to access this page. Please contact the Admin.")
-        else:
-            st.session_state.user = user_data
-            # Immediately rerun without any prior output to avoid conflicts.
-            st.experimental_rerun()
+          user_data = authenticate_user(email, password)
+          if user_data:
+              # Check role; deny access if role is 'Cashier'
+              if user_data.get("role") == "Cashier":
+                  st.error("Access denied. You do not have permission to access this page. Please contact the Admin.")
+              else:
+                  st.session_state.user = user_data
+                  # Immediately rerun without any prior output to avoid conflicts.
+                  st.experimental_rerun()
 
         return  # Stop further execution until logged in
 
