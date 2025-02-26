@@ -505,10 +505,4 @@ hide_streamlit_style = """
 footer {visibility: hidden;}
 </style>
 """
-st.markdown("""
-<style>
-.stTextInput > div > div > input {
-    max-width: 600px;
-}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
