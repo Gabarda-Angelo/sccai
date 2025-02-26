@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 import json
 import pandas as pd
@@ -19,6 +20,18 @@ st.set_page_config(
     layout="wide"
 )
 
+# Function to show pop-up messages using a JavaScript alert
+def show_popup(message):
+    components.html(
+        f"""
+        <script>
+            alert("{message}");
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
 # Initialize session state for authentication
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -38,13 +51,15 @@ def authenticate(email, password):
             if data.get("status") == "success" and "data" in data:
                 st.session_state.authenticated = True
                 st.session_state.user = data["data"]
+                show_popup("Login Successful!")
                 return True
             else:
-                st.error(f"Login failed: {data.get('error', 'Invalid credentials')}")
+                error_message = data.get("error", "Invalid credentials")
+                show_popup(f"Login failed: {error_message}")
         else:
-            st.error(f"Server error: {response.status_code}")
+            show_popup(f"Server error: {response.status_code}")
     except Exception as e:
-        st.error(f"Authentication error: {str(e)}")
+        show_popup(f"Authentication error: {str(e)}")
     return False
 
 # Function to handle user queries
@@ -365,16 +380,16 @@ def main():
         
         # Place the login form in the middle column
         with col2:
-          st.title("Login to AcaSquad AI")
+            st.title("Login to AcaSquad AI")
         with col2:
-          with st.form("login_form"):
-              email = st.text_input("Email")
-              password = st.text_input("Password", type="password")
-              submit = st.form_submit_button("Login")
-              if submit:
-                  if authenticate(email, password):  # Assuming you have an authenticate function
-                      st.session_state.authenticated = True
-                      st.rerun()
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Login")
+                if submit:
+                    if authenticate(email, password):
+                        st.session_state.authenticated = True
+                        st.rerun()
     else:
         if st.session_state.user["role"] in ["Owner", "Admin"]:
             st.title("Chat with our AcaSquad AI")
