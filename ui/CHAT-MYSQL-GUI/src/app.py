@@ -360,11 +360,11 @@ def determine_chart_type(query, df):
 def main():
     """Main function to run the AcaSquad AI application."""
     if not st.session_state.authenticated:
-        # Create three columns with relative widths [3, 2, 3]
-        col1, col2, col3 = st.columns([3, 2, 3])
+        # Create three columns with relative widths [4, 3, 4]
+        col4, col3, col4 = st.columns([4, 3, 4])
         
         # Place the login form in the middle column
-        with col2:
+        with col3:
             st.title("Login to AcaSquad AI")
             with st.form("login_form"):
                 email = st.text_input("Email")
@@ -504,4 +504,10 @@ hide_streamlit_style = """
 footer {visibility: hidden;}
 </style>
 """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+st.markdown("""
+<style>
+.stTextInput > div > div > input {
+    max-width: 300px;
+}
+</style>
+""", unsafe_allow_html=True)
