@@ -508,7 +508,7 @@ footer {visibility: hidden;}
 st.markdown("""
 <style>
 .stTextInput > div > div > input {
-    max-width: 300px;
+    max-width: 500px;
 }
 </style>
 """, unsafe_allow_html=True)
