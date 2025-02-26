@@ -12,42 +12,6 @@ from langchain_groq import ChatGroq
 import datetime
 import pytz
 
-def authenticate_user(email: str, password: str) -> dict:
-    """
-    Call the API (bookstoreapi.php with action=login) to authenticate the user.
-    Returns the user data if successful, otherwise None.
-    """
-    try:
-        payload = {
-            "action": "login",
-            "key": st.secrets["API_KEY"],
-            "email": email,
-            "password": password
-        }
-        response = requests.get(
-            st.secrets["API_URL"],
-            params=payload,
-            timeout=15
-        )
-        if not response.text.strip():
-            st.error("Received empty response from API during login")
-            return None
-
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            st.error(f"Invalid JSON response during login: {response.text[:200]}...")
-            return None
-
-        if data.get("status") == "success":
-            return data["data"]
-        else:
-            error_msg = data.get("error", "Unknown login error")
-            st.error(f"Login Error: {error_msg}")
-            return None
-    except requests.RequestException as e:
-        st.error(f"Connection error during login: {str(e)}")
-        return None
 
 def main():
     st.set_page_config(
@@ -55,31 +19,7 @@ def main():
         page_icon=":speech_balloon:",
         layout="wide"
     )
-    
-    # --- Authentication Check ---
-    if "user" not in st.session_state:
-        st.title("Login")
-        st.markdown("Please log in to access the AcaSquad AI")
-        email = st.text_input("Email", placeholder="Enter your email")
-        password = st.text_input("Password", type="password", placeholder="Enter your password")
-        if st.button("Login"):
-          user_data = authenticate_user(email, password)
-          if user_data:
-              # Check role; deny access if role is 'Cashier'
-              if user_data.get("role") == "Cashier":
-                  st.error("Access denied. You do not have permission to access this page. Please contact the Admin.")
-              else:
-                  st.session_state.user = user_data
-                  st.experimental_rerun()
-                  st.stop()  # Stop further execution after rerun
 
-
-
-        return  # Stop further execution until logged in
-
-    # --- End Authentication ---
-
-    # Main chat interface starts here:
     st.title("Chat with our AcaSquad AI")
     st.markdown("""
     <style>
@@ -97,8 +37,7 @@ def main():
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
             AIMessage(
-                content="Hello! I will be your assistant. Ask me anything about your store."
-            ),
+                content="Hello! I will be your assistant. Ask me anything about your store."),
         ]
 
     with st.sidebar:
@@ -110,7 +49,8 @@ def main():
         """, unsafe_allow_html=True)
 
         st.markdown("### Quick Queries")
-        # (Sidebar quick queries remain unchanged...)
+
+        # Organized into expandable categories
         with st.expander("📈 Sales Performance", expanded=True):
             sales_queries = [
                 "What are the best-selling products of all time?",
@@ -206,6 +146,7 @@ def main():
     if user_query:
         handle_query(user_query)
 
+
 def handle_query(query: str):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
@@ -213,7 +154,8 @@ def handle_query(query: str):
 
     with st.spinner("Analyzing your query..."):
         try:
-            natural_response, data = get_response(query, st.session_state.chat_history)
+            natural_response, data = get_response(
+                query, st.session_state.chat_history)
         except Exception as e:
             natural_response = f"An error occurred: {str(e)}"
             data = None
@@ -247,6 +189,7 @@ def handle_query(query: str):
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
 
+
 def display_chat_history():
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
@@ -255,6 +198,7 @@ def display_chat_history():
         elif isinstance(message, HumanMessage):
             with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
+
 
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
     try:
@@ -290,6 +234,7 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
     except requests.RequestException as e:
         st.error(f"Connection error: {str(e)}")
         return None
+
 
 def get_sql_chain():
     schema = """
@@ -385,6 +330,7 @@ def get_sql_chain():
         | StrOutputParser()
     )
 
+
 def get_response(user_query: str, chat_history: list):
     time_keywords = ["current time", "what time is it", "date and time",
                      "today's date", "now", "time today", "date today"]
@@ -413,7 +359,8 @@ def get_response(user_query: str, chat_history: list):
 
         query = raw_query.split(";")[0] + ";"
         query = query.replace("```sql", "").replace("```", "").strip()
-        query = "\n".join([line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))])
+        query = "\n".join([line for line in query.split(
+            "\n") if not line.strip().startswith(("--", "#", "/*"))])
 
         if not query.lower().startswith("select"):
             st.error(f"Invalid query generated: {query}")
@@ -457,6 +404,7 @@ def get_response(user_query: str, chat_history: list):
 
         return natural_response, data
 
+
 def determine_chart_type(query, df):
     if df.empty or len(df.columns) < 2:
         return None, None
@@ -467,13 +415,18 @@ def determine_chart_type(query, df):
     for col in columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
 
-    date_columns = [col for col in columns if 'date' in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
-    numerical_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    date_columns = [col for col in columns if 'date' in col.lower(
+    ) or pd.api.types.is_datetime64_any_dtype(df[col])]
+    numerical_columns = df.select_dtypes(
+        include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
-    time_keywords = ['over time', 'trend', 'monthly', 'daily', 'weekly', 'yearly', 'history', 'progress']
-    distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
-    ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
+    time_keywords = ['over time', 'trend', 'monthly',
+                     'daily', 'weekly', 'yearly', 'history', 'progress']
+    distribution_keywords = ['distribution', 'share',
+                             'percentage', 'proportion', 'breakdown']
+    ranking_keywords = ['top', 'best', 'most',
+                        'ranking', 'leaderboard', 'highest', 'lowest']
 
     if any(word in query_lower for word in time_keywords) and date_columns and numerical_columns:
         return 'line', (date_columns[0], numerical_columns[0])
@@ -492,6 +445,7 @@ def determine_chart_type(query, df):
         return 'pie', (categorical_columns[0], numerical_columns[0])
 
     return None, None
+
 
 if __name__ == "__main__":
     main()
