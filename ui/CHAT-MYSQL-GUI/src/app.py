@@ -71,7 +71,8 @@ def main():
               else:
                   st.session_state.user = user_data
                   st.experimental_rerun()
-                  st.stop()  # Ensure no further code is executed after rerun
+                  st.stop()  # Stop further execution after rerun
+
 
 
         return  # Stop further execution until logged in
