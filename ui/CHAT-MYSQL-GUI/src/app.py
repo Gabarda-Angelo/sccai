@@ -55,18 +55,18 @@ def authenticate(email, password):
             if data.get("status") == "success" and "data" in data:
                 st.session_state.authenticated = True
                 st.session_state.user = data["data"]
-                show_popup("Login Successful!")
+                st.success("Login Successful!")
                 return True
             else:
                 error_message = data.get("error", "Invalid credentials")
-                show_popup(f"Login failed: {error_message}")
+                st.error(f"Login failed: {error_message}")
         else:
-            # Attempt to extract error message even if the status code isn't 200.
             error_message = data.get("error", "Unknown error")
-            show_popup(f"Login failed: {error_message} (Server error: {response.status_code})")
+            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
     except Exception as e:
-        show_popup(f"Authentication error: {str(e)}")
+        st.error(f"Authentication error: {str(e)}")
     return False
+
 
 
 # Function to handle user queries
