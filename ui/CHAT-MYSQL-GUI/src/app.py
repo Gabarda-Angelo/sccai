@@ -29,9 +29,18 @@ def authenticate(email, password):
     try:
         response = requests.post(
             st.secrets["API_URL"],
-            params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
-            data={"email": email, "password": password}
+            params={
+                "action": "authenticate_user",
+                "key": st.secrets["API_KEY"]
+            },
+            json={  # Send as JSON instead of form data
+                "email": email,
+                "password": password
+            }
         )
+        # Add debug logging
+        st.write(f"API Response Status: {response.status_code}")
+        st.write(f"API Response Content: {response.text}")
         if response.status_code == 200:
             data = response.json()
             if data.get("status") == "success":
