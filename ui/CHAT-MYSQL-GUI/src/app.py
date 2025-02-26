@@ -13,61 +13,107 @@ import datetime
 import pytz
 
 
+# Set page config at the top (must be first Streamlit command)
+st.set_page_config(
+    page_title="AcaSquad AI",
+    page_icon=":speech_balloon:",
+    layout="wide"
+)
+
+# Initialize session state for authentication
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.user = None
+
+# Function to authenticate user via API
+def authenticate(email, password):
+    try:
+        response = requests.post(
+            st.secrets["API_URL"],
+            params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
+            data={"email": email, "password": password}
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "success":
+                st.session_state.authenticated = True
+                st.session_state.user = data["data"]
+                return True
+            else:
+                st.error("Invalid email or password")
+        else:
+            st.error(f"Authentication failed: {response.status_code}")
+    except Exception as e:
+        st.error(f"Error during authentication: {str(e)}")
+    return False
+
+# Main application logic
 def main():
-    st.set_page_config(
-        page_title="AcaSquad AI",
-        page_icon=":speech_balloon:",
-        layout="wide"
-    )
+    if not st.session_state.authenticated:
+        # Show login form if not authenticated
+        st.title("Login to AcaSquad AI")
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Login")
+            if submit:
+                if authenticate(email, password):
+                    st.rerun()
+    else:
+        # Check role and proceed
+        if st.session_state.user["role"] in ["Owner", "Admin"]:
+            # Main app interface
+            st.title("Chat with our AcaSquad AI")
+            st.markdown("""
+            <style>
+            .stChatInput {
+                bottom: 20px;
+                left: 10%;
+                z-index: 1000;
+            }
+            .stChatMessage {
+                margin-bottom: 20px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
 
-    st.title("Chat with our AcaSquad AI")
-    st.markdown("""
-    <style>
-    .stChatInput {
-        bottom: 20px;
-        left: 10%;
-        z-index: 1000;
-    }
-    .stChatMessage {
-        margin-bottom: 20px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+            if "chat_history" not in st.session_state:
+                st.session_state.chat_history = [
+                    AIMessage(content="Hello! I will be your assistant. Ask me anything about your store."),
+                ]
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = [
-            AIMessage(
-                content="Hello! I will be your assistant. Ask me anything about your store."),
-        ]
+            with st.sidebar:
+                st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
+                st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
+                if st.button("Logout"):
+                    st.session_state.authenticated = False
+                    st.session_state.user = None
+                    st.rerun()
+                st.markdown("""
+                <a href="https://bookstoreadmin.shop/ui/pos.php" target="_blank" style="display: inline-block; width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer; color:white; text-align:center; text-decoration: none;">
+                    Back
+                </a>
+                """, unsafe_allow_html=True)
 
-    with st.sidebar:
-        st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
-        st.markdown("""
-        <a href="https://bookstoreadmin.shop/ui/pos.php" target="_blank" style="display: inline-block; width:100%; padding:10px; background-color:#f25570; border:none; cursor:pointer; color:white; text-align:center; text-decoration: none;">
-            Back
-        </a>
-        """, unsafe_allow_html=True)
-
-        st.markdown("### Quick Queries")
-
-        # Organized into expandable categories
-        with st.expander("📈 Sales Performance", expanded=True):
-            sales_queries = [
-                "What are the best-selling products of all time?",
-                "What are the top 5 best-selling products this month?",
-                "Which product has the highest sales this week?",
-                "What are the best-selling products in each category?",
-                "Show me the sales trend over the past year.",
-                "What is the daily sales trend for this month?",
-                "Which day of the week has the highest sales?",
-                "What is the total revenue this year?",
-                "What is the total revenue for today?",
-                "What is the average daily revenue this month?",
-                "What is the revenue breakdown by product category?"
-            ]
-            for q in sales_queries:
-                if st.button(q, key=f"sales_{q}"):
-                    handle_query(q)
+                st.markdown("### Quick Queries")
+                # Sidebar content (copy your expanders here)
+                with st.expander("📈 Sales Performance", expanded=True):
+                    sales_queries = [
+                        "What are the best-selling products of all time?",
+                        "What are the top 5 best-selling products this month?",
+                        "Which product has the highest sales this week?",
+                        "What are the best-selling products in each category?",
+                        "Show me the sales trend over the past year.",
+                        "What is the daily sales trend for this month?",
+                        "Which day of the week has the highest sales?",
+                        "What is the total revenue this year?",
+                        "What is the total revenue for today?",
+                        "What is the average daily revenue this month?",
+                        "What is the revenue breakdown by product category?"
+                    ]
+                    for q in sales_queries:
+                        if st.button(q, key=f"sales_{q}"):
+                            handle_query(q)
 
         with st.expander("📦 Inventory Management"):
             inventory_queries = [
@@ -145,6 +191,13 @@ def main():
     user_query = st.chat_input("Type a message...")
     if user_query:
         handle_query(user_query)
+else:
+      # Deny access for non-Owner/Admin roles (e.g., Cashier)
+      st.error("Sorry, you can't access this. Please contact the Admin.")
+      if st.button("Logout"):
+          st.session_state.authenticated = False
+          st.session_state.user = None
+          st.rerun()
 
 
 def handle_query(query: str):
