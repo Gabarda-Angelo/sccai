@@ -366,7 +366,7 @@ def main():
         # Place the login form in the middle column
         with col2:
           st.title("Login to AcaSquad AI")
-        with col3:
+        with col2:
           with st.form("login_form"):
               email = st.text_input("Email")
               password = st.text_input("Password", type="password")
