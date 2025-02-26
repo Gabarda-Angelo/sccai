@@ -88,10 +88,10 @@ def main():
                 unsafe_allow_html=True,
             )
 
-            if "chat_history" not in st.session_state:
-                st.session_state.chat_history = [
-                    AIMessage(content="Hello! I will be your assistant. Ask me anything about your store."),
-                ]
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = [
+                AIMessage(content="Hello! I will be your assistant. Ask me anything about your store."),
+            ]
 
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
