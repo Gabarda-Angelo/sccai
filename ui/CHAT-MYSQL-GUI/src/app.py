@@ -46,8 +46,12 @@ def authenticate(email, password):
             params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
             json={"email": email, "password": password}
         )
-        if response.status_code == 200:
+        try:
             data = response.json()
+        except json.JSONDecodeError:
+            data = {}
+
+        if response.status_code == 200:
             if data.get("status") == "success" and "data" in data:
                 st.session_state.authenticated = True
                 st.session_state.user = data["data"]
@@ -57,10 +61,13 @@ def authenticate(email, password):
                 error_message = data.get("error", "Invalid credentials")
                 show_popup(f"Login failed: {error_message}")
         else:
-            show_popup(f"Server error: {response.status_code}")
+            # Attempt to extract error message even if the status code isn't 200.
+            error_message = data.get("error", "Unknown error")
+            show_popup(f"Login failed: {error_message} (Server error: {response.status_code})")
     except Exception as e:
         show_popup(f"Authentication error: {str(e)}")
     return False
+
 
 # Function to handle user queries
 def handle_query(query: str):
