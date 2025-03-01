@@ -44,30 +44,85 @@ def authenticate(email, password):
         response = requests.post(
             st.secrets["API_URL"],
             params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
-            json={"email": email, "password": password},
-            timeout=10
+            json={"email": email, "password": password}
         )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("status") == "success" and "data" in data:
-            st.session_state.authenticated = True
-            st.session_state.user = data["data"]
-            st.success("Login Successful!")
-            return True
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            data = {}
+
+        if response.status_code == 200:
+            if data.get("status") == "success" and "data" in data:
+                st.session_state.authenticated = True
+                st.session_state.user = data["data"]
+                st.success("Login Successful!")
+                return True
+            else:
+                error_message = data.get("error", "Invalid credentials")
+                st.error(f"Login failed: {error_message}")
         else:
-            error_message = data.get("error", "Invalid credentials")
-            st.error(f"Login failed: {error_message}")
-    except requests.ConnectionError:
-        st.error("Network error: Unable to connect to the authentication server.")
-    except requests.Timeout:
-        st.error("Request timed out. Please try again later.")
-    except requests.HTTPError as e:
-        st.error(f"HTTP error: {e.response.status_code} - {e.response.reason}")
-    except json.JSONDecodeError:
-        st.error("Invalid response from server. Please try again.")
+            error_message = data.get("error", "Unknown error")
+            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
     except Exception as e:
-        st.error(f"An unexpected error occurred: {str(e)}")
+        st.error(f"Authentication error: {str(e)}")
     return False
+
+
+
+# Function to handle user queries
+def handle_query(query: str):
+    """Process a user's query, update chat history, and display response."""
+    st.session_state.chat_history.append(HumanMessage(content=query))
+    with st.chat_message("Human", avatar="dist/img/Human.png"):
+        st.markdown(query)
+
+    with st.spinner("Analyzing your query..."):
+        try:
+            natural_response, data = get_response(query, st.session_state.chat_history)
+        except Exception as e:
+            natural_response = f"An error occurred: {str(e)}"
+            data = None
+
+    st.session_state.chat_history.append(AIMessage(content=natural_response))
+    with st.chat_message("AI", avatar="dist/img/ai.png"):
+        st.markdown(natural_response)
+        if data and isinstance(data, list) and len(data) >= 1:
+            df = pd.DataFrame(data)
+            # Rename monetary columns to include peso sign
+            monetary_columns = [
+                "subtotal", "total", "unit_price", "sale_price",
+                "purchase_price", "total_price", "paid", "due"
+            ]
+            for col in monetary_columns:
+                if col in df.columns:
+                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+            chart_type, columns = determine_chart_type(query, df)
+            if chart_type:
+                st.markdown(f"### {chart_type.capitalize()} Chart")
+                try:
+                    if chart_type == 'bar':
+                        st.bar_chart(df.set_index(columns[0])[columns[1]])
+                    elif chart_type == 'line':
+                        st.line_chart(df.set_index(columns[0])[columns[1]])
+                    elif chart_type == 'pie':
+                        fig, ax = plt.subplots()
+                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                        st.pyplot(fig)
+                except Exception as e:
+                    st.write(f"Chart rendering failed: {str(e)}")
+            if len(df) > 1 or len(df.columns) > 1:
+                st.table(df)
+
+# Function to display chat history
+def display_chat_history():
+    """Render the chat history in the UI."""
+    for message in st.session_state.chat_history:
+        if isinstance(message, AIMessage):
+            with st.chat_message("AI", avatar="dist/img/ai.png"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("Human", avatar="dist/img/Human.png"):
+                st.markdown(message.content)
 
 # Function to fetch data from API
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
@@ -80,19 +135,21 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
                 params["query"] = quote(params["query"])
             payload.update(params)
 
-        if st.secrets.get("DEBUG_API", "false").lower() == "true":
-            st.sidebar.write(f"**Debug - API Request:** {payload}")
-
         response = requests.get(
             st.secrets["API_URL"],
             params=payload,
             timeout=15
         )
-        response.raise_for_status()
-        data = response.json()
 
-        if st.secrets.get("DEBUG_API", "false").lower() == "true":
-            st.sidebar.write(f"**Debug - API Response:** {response.text}")
+        if not response.text.strip():
+            st.error("Received empty response from API")
+            return None
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            st.error(f"Invalid JSON response: {response.text[:200]}...")
+            return None
 
         if data.get("status") == "success":
             return data["data"]
@@ -100,21 +157,13 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
             error_msg = data.get("error", "Unknown error")
             st.error(f"API Error: {error_msg}")
             return None
-    except requests.ConnectionError:
-        st.error("Network error: Unable to connect to the API.")
-    except requests.Timeout:
-        st.error("Request timed out. Please try again later.")
-    except requests.HTTPError as e:
-        st.error(f"HTTP error: {e.response.status_code} - {e.response.reason}")
-    except json.JSONDecodeError:
-        st.error("Invalid JSON response from API.")
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {str(e)}")
-    return None
+    except requests.RequestException as e:
+        st.error(f"Connection error: {str(e)}")
+        return None
 
-# Enhanced function to define SQL chain for complex query generation
+# Function to define SQL chain for query generation
 def get_sql_chain():
-    """Create a chain to generate SQL queries, optimized for complex questions."""
+    """Create a chain to generate SQL queries based on user input."""
     schema = """
     Database Schema:
     - categories: category_id (PK), category_name, created_at
@@ -127,8 +176,8 @@ def get_sql_chain():
     """
 
     template = """
-    You are an expert SQL assistant retrieving data from the SCC School Store Database via an API.
-    Based on the provided schema, generate a precise SQL query to fully answer the user's question, even if it requires complex operations.
+    You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
+    Based on the provided table schema, generate an accurate SQL query to answer the user's question.
 
     **Database Schema:**
     {schema}
@@ -139,16 +188,16 @@ def get_sql_chain():
     **Conversation History:** {chat_history}
 
     **Instructions:**
-    - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - Handle time ranges (e.g., last month, this year) with appropriate date conditions.
-    - Use multiple JOINs to combine data from related tables as needed.
-    - Leverage foreign key relationships (e.g., invoice_id, product_id, employee_id).
-    - Apply aggregate functions (SUM, AVG, COUNT) for summarization questions.
-    - Use subqueries or CTEs for complex filtering or calculations when necessary.
-    - Order results logically if sorting is implied (e.g., 'top' → ORDER BY DESC).
-    - Interpret ambiguous questions sensibly based on schema context.
-    - Avoid referencing non-existent tables/columns.
-    - Provide only the SQL query, no explanations.
+    - When the user mentions "today," use the current date in Singapore, e.g., WHERE order_date = '{current_sg_date}'.
+    - If the user specifies a time range up to the current time, use appropriate conditions.
+    - Use appropriate joins when data from multiple tables is needed.
+    - Consider foreign key relationships between tables.
+    - Use aggregate functions if the question implies summarization.
+    - Filter data based on conditions mentioned in the question.
+    - Order results if the question suggests a specific order.
+    - Assume the most common interpretation if the question is ambiguous.
+    - Avoid referencing non-existent tables or columns.
+    - Provide only the SQL query as output, without explanations.
 
     **User Question:** {question}
     """
@@ -167,21 +216,25 @@ def get_sql_chain():
     ]
 
     proposal_chain = RunnableParallel(
-        **{f"proposal_{i}": prompt | llm | StrOutputParser() for i, llm in enumerate(proposal_llms)}
+        **{
+            f"proposal_{i}": prompt | llm | StrOutputParser()
+            for i, llm in enumerate(proposal_llms)
+        }
     )
 
     aggregator_template = """
-    Synthesize the most accurate and complete SQL query from these proposals:
+    Synthesize the best SQL query from these proposals:
     {proposals}
 
     **Original Question:** {question}
     **Schema:** {schema}
 
-    Return ONLY the final SQL query with:
-    1. SELECT statement
-    2. Explicit JOIN syntax with table aliases
-    3. No comments or markdown
-    4. Correctness over simplicity for complex questions
+    Return ONLY the final SQL query without any explanations or formatting.
+    The query must:
+    1. Start with SELECT
+    2. Use explicit JOIN syntax
+    3. Include proper table aliases
+    4. Contain no comments or markdown
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -241,9 +294,6 @@ def get_response(user_query: str, chat_history: list):
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
 
-        if st.secrets.get("DEBUG_SQL", "false").lower() == "true":
-            st.sidebar.write(f"**Debug - SQL Query:**\n```sql\n{query}\n```")
-
         if not query.lower().startswith("select"):
             st.error(f"Invalid query generated: {query}")
             return "Failed to generate valid database query. Please try again.", None
@@ -287,146 +337,66 @@ def get_response(user_query: str, chat_history: list):
 
         return natural_response, data
 
-# Enhanced function to determine chart type for data visualization
+# Function to determine chart type for data visualization
 def determine_chart_type(query, df):
-    """Determine the appropriate chart type based on query and data, prioritizing explicit user requests."""
-    if df.empty:
+    """Determine the appropriate chart type based on query and data."""
+    if df.empty or len(df.columns) < 2:
         return None, None
 
+    columns = df.columns.tolist()
     query_lower = query.lower()
-    if 'bar chart' in query_lower:
-        chart_type = 'bar'
-    elif 'line chart' in query_lower:
-        chart_type = 'line'
-    elif 'pie chart' in query_lower:
-        chart_type = 'pie'
-    else:
-        time_keywords = ['over time', 'trend', 'monthly', 'daily', 'weekly', 'yearly', 'history', 'progress']
-        distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
-        ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
 
-        if any(word in query_lower for word in time_keywords):
-            chart_type = 'line'
-        elif any(word in query_lower for word in distribution_keywords):
-            chart_type = 'pie'
-        elif any(word in query_lower for word in ranking_keywords):
-            chart_type = 'bar'
-        else:
-            chart_type = 'bar'  # Default
+    for col in columns:
+        df[col] = pd.to_numeric(df[col], errors="ignore")
 
-    # Convert columns to numeric where possible
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='ignore')
-
-    categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
-    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     date_columns = [
-        col for col in df.columns
+        col for col in columns
         if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])
     ]
+    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
 
-    if chart_type in ['bar', 'pie']:
-        if categorical_columns and numerical_columns:
-            columns = (categorical_columns[0], numerical_columns[0])
-        else:
-            columns = None
-    elif chart_type == 'line':
-        if date_columns and numerical_columns:
-            columns = (date_columns[0], numerical_columns[0])
-        else:
-            columns = None
-    else:
-        columns = None
+    time_keywords = ['over time', 'trend', 'monthly', 'daily', 'weekly', 'yearly', 'history', 'progress']
+    distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
+    ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
 
-    return chart_type, columns
+    if any(word in query_lower for word in time_keywords) and date_columns and numerical_columns:
+        return "line", (date_columns[0], numerical_columns[0])
+    elif any(word in query_lower for word in distribution_keywords) and categorical_columns and numerical_columns:
+        total = df[numerical_columns[0]].sum()
+        if total > 0:
+            return "pie", (categorical_columns[0], numerical_columns[0])
+    elif any(word in query_lower for word in ranking_keywords) and categorical_columns and numerical_columns:
+        return "bar", (categorical_columns[0], numerical_columns[0])
 
-# Enhanced function to display response with charts
-def display_response(natural_response, data):
-    """Display the AI's natural language response and associated data visualizations."""
-    with st.chat_message("AI", avatar="dist/img/ai.png"):
-        st.markdown(natural_response)
-        if data and isinstance(data, list) and len(data) >= 1:
-            df = pd.DataFrame(data)
-            if st.secrets.get("DEBUG_API", "false").lower() == "true":
-                st.sidebar.write(f"**Debug - DataFrame:**\n{df.head()}")
+    if categorical_columns and numerical_columns:
+        return "bar", (categorical_columns[0], numerical_columns[0])
+    elif date_columns and numerical_columns:
+        return "line", (date_columns[0], numerical_columns[0])
+    elif len(numerical_columns) >= 1 and len(categorical_columns) >= 1:
+        return "pie", (categorical_columns[0], numerical_columns[0])
 
-            # Rename monetary columns
-            monetary_columns = [
-                "subtotal", "total", "unit_price", "sale_price",
-                "purchase_price", "total_price", "paid", "due"
-            ]
-            for col in monetary_columns:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-
-            chart_type, columns = determine_chart_type(st.session_state.last_query, df)
-            if st.secrets.get("DEBUG_API", "false").lower() == "true":
-                st.sidebar.write(f"**Debug - Chart Type:** {chart_type}, **Columns:** {columns}")
-
-            if chart_type and columns:
-                st.markdown(f"### {chart_type.capitalize()} Chart")
-                try:
-                    if chart_type == 'bar':
-                        st.bar_chart(df.set_index(columns[0])[columns[1]].dropna())
-                    elif chart_type == 'line':
-                        st.line_chart(df.set_index(columns[0])[columns[1]].dropna())
-                    elif chart_type == 'pie':
-                        fig, ax = plt.subplots()
-                        ax.pie(df[columns[1]].dropna(), labels=df[columns[0]], autopct='%1.1f%%')
-                        st.pyplot(fig)
-                except Exception as e:
-                    st.error(f"Chart rendering failed: {str(e)}")
-            else:
-                st.warning("No suitable columns for chart visualization.")
-
-            if len(df) > 100:
-                st.write(f"Showing first 100 rows of {len(df)} total rows.")
-                st.table(df.head(100))
-            else:
-                st.table(df)
-
-# Function to handle user queries
-def handle_query(query: str):
-    """Process a user's query, update chat history, and display response."""
-    st.session_state.chat_history.append(HumanMessage(content=query))
-    with st.chat_message("Human", avatar="dist/img/Human.png"):
-        st.markdown(query)
-
-    with st.spinner("Processing your query... This may take a moment."):
-        try:
-            natural_response, data = get_response(query, st.session_state.chat_history)
-        except Exception as e:
-            natural_response = f"An error occurred: {str(e)}"
-            data = None
-
-    st.session_state.chat_history.append(AIMessage(content=natural_response))
-    display_response(natural_response, data)
-
-# Function to display chat history
-def display_chat_history():
-    """Render the chat history in the UI."""
-    for message in st.session_state.chat_history:
-        if isinstance(message, AIMessage):
-            with st.chat_message("AI", avatar="dist/img/ai.png"):
-                st.markdown(message.content)
-        elif isinstance(message, HumanMessage):
-            with st.chat_message("Human", avatar="dist/img/Human.png"):
-                st.markdown(message.content)
+    return None, None
 
 # Main application logic
 def main():
     """Main function to run the AcaSquad AI application."""
     if not st.session_state.authenticated:
-        st.title("Login to AcaSquad AI")
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            submit = st.form_submit_button("Login")
-            if submit:
-                if authenticate(email, password):
-                    st.session_state.authenticated = True
-                    st.rerun()
+        # Create three columns with relative widths [1, 3, 1]
+        col1, col2, col3 = st.columns([1, 3, 1])
+        
+        # Place the login form in the middle column
+        with col2:
+            st.title("Login to AcaSquad AI")
+        with col2:
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Login")
+                if submit:
+                    if authenticate(email, password):
+                        st.session_state.authenticated = True
+                        st.rerun()
     else:
         if st.session_state.user["role"] in ["Owner", "Admin"]:
             st.title("Chat with our AcaSquad AI")
@@ -536,12 +506,6 @@ def main():
                 st.session_state.chat_history = [
                     AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
                 ]
-
-            if st.button("Clear Chat History"):
-                st.session_state.chat_history = [
-                    AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
-                ]
-                st.rerun()
 
             display_chat_history()
             user_query = st.chat_input("Type a message...")
