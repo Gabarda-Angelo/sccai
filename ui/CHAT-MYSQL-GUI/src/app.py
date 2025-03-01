@@ -67,6 +67,8 @@ def authenticate(email, password):
         st.error(f"Authentication error: {str(e)}")
     return False
 
+
+
 # Function to handle user queries
 def handle_query(query: str):
     """Process a user's query, update chat history, and display response."""
@@ -186,8 +188,6 @@ def get_sql_chain():
     **Conversation History:** {chat_history}
 
     **Instructions:**
-    - Stick strictly to the provided schema. Do not assume any additional tables, columns, or relationships (e.g., no 'customers' table exists).
-    - If the query cannot be answered with the available data, respond with 'I cannot answer this query with the available data.'
     - When the user mentions "today," use the current date in Singapore, e.g., WHERE order_date = '{current_sg_date}'.
     - If the user specifies a time range up to the current time, use appropriate conditions.
     - Use appropriate joins when data from multiple tables is needed.
@@ -196,6 +196,7 @@ def get_sql_chain():
     - Filter data based on conditions mentioned in the question.
     - Order results if the question suggests a specific order.
     - Assume the most common interpretation if the question is ambiguous.
+    - Avoid referencing non-existent tables or columns.
     - Provide only the SQL query as output, without explanations.
 
     **User Question:** {question}
@@ -345,17 +346,12 @@ def determine_chart_type(query, df):
     columns = df.columns.tolist()
     query_lower = query.lower()
 
-    # Attempt to convert potential date columns to datetime
     for col in columns:
-        if "date" in col.lower():
-            try:
-                df[col] = pd.to_datetime(df[col])
-            except:
-                pass
+        df[col] = pd.to_numeric(df[col], errors="ignore")
 
     date_columns = [
         col for col in columns
-        if pd.api.types.is_datetime64_any_dtype(df[col])
+        if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])
     ]
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
@@ -364,23 +360,21 @@ def determine_chart_type(query, df):
     distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
     ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
 
-    # Prioritize line charts for time-series data
-    if date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif any(word in query_lower for word in time_keywords) and date_columns and numerical_columns:
+    if any(word in query_lower for word in time_keywords) and date_columns and numerical_columns:
         return "line", (date_columns[0], numerical_columns[0])
     elif any(word in query_lower for word in distribution_keywords) and categorical_columns and numerical_columns:
-        if len(df[categorical_columns[0]].unique()) < 10:
+        total = df[numerical_columns[0]].sum()
+        if total > 0:
             return "pie", (categorical_columns[0], numerical_columns[0])
-        else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
     elif any(word in query_lower for word in ranking_keywords) and categorical_columns and numerical_columns:
         return "bar", (categorical_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
-        if len(df[categorical_columns[0]].unique()) < 10:
-            return "pie", (categorical_columns[0], numerical_columns[0])
-        else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
+
+    if categorical_columns and numerical_columns:
+        return "bar", (categorical_columns[0], numerical_columns[0])
+    elif date_columns and numerical_columns:
+        return "line", (date_columns[0], numerical_columns[0])
+    elif len(numerical_columns) >= 1 and len(categorical_columns) >= 1:
+        return "pie", (categorical_columns[0], numerical_columns[0])
 
     return None, None
 
@@ -414,9 +408,6 @@ def main():
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
-                    st.rerun()
-                if st.button("Clear Chat History"):
-                    st.session_state.chat_history = [AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")]
                     st.rerun()
 
                 # Quick Queries Expanders
