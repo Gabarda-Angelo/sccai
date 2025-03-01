@@ -112,9 +112,9 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
         st.error(f"An unexpected error occurred: {str(e)}")
     return None
 
-# Function to define SQL chain for query generation
+# Enhanced function to define SQL chain for complex query generation
 def get_sql_chain():
-    """Create a chain to generate SQL queries based on user input."""
+    """Create a chain to generate SQL queries, optimized for complex questions."""
     schema = """
     Database Schema:
     - categories: category_id (PK), category_name, created_at
@@ -127,8 +127,8 @@ def get_sql_chain():
     """
 
     template = """
-    You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
-    Based on the provided table schema, generate an accurate SQL query to answer the user's question.
+    You are an expert SQL assistant retrieving data from the SCC School Store Database via an API.
+    Based on the provided schema, generate a precise SQL query to fully answer the user's question, even if it requires complex operations.
 
     **Database Schema:**
     {schema}
@@ -139,16 +139,16 @@ def get_sql_chain():
     **Conversation History:** {chat_history}
 
     **Instructions:**
-    - When the user mentions "today," use the current date in Singapore, e.g., WHERE order_date = '{current_sg_date}'.
-    - If the user specifies a time range up to the current time, use appropriate conditions.
-    - Use appropriate joins when data from multiple tables is needed.
-    - Consider foreign key relationships between tables.
-    - Use aggregate functions if the question implies summarization.
-    - Filter data based on conditions mentioned in the question.
-    - Order results if the question suggests a specific order.
-    - Assume the most common interpretation if the question is ambiguous.
-    - Avoid referencing non-existent tables or columns.
-    - Provide only the SQL query as output, without explanations.
+    - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
+    - Handle time ranges (e.g., last month, this year) with appropriate date conditions.
+    - Use multiple JOINs to combine data from related tables as needed.
+    - Leverage foreign key relationships (e.g., invoice_id, product_id, employee_id).
+    - Apply aggregate functions (SUM, AVG, COUNT) for summarization questions.
+    - Use subqueries or CTEs for complex filtering or calculations when necessary.
+    - Order results logically if sorting is implied (e.g., 'top' → ORDER BY DESC).
+    - Interpret ambiguous questions sensibly based on schema context.
+    - Avoid referencing non-existent tables/columns.
+    - Provide only the SQL query, no explanations.
 
     **User Question:** {question}
     """
@@ -167,25 +167,21 @@ def get_sql_chain():
     ]
 
     proposal_chain = RunnableParallel(
-        **{
-            f"proposal_{i}": prompt | llm | StrOutputParser()
-            for i, llm in enumerate(proposal_llms)
-        }
+        **{f"proposal_{i}": prompt | llm | StrOutputParser() for i, llm in enumerate(proposal_llms)}
     )
 
     aggregator_template = """
-    Synthesize the best SQL query from these proposals:
+    Synthesize the most accurate and complete SQL query from these proposals:
     {proposals}
 
     **Original Question:** {question}
     **Schema:** {schema}
 
-    Return ONLY the final SQL query without any explanations or formatting.
-    The query must:
-    1. Start with SELECT
-    2. Use explicit JOIN syntax
-    3. Include proper table aliases
-    4. Contain no comments or markdown
+    Return ONLY the final SQL query with:
+    1. SELECT statement
+    2. Explicit JOIN syntax with table aliases
+    3. No comments or markdown
+    4. Correctness over simplicity for complex questions
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -294,6 +290,9 @@ def get_response(user_query: str, chat_history: list):
 # Enhanced function to determine chart type for data visualization
 def determine_chart_type(query, df):
     """Determine the appropriate chart type based on query and data, prioritizing explicit user requests."""
+    if df.empty:
+        return None, None
+
     query_lower = query.lower()
     if 'bar chart' in query_lower:
         chart_type = 'bar'
@@ -314,6 +313,10 @@ def determine_chart_type(query, df):
             chart_type = 'bar'
         else:
             chart_type = 'bar'  # Default
+
+    # Convert columns to numeric where possible
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='ignore')
 
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
@@ -337,13 +340,16 @@ def determine_chart_type(query, df):
 
     return chart_type, columns
 
-# Function to display response
+# Enhanced function to display response with charts
 def display_response(natural_response, data):
     """Display the AI's natural language response and associated data visualizations."""
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            if st.secrets.get("DEBUG_API", "false").lower() == "true":
+                st.sidebar.write(f"**Debug - DataFrame:**\n{df.head()}")
+
             # Rename monetary columns
             monetary_columns = [
                 "subtotal", "total", "unit_price", "sale_price",
@@ -351,21 +357,29 @@ def display_response(natural_response, data):
             ]
             for col in monetary_columns:
                 if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+
             chart_type, columns = determine_chart_type(st.session_state.last_query, df)
+            if st.secrets.get("DEBUG_API", "false").lower() == "true":
+                st.sidebar.write(f"**Debug - Chart Type:** {chart_type}, **Columns:** {columns}")
+
             if chart_type and columns:
                 st.markdown(f"### {chart_type.capitalize()} Chart")
                 try:
                     if chart_type == 'bar':
-                        st.bar_chart(df.set_index(columns[0])[columns[1]])
+                        st.bar_chart(df.set_index(columns[0])[columns[1]].dropna())
                     elif chart_type == 'line':
-                        st.line_chart(df.set_index(columns[0])[columns[1]])
+                        st.line_chart(df.set_index(columns[0])[columns[1]].dropna())
                     elif chart_type == 'pie':
                         fig, ax = plt.subplots()
-                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                        ax.pie(df[columns[1]].dropna(), labels=df[columns[0]], autopct='%1.1f%%')
                         st.pyplot(fig)
                 except Exception as e:
-                    st.write(f"Chart rendering failed: {str(e)}")
+                    st.error(f"Chart rendering failed: {str(e)}")
+            else:
+                st.warning("No suitable columns for chart visualization.")
+
             if len(df) > 100:
                 st.write(f"Showing first 100 rows of {len(df)} total rows.")
                 st.table(df.head(100))
