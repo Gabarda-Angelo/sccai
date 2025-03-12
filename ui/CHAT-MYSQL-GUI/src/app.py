@@ -128,6 +128,14 @@ def display_chat_history():
             with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
 
+# Function to clear chat history
+def clear_chat():
+    """Reset the chat history to start a new conversation."""
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+    ]
+    st.success("Chat history cleared. Starting a new conversation!")
+
 # Function to fetch data from API with caching
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
@@ -394,6 +402,11 @@ def main():
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
+                    st.rerun()
+                
+                # Add Clear Chat button
+                if st.button("Clear Chat"):
+                    clear_chat()
                     st.rerun()
 
                 # Quick Queries Expanders
