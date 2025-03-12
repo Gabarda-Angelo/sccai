@@ -67,8 +67,6 @@ def authenticate(email, password):
         st.error(f"Authentication error: {str(e)}")
     return False
 
-
-
 # Function to handle user queries
 def handle_query(query: str):
     """Process a user's query, update chat history, and display response."""
@@ -88,28 +86,34 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
-            # Rename monetary columns to include peso sign
-            monetary_columns = [
-                "subtotal", "total", "unit_price", "sale_price",
-                "purchase_price", "total_price", "paid", "due"
-            ]
-            for col in monetary_columns:
-                if col in df.columns:
+            # Preprocess data for charts
+            for col in df.columns:
+                if "date" in col.lower():
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]):
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+            
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
-                st.markdown(f"### {chart_type.capitalize()} Chart")
-                try:
+                with st.spinner("Generating chart..."):
+                    st.markdown(f"### {chart_type.capitalize()} Chart")
+                    fig, ax = plt.subplots()
                     if chart_type == 'bar':
-                        st.bar_chart(df.set_index(columns[0])[columns[1]])
+                        df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                        ax.set_title(f"{columns[1]} by {columns[0]}")
+                        ax.set_xlabel(columns[0])
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'line':
-                        st.line_chart(df.set_index(columns[0])[columns[1]])
+                        df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                        ax.set_title(f"{columns[1]} Over Time")
+                        ax.set_xlabel("Date")
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
-                        fig, ax = plt.subplots()
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                        st.pyplot(fig)
-                except Exception as e:
-                    st.write(f"Chart rendering failed: {str(e)}")
+                        ax.set_title(f"Distribution of {columns[1]}")
+                    st.pyplot(fig)
+                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
 
@@ -124,7 +128,8 @@ def display_chat_history():
             with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
 
-# Function to fetch data from API
+# Function to fetch data from API with caching
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
     """Fetch data from the API based on the specified action and parameters."""
     try:
@@ -161,6 +166,15 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
         st.error(f"Connection error: {str(e)}")
         return None
 
+# Function to validate SQL queries
+def validate_query(query):
+    """Validate that the SQL query is safe and executable."""
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT"]
+    query_upper = query.upper()
+    if not query_upper.startswith("SELECT"):
+        return False
+    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+
 # Function to define SQL chain for query generation
 def get_sql_chain():
     """Create a chain to generate SQL queries based on user input."""
@@ -185,11 +199,10 @@ def get_sql_chain():
     **Current date in Singapore:** {current_sg_date} (format: YYYY-MM-DD)
     **Current datetime in Singapore:** {current_sg_datetime} (format: YYYY-MM-DD HH:MM:SS)
 
-    **Conversation History:** {chat_history}
+    **Conversation Summary:** {chat_summary}
 
     **Instructions:**
     - When the user mentions "today," use the current date in Singapore, e.g., WHERE order_date = '{current_sg_date}'.
-    - If the user specifies a time range up to the current time, use appropriate conditions.
     - Use appropriate joins when data from multiple tables is needed.
     - Consider foreign key relationships between tables.
     - Use aggregate functions if the question implies summarization.
@@ -244,6 +257,7 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])  # Last 3 messages
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -294,9 +308,8 @@ def get_response(user_query: str, chat_history: list):
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
 
-        if not query.lower().startswith("select"):
-            st.error(f"Invalid query generated: {query}")
-            return "Failed to generate valid database query. Please try again.", None
+        if not validate_query(query):
+            return "Failed to generate a valid database query. Please try again.", None
 
         data = fetch_data_from_api("execute_query", {"query": query})
         if not data:
@@ -309,16 +322,11 @@ def get_response(user_query: str, chat_history: list):
         - **History:** {chat_history}
 
         **Guidelines:**
-        1. If results are empty, suggest possible reasons or alternative queries.
-        2. Be clear and concise.
-        3. Highlight key numbers or trends.
-        4. Use bullet points for lists.
-        5. Mention any data limitations.
-        6. Keep under 200 words.
-        7. Use markdown formatting to enhance readability.
-        8. Use the peso sign (₱) for monetary values.
-        9. Avoid referencing non-existent data.
-        10. For follow-up questions, reference the previous query and results.
+        1. If results are empty, suggest: "No data found. This could be due to no records for the specified period or item. Try a broader time frame or different product."
+        2. Highlight key insights (e.g., highest/lowest values, trends).
+        3. Use markdown: **bold** for emphasis, - for lists.
+        4. Include peso sign (₱) for monetary values.
+        5. Keep concise, under 200 words.
         """
 
         chain = (
@@ -346,49 +354,27 @@ def determine_chart_type(query, df):
     columns = df.columns.tolist()
     query_lower = query.lower()
 
-    for col in columns:
-        df[col] = pd.to_numeric(df[col], errors="ignore")
-
-    date_columns = [
-        col for col in columns
-        if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])
-    ]
+    date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
 
-    time_keywords = ['over time', 'trend', 'monthly', 'daily', 'weekly', 'yearly', 'history', 'progress']
-    distribution_keywords = ['distribution', 'share', 'percentage', 'proportion', 'breakdown']
-    ranking_keywords = ['top', 'best', 'most', 'ranking', 'leaderboard', 'highest', 'lowest']
-
-    if any(word in query_lower for word in time_keywords) and date_columns and numerical_columns:
+    if date_columns and numerical_columns:
         return "line", (date_columns[0], numerical_columns[0])
-    elif any(word in query_lower for word in distribution_keywords) and categorical_columns and numerical_columns:
-        total = df[numerical_columns[0]].sum()
-        if total > 0:
+    elif categorical_columns and numerical_columns:
+        unique_categories = len(df[categorical_columns[0]].unique())
+        if unique_categories <= 6 and "percentage" in query_lower:
             return "pie", (categorical_columns[0], numerical_columns[0])
-    elif any(word in query_lower for word in ranking_keywords) and categorical_columns and numerical_columns:
-        return "bar", (categorical_columns[0], numerical_columns[0])
-
-    if categorical_columns and numerical_columns:
-        return "bar", (categorical_columns[0], numerical_columns[0])
-    elif date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif len(numerical_columns) >= 1 and len(categorical_columns) >= 1:
-        return "pie", (categorical_columns[0], numerical_columns[0])
-
+        else:
+            return "bar", (categorical_columns[0], numerical_columns[0])
     return None, None
 
 # Main application logic
 def main():
     """Main function to run the AcaSquad AI application."""
     if not st.session_state.authenticated:
-        # Create three columns with relative widths [1, 3, 1]
         col1, col2, col3 = st.columns([1, 3, 1])
-        
-        # Place the login form in the middle column
         with col2:
             st.title("Login to AcaSquad AI")
-        with col2:
             with st.form("login_form"):
                 email = st.text_input("Email")
                 password = st.text_input("Password", type="password")
