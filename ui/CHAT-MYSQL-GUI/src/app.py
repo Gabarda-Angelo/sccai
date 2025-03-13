@@ -426,7 +426,7 @@ def main():
                     ]
                     for q in sales_queries:
                         if st.button(q, key=f"sales_{q}"):
-                            handle_query(q)
+                            # handle_query(q)
 
                 with st.expander("📦 Inventory Management"):
                     inventory_queries = [
