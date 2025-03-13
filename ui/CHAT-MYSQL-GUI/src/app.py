@@ -1,4 +1,4 @@
-I don't want the response answer to be appeared in the sidebar: " import streamlit as st
+import streamlit as st
 import streamlit.components.v1 as components
 import requests
 import json
@@ -527,4 +527,4 @@ hide_streamlit_style = """
 footer {visibility: hidden;}
 </style>
 """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)"
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
