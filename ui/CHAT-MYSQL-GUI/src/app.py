@@ -69,9 +69,9 @@ def authenticate(email, password):
 
 # Function to handle user queries
 def handle_query(query: str):
-    """Process a user's query, update chat history, and display response."""
+    """Process a user's query, update chat history, and display response in main area."""
     st.session_state.chat_history.append(HumanMessage(content=query))
-    with st.chat_message("Human", avatar="dist/img/Human.png"):
+    with st.chat_message("Human", avatar="dist/img/Human.png"):  # Main area
         st.markdown(query)
 
     with st.spinner("Analyzing your query..."):
@@ -82,7 +82,7 @@ def handle_query(query: str):
             data = None
 
     st.session_state.chat_history.append(AIMessage(content=natural_response))
-    with st.chat_message("AI", avatar="dist/img/ai.png"):
+    with st.chat_message("AI", avatar="dist/img/ai.png"):  # Main area
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
@@ -97,7 +97,7 @@ def handle_query(query: str):
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 with st.spinner("Generating chart..."):
-                    st.markdown(f"### {chart_type.capitalize()} Chart")
+                    st.markdown(f"### {chart_type.capitalize()} Chart")  # Main area
                     fig, ax = plt.subplots()
                     if chart_type == 'bar':
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
@@ -112,20 +112,20 @@ def handle_query(query: str):
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
-                    st.pyplot(fig)
-                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+                    st.pyplot(fig)  # Main area
+                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")  # Main area
             if len(df) > 1 or len(df.columns) > 1:
-                st.table(df)
+                st.table(df)  # Main area
 
 # Function to display chat history
 def display_chat_history():
-    """Render the chat history in the UI."""
+    """Render the chat history in the main area."""
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
-            with st.chat_message("AI", avatar="dist/img/ai.png"):
+            with st.chat_message("AI", avatar="dist/img/ai.png"):  # Main area
                 st.markdown(message.content)
         elif isinstance(message, HumanMessage):
-            with st.chat_message("Human", avatar="dist/img/Human.png"):
+            with st.chat_message("Human", avatar="dist/img/Human.png"):  # Main area
                 st.markdown(message.content)
 
 # Function to clear chat history
@@ -426,7 +426,7 @@ def main():
                     ]
                     for q in sales_queries:
                         if st.button(q, key=f"sales_{q}"):
-                            # handle_query(q)
+                            handle_query(q)
 
                 with st.expander("📦 Inventory Management"):
                     inventory_queries = [
@@ -505,8 +505,8 @@ def main():
                 st.session_state.chat_history = [
                     AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
                 ]
-      
-            display_chat_history()
+
+            display_chat_history()  # Main area
             user_query = st.chat_input("Type a message...")
             if user_query:
                 handle_query(user_query)
