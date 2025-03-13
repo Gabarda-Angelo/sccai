@@ -1,4 +1,4 @@
-import streamlit as st
+I don't want the response answer to be appeared in the sidebar: " import streamlit as st
 import streamlit.components.v1 as components
 import requests
 import json
@@ -69,9 +69,9 @@ def authenticate(email, password):
 
 # Function to handle user queries
 def handle_query(query: str):
-    """Process a user's query, update chat history, and display response in main area."""
+    """Process a user's query, update chat history, and display response."""
     st.session_state.chat_history.append(HumanMessage(content=query))
-    with st.chat_message("Human", avatar="dist/img/Human.png"):  # Main area
+    with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
 
     with st.spinner("Analyzing your query..."):
@@ -82,7 +82,7 @@ def handle_query(query: str):
             data = None
 
     st.session_state.chat_history.append(AIMessage(content=natural_response))
-    with st.chat_message("AI", avatar="dist/img/ai.png"):  # Main area
+    with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
@@ -97,7 +97,7 @@ def handle_query(query: str):
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 with st.spinner("Generating chart..."):
-                    st.markdown(f"### {chart_type.capitalize()} Chart")  # Main area
+                    st.markdown(f"### {chart_type.capitalize()} Chart")
                     fig, ax = plt.subplots()
                     if chart_type == 'bar':
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
@@ -112,20 +112,20 @@ def handle_query(query: str):
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
-                    st.pyplot(fig)  # Main area
-                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")  # Main area
+                    st.pyplot(fig)
+                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
-                st.table(df)  # Main area
+                st.table(df)
 
 # Function to display chat history
 def display_chat_history():
-    """Render the chat history in the main area."""
+    """Render the chat history in the UI."""
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
-            with st.chat_message("AI", avatar="dist/img/ai.png"):  # Main area
+            with st.chat_message("AI", avatar="dist/img/ai.png"):
                 st.markdown(message.content)
         elif isinstance(message, HumanMessage):
-            with st.chat_message("Human", avatar="dist/img/Human.png"):  # Main area
+            with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
 
 # Function to clear chat history
@@ -506,7 +506,7 @@ def main():
                     AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
                 ]
 
-            display_chat_history()  # Main area
+            display_chat_history()
             user_query = st.chat_input("Type a message...")
             if user_query:
                 handle_query(user_query)
@@ -527,4 +527,4 @@ hide_streamlit_style = """
 footer {visibility: hidden;}
 </style>
 """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)"
