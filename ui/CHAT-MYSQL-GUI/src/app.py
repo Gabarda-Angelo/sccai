@@ -226,7 +226,7 @@ def get_sql_chain():
     prompt = ChatPromptTemplate.from_template(template)
     models = [
         "llama3-8b-8192",
-        "llama-3.1-70b-versatile",
+        "llama-3.1-70b-versatile",  # Updated model replacing mixtral-8x7b-32768
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
