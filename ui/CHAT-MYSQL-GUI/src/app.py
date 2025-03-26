@@ -320,6 +320,8 @@ def get_response(user_query: str, chat_history: list):
             return "Failed to generate a valid database query. Please try again.", None
 
         data = fetch_data_from_api("execute_query", {"query": query})
+        if data is None:
+            return "Couldn't retrieve data. Please try again or rephrase your question.", None 
         if not data:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None
 
@@ -330,7 +332,7 @@ def get_response(user_query: str, chat_history: list):
         - **History:** {chat_history}
 
         **Guidelines:**
-        1. If results are empty,Couldn't retrieve data, suggest: "No data found. This could be due to no records for the specified period or item. Try a broader time frame or different product."
+        1. If results are empty, suggest: "No data found. This could be due to no records for the specified period or item. Try a broader time frame or different product."
         2. Highlight key insights (e.g., highest/lowest values, trends).
         3. Use markdown: **bold** for emphasis, - for lists.
         4. Include peso sign (₱) for monetary values.
