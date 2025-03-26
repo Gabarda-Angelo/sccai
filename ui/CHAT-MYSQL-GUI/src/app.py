@@ -322,8 +322,7 @@ def get_response(user_query: str, chat_history: list):
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None 
-        if not data:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None
+        
 
         response_template = """
         Generate a natural language response based on:
