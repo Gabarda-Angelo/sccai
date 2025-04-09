@@ -51,6 +51,7 @@ def authenticate_with_token(token):
             timeout=10
         )
         data = response.json()
+        st.write("Debug: API Response:", data)  # Debug output
         if response.status_code == 200 and data.get("status") == "success" and "data" in data:
             st.session_state.authenticated = True
             st.session_state.user = data["data"]
@@ -59,9 +60,10 @@ def authenticate_with_token(token):
         else:
             error_message = data.get("error", "Invalid token")
             st.error(f"Token authentication failed: {error_message}")
+            return False
     except Exception as e:
         st.error(f"Token authentication error: {str(e)}")
-    return False
+        return False
 
 # Function to authenticate via email and password
 def authenticate(email, password):
@@ -81,9 +83,10 @@ def authenticate(email, password):
         else:
             error_message = data.get("error", "Invalid credentials")
             st.error(f"Login failed: {error_message}")
+            return False
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
-    return False
+        return False
 
 # Function to handle user queries
 def handle_query(query: str):
@@ -392,11 +395,20 @@ def determine_chart_type(query, df):
 # Main application logic
 def main():
     """Main function to run the AcaSquad AI application."""
-    # Check for token in URL parameters
+    # Debug: Display query params
     query_params = st.query_params
+    st.write("Debug: Query Params:", query_params.to_dict())  # Debug output
+    
+    # Get token from query params
     token = query_params.get("token")
+    if isinstance(token, list):
+        token = token[0]  # Handle case where token is a list
     if token and not st.session_state.authenticated:
-        authenticate_with_token(token)
+        st.write("Debug: Attempting token auth with:", token)  # Debug
+        if authenticate_with_token(token):
+            st.session_state.authenticated = True
+            st.session_state.user = st.session_state.user  # Ensure user persists
+            st.rerun()  # Force rerun after successful auth
 
     if not st.session_state.authenticated:
         col1, col2, col3 = st.columns([1, 3, 1])
