@@ -32,12 +32,38 @@ def show_popup(message):
         width=0,
     )
 
-# Initialize session state for authentication
+# Initialize session state
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+    ]
 
-# Function to authenticate user via API
+# Function to authenticate via token
+def authenticate_with_token(token):
+    """Authenticate a user using a token via the API."""
+    try:
+        response = requests.get(
+            st.secrets["API_URL"],
+            params={"action": "validate_token", "key": st.secrets["API_KEY"], "token": token},
+            timeout=10
+        )
+        data = response.json()
+        if response.status_code == 200 and data.get("status") == "success" and "data" in data:
+            st.session_state.authenticated = True
+            st.session_state.user = data["data"]
+            st.success("Automatic login successful!")
+            return True
+        else:
+            error_message = data.get("error", "Invalid token")
+            st.error(f"Token authentication failed: {error_message}")
+    except Exception as e:
+        st.error(f"Token authentication error: {str(e)}")
+    return False
+
+# Function to authenticate via email and password
 def authenticate(email, password):
     """Authenticate a user by sending credentials to the API."""
     try:
@@ -46,23 +72,15 @@ def authenticate(email, password):
             params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
             json={"email": email, "password": password}
         )
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            data = {}
-
-        if response.status_code == 200:
-            if data.get("status") == "success" and "data" in data:
-                st.session_state.authenticated = True
-                st.session_state.user = data["data"]
-                st.success("Login Successful!")
-                return True
-            else:
-                error_message = data.get("error", "Invalid credentials")
-                st.error(f"Login failed: {error_message}")
+        data = response.json()
+        if response.status_code == 200 and data.get("status") == "success" and "data" in data:
+            st.session_state.authenticated = True
+            st.session_state.user = data["data"]
+            st.success("Login Successful!")
+            return True
         else:
-            error_message = data.get("error", "Unknown error")
-            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
+            error_message = data.get("error", "Invalid credentials")
+            st.error(f"Login failed: {error_message}")
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
     return False
@@ -158,12 +176,7 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
             st.error("Received empty response from API")
             return None
 
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            st.error(f"Invalid JSON response: {response.text[:200]}...")
-            return None
-
+        data = response.json()
         if data.get("status") == "success":
             return data["data"]
         else:
@@ -226,7 +239,7 @@ def get_sql_chain():
     prompt = ChatPromptTemplate.from_template(template)
     models = [
         "llama3-8b-8192",
-        "llama-3.3-70b-versatile",  # Updated model replacing mixtral-8x7b-32768
+        "llama-3.3-70b-versatile",
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
@@ -265,7 +278,7 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])  # Last 3 messages
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -322,7 +335,6 @@ def get_response(user_query: str, chat_history: list):
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None 
-        
 
         response_template = """
         Generate a natural language response based on:
@@ -380,6 +392,12 @@ def determine_chart_type(query, df):
 # Main application logic
 def main():
     """Main function to run the AcaSquad AI application."""
+    # Check for token in URL parameters
+    query_params = st.query_params
+    token = query_params.get("token")
+    if token and not st.session_state.authenticated:
+        authenticate_with_token(token)
+
     if not st.session_state.authenticated:
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
@@ -502,11 +520,6 @@ def main():
                             handle_query(q)
 
             # Main area setup
-            if "chat_history" not in st.session_state:
-                st.session_state.chat_history = [
-                    AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
-                ]
-
             display_chat_history()
             user_query = st.chat_input("Type a message...")
             if user_query:
