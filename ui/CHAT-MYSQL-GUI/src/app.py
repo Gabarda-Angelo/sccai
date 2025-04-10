@@ -413,7 +413,7 @@ def main():
                 # Quick Queries Expanders
                 with st.expander("📈 Sales Performance", expanded=True):
                     sales_queries = [
-                        "What are the best-selling products of all time?",
+                        "what are the best selling products from the beginning of the sales up to the current time",
                         "What are the top 5 best-selling products this month?",
                         "Which product has the highest sales this week?",
                         "What are the best-selling products in each category?",
