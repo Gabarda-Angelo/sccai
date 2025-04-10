@@ -32,40 +32,40 @@ def show_popup(message):
         width=0,
     )
 
-# Initialize session state for authentication
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-    st.session_state.user = None
+# # Initialize session state for authentication
+# if "authenticated" not in st.session_state:
+#     st.session_state.authenticated = False
+#     st.session_state.user = None
 
-# Function to authenticate user via API
-def authenticate(email, password):
-    """Authenticate a user by sending credentials to the API."""
-    try:
-        response = requests.post(
-            st.secrets["API_URL"],
-            params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
-            json={"email": email, "password": password}
-        )
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            data = {}
+# # Function to authenticate user via API
+# def authenticate(email, password):
+#     """Authenticate a user by sending credentials to the API."""
+#     try:
+#         response = requests.post(
+#             st.secrets["API_URL"],
+#             params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
+#             json={"email": email, "password": password}
+#         )
+#         try:
+#             data = response.json()
+#         except json.JSONDecodeError:
+#             data = {}
 
-        if response.status_code == 200:
-            if data.get("status") == "success" and "data" in data:
-                st.session_state.authenticated = True
-                st.session_state.user = data["data"]
-                st.success("Login Successful!")
-                return True
-            else:
-                error_message = data.get("error", "Invalid credentials")
-                st.error(f"Login failed: {error_message}")
-        else:
-            error_message = data.get("error", "Unknown error")
-            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
-    except Exception as e:
-        st.error(f"Authentication error: {str(e)}")
-    return False
+#         if response.status_code == 200:
+#             if data.get("status") == "success" and "data" in data:
+#                 st.session_state.authenticated = True
+#                 st.session_state.user = data["data"]
+#                 st.success("Login Successful!")
+#                 return True
+#             else:
+#                 error_message = data.get("error", "Invalid credentials")
+#                 st.error(f"Login failed: {error_message}")
+#         else:
+#             error_message = data.get("error", "Unknown error")
+#             st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
+#     except Exception as e:
+#         st.error(f"Authentication error: {str(e)}")
+#     return False
 
 # Function to handle user queries
 def handle_query(query: str):
