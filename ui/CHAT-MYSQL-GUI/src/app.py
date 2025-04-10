@@ -103,12 +103,12 @@ def handle_query(query: str):
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} by {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel(columns[1].replace(' ', ' '))
                     elif chart_type == 'line':
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel(columns[1].replace(' ', ' '))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
