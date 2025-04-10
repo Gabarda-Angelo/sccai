@@ -32,12 +32,16 @@ def show_popup(message):
         width=0,
     )
 
-# Initialize session state for authentication
+# Initialize session state for authentication and chat history
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+    ]
 
-# Function to authenticate user via API
+# Function to authenticate user via API (manual login)
 def authenticate(email, password):
     """Authenticate a user by sending credentials to the API."""
     try:
@@ -46,26 +50,53 @@ def authenticate(email, password):
             params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
             json={"email": email, "password": password}
         )
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            data = {}
-
-        if response.status_code == 200:
-            if data.get("status") == "success" and "data" in data:
-                st.session_state.authenticated = True
-                st.session_state.user = data["data"]
-                st.success("Login Successful!")
-                return True
-            else:
-                error_message = data.get("error", "Invalid credentials")
-                st.error(f"Login failed: {error_message}")
-        else:
-            error_message = data.get("error", "Unknown error")
-            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
+        data = response.json() if response.text else {}
+        if response.status_code == 200 and data.get("status") == "success" and "data" in data:
+            return data["data"]
+        return None
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
+        return None
+
+# Function to verify session data from URL parameters
+def verify_session_from_params():
+    """Verify session data passed via URL parameters using the verify_session API action."""
+    params = st.query_params
+    email = params.get("email", [""])[0]
+    token = params.get("token", [""])[0]
+    first_name = params.get("first_name", [""])[0]
+    last_name = params.get("last_name", [""])[0]
+    employee_id = params.get("employee_id", [""])[0]
+    role = params.get("role", [""])[0]
+
+    if email and token:
+        try:
+            response = requests.post(
+                st.secrets["API_URL"],
+                params={"action": "verify_session", "key": st.secrets["API_KEY"]},
+                json={"email": email, "token": token}
+            )
+            data = response.json() if response.status_code == 200 else {}
+            if data.get("status") == "success" and "data" in data:
+                st.session_state.authenticated = True
+                st.session_state.user = {
+                    "employee_id": employee_id or data["data"]["employee_id"],
+                    "first_name": first_name or data["data"]["first_name"],
+                    "last_name": last_name or data["data"]["last_name"],
+                    "email": email,
+                    "role": role or data["data"]["role"]
+                }
+                return True
+            else:
+                st.error(f"Session verification failed: {data.get('error', 'Invalid session')}")
+        except Exception as e:
+            st.error(f"Session verification error: {str(e)}")
     return False
+
+# Check URL parameters for session data on app load
+if not st.session_state.authenticated:
+    if verify_session_from_params():
+        st.success("Logged in via session!")
 
 # Function to handle user queries
 def handle_query(query: str):
@@ -92,7 +123,7 @@ def handle_query(query: str):
                     df[col] = pd.to_datetime(df[col], errors='coerce')
                 if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} "}, inplace=True)
+                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
@@ -103,12 +134,12 @@ def handle_query(query: str):
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} by {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace(' ', ' '))
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'line':
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel(columns[1].replace(' ', ' '))
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
@@ -226,7 +257,7 @@ def get_sql_chain():
     prompt = ChatPromptTemplate.from_template(template)
     models = [
         "llama3-8b-8192",
-        "llama-3.3-70b-versatile",  # Updated model replacing mixtral-8x7b-32768
+        "llama-3.3-70b-versatile",
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
@@ -322,7 +353,6 @@ def get_response(user_query: str, chat_history: list):
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None 
-        
 
         response_template = """
         Generate a natural language response based on:
@@ -389,8 +419,10 @@ def main():
                 password = st.text_input("Password", type="password")
                 submit = st.form_submit_button("Login")
                 if submit:
-                    if authenticate(email, password):
+                    user_data = authenticate(email, password)
+                    if user_data:
                         st.session_state.authenticated = True
+                        st.session_state.user = user_data
                         st.rerun()
     else:
         if st.session_state.user["role"] in ["Owner", "Admin"]:
@@ -405,7 +437,6 @@ def main():
                     st.session_state.user = None
                     st.rerun()
                 
-                # Add Clear Chat button
                 if st.button("Clear Chat"):
                     clear_chat()
                     st.rerun()
@@ -413,7 +444,7 @@ def main():
                 # Quick Queries Expanders
                 with st.expander("📈 Sales Performance", expanded=True):
                     sales_queries = [
-                        "what are the best selling products from the beginning of the sales up to the current time?",
+                        "What are the best-selling products of all time?",
                         "What are the top 5 best-selling products this month?",
                         "Which product has the highest sales this week?",
                         "What are the best-selling products in each category?",
@@ -457,7 +488,7 @@ def main():
                         if st.button(q, key=f"emp_{q}"):
                             handle_query(q)
 
-                with st.expander("💰 Financial Insights"):
+                with stvolvedexpander("💰 Financial Insights"):
                     financial_queries = [
                         "Give me the sales invoices details for today.",
                         "List all invoices from last week.",
@@ -502,11 +533,6 @@ def main():
                             handle_query(q)
 
             # Main area setup
-            if "chat_history" not in st.session_state:
-                st.session_state.chat_history = [
-                    AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
-                ]
-
             display_chat_history()
             user_query = st.chat_input("Type a message...")
             if user_query:
