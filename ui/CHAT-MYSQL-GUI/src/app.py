@@ -394,7 +394,7 @@ def main():
     #                     st.rerun()
     # else:
         # if st.session_state.user["role"] in ["Owner", "Admin"]:
-            st.title("Chat with our AcaSquad AI")
+          st.title("Chat with our AcaSquad AI")
 
             # Sidebar setup
             with st.sidebar:
