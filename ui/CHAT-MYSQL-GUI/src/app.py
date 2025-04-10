@@ -380,19 +380,19 @@ def determine_chart_type(query, df):
 # Main application logic
 def main():
     """Main function to run the AcaSquad AI application."""
-    if not st.session_state.authenticated:
-        col1, col2, col3 = st.columns([1, 3, 1])
-        with col2:
-            st.title("Login to AcaSquad AI")
-            with st.form("login_form"):
-                email = st.text_input("Email")
-                password = st.text_input("Password", type="password")
-                submit = st.form_submit_button("Login")
-                if submit:
-                    if authenticate(email, password):
-                        st.session_state.authenticated = True
-                        st.rerun()
-    else:
+    # if not st.session_state.authenticated:
+    #     col1, col2, col3 = st.columns([1, 3, 1])
+    #     with col2:
+    #         st.title("Login to AcaSquad AI")
+    #         with st.form("login_form"):
+    #             email = st.text_input("Email")
+    #             password = st.text_input("Password", type="password")
+    #             submit = st.form_submit_button("Login")
+    #             if submit:
+    #                 if authenticate(email, password):
+    #                     st.session_state.authenticated = True
+    #                     st.rerun()
+    # else:
         if st.session_state.user["role"] in ["Owner", "Admin"]:
             st.title("Chat with our AcaSquad AI")
 
