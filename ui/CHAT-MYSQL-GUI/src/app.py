@@ -92,7 +92,7 @@ def handle_query(query: str):
                     df[col] = pd.to_datetime(df[col], errors='coerce')
                 if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                    df.rename(columns={col: f"{col} "}, inplace=True)
             
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
