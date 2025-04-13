@@ -336,6 +336,7 @@ def get_response(user_query: str, chat_history: list):
         3. Use markdown: **bold** for emphasis, - for lists.
         4. Include peso sign (₱) for monetary values.
         5. Keep concise, under 200 words.
+        6. there is no customer name, only cashier name.
         """
 
         chain = (
