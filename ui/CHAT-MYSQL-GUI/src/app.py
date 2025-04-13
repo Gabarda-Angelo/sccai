@@ -90,10 +90,10 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price"]):
+                if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price", "net_total", "base_cost", "profit", "avg_sales_value", "total_inventory_value", "category_value"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count"]:
+                elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
                     df[col] = pd.to_numeric(df[col], errors='coerce')  # Keep as quantity
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
@@ -104,18 +104,18 @@ def handle_query(query: str):
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'line':
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
                     st.pyplot(fig)
                     st.download_button("Download Data", df.to_csv(index=False), "data.csv")
-            if len(df) > 1 or len(df.columns) > 1:
+            if len(df) > 0 or len(df.columns) > 1:
                 st.table(df)
 
 # Function to display chat history
@@ -211,15 +211,34 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use explicit INNER JOINs to ensure only valid records are included.
-    - Group by unique identifiers (e.g., product_id, category_id) alongside names to avoid ambiguity.
-    - For 'best-selling products,' calculate SUM(id.quantity) and order by total_sold DESC.
-    - For revenue, use SUM(i.total) or SUM(id.total_price) as appropriate.
+    - Use explicit INNER JOINs for data integrity.
+    - Group by unique identifiers (e.g., product_id, invoice_id) alongside names to avoid ambiguity.
+    - For 'best-selling products,' use SUM(id.quantity) and order by total_sold DESC.
+    - For revenue, use SUM(i.total) or SUM(id.total_price) as specified.
     - Exclude canceled/invalid invoices with WHERE i.total > 0.
-    - Handle empty results gracefully (return empty sets, not errors).
-    - Provide only the SQL query as output, without explanations.
+    - Return empty result sets for no data, not errors.
+    - Use DECIMAL for monetary fields; INTEGER for quantities.
+    - Provide only the SQL query, without explanations.
 
     **Specific Query Mappings:**
+    - "overview statistics":
+      SELECT 
+          ROUND(AVG(i.total), 2) AS avg_sales_value,
+          SUM(i.discount) AS total_discount,
+          COUNT(DISTINCT p.product_id) AS total_products,
+          COUNT(DISTINCT c.category_id) AS total_categories,
+          COUNT(i.invoice_id) AS total_invoices,
+          SUM(i.total) AS total_revenue,
+          SUM(i.total - i.discount) AS net_total,
+          SUM(id.quantity * p.purchase_price) AS base_cost,
+          (SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)) AS profit
+      FROM invoices i
+      INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
+      INNER JOIN products p ON id.product_id = p.product_id
+      INNER JOIN categories c ON p.category_id = c.category_id
+      WHERE i.total > 0
+      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s')
+          BETWEEN '2025-02-14 00:00:00' AND '2025-04-13 13:41:26';
     - "best-selling products of all time":
       SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
       FROM invoice_details id 
@@ -499,7 +518,7 @@ def get_sql_chain():
       ORDER BY il.log_date DESC 
       LIMIT 10;
     - "profit margins for all products":
-      SELECT p.product_id, p.product_name, (p.sale_price - p.purchase_price) / p.sale_price * 100 AS profit_margin 
+      SELECT p.product_id, p.product_name, ROUND((p.sale_price - p.purchase_price) / p.sale_price * 100, 2) AS profit_margin 
       FROM products p 
       ORDER BY profit_margin DESC;
     - "total units sold for all products this month":
@@ -547,12 +566,11 @@ def get_sql_chain():
       WHERE p.stock <= p.reorder_level * 1.1;
 
     **Guidelines:**
-    - "Sales" typically means quantity sold (SUM(id.quantity)) unless revenue is specified (SUM(i.total)).
-    - "This month" means YEAR(i.order_date) = YEAR(CURDATE()) AND MONTH(i.order_date) = MONTH(CURDATE()).
-    - "This week" means i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE().
-    - "Today" means i.order_date = CURDATE().
-    - Use DECIMAL for monetary fields (total, sale_price); INTEGER for quantities.
-    - Return empty result sets for no data, not errors.
+    - "Sales" means SUM(id.quantity) unless revenue (SUM(i.total)) is specified.
+    - Use 'CURDATE()' for today, 'DATE_SUB(CURDATE(), INTERVAL X)' for periods.
+    - For discounts, use i.discount from invoices table.
+    - Ensure monetary values use ROUND(x, 2) for precision.
+    - Verify category counts against product counts for consistency.
 
     **User Question:** {question}
     """
@@ -588,7 +606,7 @@ def get_sql_chain():
     The query must:
     1. Start with SELECT
     2. Use explicit INNER JOIN syntax
-    3. Include WHERE i.total > 0 for invoice-related queries
+    3. Include WHERE i.total > 0 for invoice queries
     4. Group by unique IDs (e.g., product_id) alongside names
     5. Contain no comments or markdown
     """
@@ -623,7 +641,7 @@ def get_response(user_query: str, chat_history: list):
         "sales", "invoice", "details", "product", "category", "stock", "revenue",
         "order", "employee", "payment", "quantity", "price", "total", "subtotal",
         "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve"
+        "provide", "get", "fetch", "retrieve", "overview"
     ]
 
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
@@ -654,8 +672,8 @@ def get_response(user_query: str, chat_history: list):
         if not validate_query(query):
             return "Failed to generate a valid database query. Please try again.", None
 
-        # Clear cache for critical queries to ensure fresh data
-        if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory"]):
+        # Clear cache for critical queries
+        if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
             fetch_data_from_api.clear()
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
@@ -669,11 +687,13 @@ def get_response(user_query: str, chat_history: list):
 
         **Guidelines:**
         1. If results are empty, state: "No data found for this query. This could be due to no records matching the criteria."
-        2. For quantities (e.g., total_sold), use 'units sold' or 'items'.
+        2. For quantities (e.g., total_sold, total_invoices), use 'units', 'items', or 'records'.
         3. For monetary values, use peso sign (₱) and format to 2 decimal places.
         4. Highlight key insights (e.g., top item, highest value).
         5. Use markdown: **bold** for emphasis, - for lists.
-        6. Keep concise, under 200 words.
+        6. If total_discount = 0, note: "No discounts recorded, which is unusual for this period."
+        7. If total_categories ≥ total_products, caution: "High category count relative to products; verify category assignments."
+        8. Keep concise, under 200 words.
         """
 
         chain = (
@@ -749,7 +769,15 @@ def main():
                     st.rerun()
 
                 # Quick Queries Expanders
-                with st.expander("📈 Sales Performance", expanded=True):
+                with st.expander("📊 Overview", expanded=True):
+                    overview_queries = [
+                        "Show overview statistics"
+                    ]
+                    for q in overview_queries:
+                        if st.button(q, key=f"overview_{q}"):
+                            handle_query(q)
+
+                with st.expander("📈 Sales Performance"):
                     sales_queries = [
                         "What are the best-selling products of all time?",
                         "What are the top 5 best-selling products this month?",
