@@ -7,20 +7,20 @@ import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
 
-# Set page configuration (must be the first Streamlit command)
+# Set page configuration
 st.set_page_config(
     page_title="AcaSquad AI",
     page_icon=":speech_balloon:",
     layout="wide"
 )
 
-# Function to show pop-up messages using a JavaScript alert
+# Pop-up messages
 def show_popup(message):
     components.html(
         f"""
@@ -32,14 +32,13 @@ def show_popup(message):
         width=0,
     )
 
-# Initialize session state for authentication
+# Initialize session state
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user = None
 
-# Function to authenticate user via API
+# Authenticate user
 def authenticate(email, password):
-    """Authenticate a user by sending credentials to the API."""
     try:
         response = requests.post(
             st.secrets["API_URL"],
@@ -62,12 +61,12 @@ def authenticate(email, password):
                 st.error(f"Login failed: {error_message}")
         else:
             error_message = data.get("error", "Unknown error")
-                st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
+            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
     return False
 
-# NEW: Query mappings dictionary to bypass LangChain for common queries
+# Query mappings
 query_mappings = {
     "overview statistics": """
     SELECT 
@@ -470,9 +469,8 @@ query_mappings = {
     """
 }
 
-# NEW: Local response formatter to avoid Groq API calls
+# Local response formatter
 def format_natural_response(query, data):
-    """Generate natural language response locally to save tokens."""
     if not data:
         return "No data found for this query. This could be due to no records matching the criteria."
     
@@ -502,17 +500,15 @@ def format_natural_response(query, data):
                     f"Total invoices: **{stats['total_invoices']}**, "
                     f"Revenue: **₱{stats['total_revenue']:,.2f}**, "
                     f"Profit: **₱{stats['profit']:,.2f}**.")
-    return json.dumps(data, indent=2)  # Fallback for unmapped queries
+    return json.dumps(data, indent=2)
 
-# Function to handle user queries
+# Handle user queries
 def handle_query(query: str):
-    """Process a user's query, update chat history, and display response."""
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
 
     with st.spinner("Analyzing your query..."):
-        # NEW: Check for mapped queries first to bypass LangChain
         query_lower = query.lower().strip()
         if query_lower in query_mappings:
             query_sql = query_mappings[query_lower]
@@ -530,7 +526,6 @@ def handle_query(query: str):
             st.markdown(natural_response)
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
-                # Preprocess data for charts
                 for col in df.columns:
                     if "date" in col.lower():
                         df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -562,9 +557,8 @@ def handle_query(query: str):
                 if len(df) > 0 or len(df.columns) > 1:
                     st.table(df)
 
-# Function to display chat history
+# Display chat history
 def display_chat_history():
-    """Render the chat history in the UI."""
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
             with st.chat_message("AI", avatar="dist/img/ai.png"):
@@ -573,18 +567,16 @@ def display_chat_history():
             with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
 
-# Function to clear chat history
+# Clear chat history
 def clear_chat():
-    """Reset the chat history to start a new conversation."""
     st.session_state.chat_history = [
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
     st.success("Chat history cleared. Starting a new conversation!")
 
-# MODIFIED: Cache with date-based key and shorter TTL
+# Fetch data with caching
 @st.cache_data(ttl=3600)
 def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> dict:
-    """Fetch data from the API based on the specified action and parameters."""
     if not _date:
         _date = datetime.datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y-%m-%d')
     try:
@@ -621,18 +613,16 @@ def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> 
         st.error(f"Connection error: {str(e)}")
         return None
 
-# Function to validate SQL queries
+# Validate SQL queries
 def validate_query(query):
-    """Validate that the SQL query is safe and executable."""
     allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
     query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
     return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
 
-# MODIFIED: Slimmed-down SQL chain with smaller model
+# SQL chain with llama-3.3-70b-versatile
 def get_sql_chain():
-    """Create a chain to generate SQL queries based on user input."""
     schema = """
     - categories: category_id, category_name, created_at
     - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
@@ -663,7 +653,7 @@ def get_sql_chain():
     """
 
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGroq(model="llama3-8b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])  # NEW: Smaller model
+    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
 
     return (
         RunnablePassthrough.assign(
@@ -677,9 +667,8 @@ def get_sql_chain():
         | StrOutputParser()
     )
 
-# MODIFIED: Simplified response generation
+# Generate response
 def get_response(user_query: str, chat_history: list):
-    """Generate a natural language response and fetch data based on the user's query."""
     time_keywords = [
         "current time", "what time is it", "date and time",
         "today's date", "now", "time today", "date today"
@@ -719,7 +708,7 @@ def get_response(user_query: str, chat_history: list):
         if not validate_query(query):
             return "Failed to generate a valid database query. Please try again.", None
 
-        fetch_data_from_api.clear()  # Clear cache for fresh data
+        fetch_data_from_api.clear()
         data = fetch_data_from_api("execute_query", {"query": query}, _date=current_sg_date)
         if data is None:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None 
@@ -727,9 +716,8 @@ def get_response(user_query: str, chat_history: list):
         natural_response = format_natural_response(user_query, data)
         return natural_response, data
 
-# Function to determine chart type for data visualization
+# Determine chart type
 def determine_chart_type(query, df):
-    """Determine the appropriate chart type based on query and data."""
     if df.empty or len(df.columns) < 2:
         return None, None
 
@@ -750,9 +738,8 @@ def determine_chart_type(query, df):
             return "bar", (categorical_columns[0], numerical_columns[0])
     return None, None
 
-# Main application logic
+# Main application
 def main():
-    """Main function to run the AcaSquad AI application."""
     if not st.session_state.authenticated:
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
