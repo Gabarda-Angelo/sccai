@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
@@ -468,7 +468,6 @@ query_mappings = {
     WHERE p.stock <= p.reorder_level * 1.1
     """
 }
-
 # Local response formatter
 def format_natural_response(query, data):
     if not data:
@@ -501,6 +500,218 @@ def format_natural_response(query, data):
                     f"Revenue: **₱{stats['total_revenue']:,.2f}**, "
                     f"Profit: **₱{stats['profit']:,.2f}**.")
     return json.dumps(data, indent=2)
+
+# Fetch data with caching
+@st.cache_data(ttl=3600)
+def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> dict:
+    if not _date:
+        _date = datetime.datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y-%m-%d')
+    try:
+        payload = {"action": action, "key": st.secrets["API_KEY"]}
+        if params:
+            if "query" in params:
+                st.session_state.last_query = params["query"]
+                params["query"] = quote(params["query"])
+            payload.update(params)
+
+        response = requests.get(
+            st.secrets["API_URL"],
+            params=payload,
+            timeout=15
+        )
+
+        if not response.text.strip():
+            st.error("Received empty response from API")
+            return None
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            st.error(f"Invalid JSON response: {response.text[:200]}...")
+            return None
+
+        if data.get("status") == "success":
+            return data["data"]
+        else:
+            error_msg = data.get("error", "Unknown error")
+            st.error(f"API Error: {error_msg}")
+            return None
+    except requests.RequestException as e:
+        st.error(f"Connection error: {str(e)}")
+        return None
+
+# Validate SQL queries
+def validate_query(query):
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
+    query_upper = query.upper()
+    if not query_upper.startswith("SELECT"):
+        return False
+    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+
+# MoA SQL chain
+def get_sql_chain():
+    schema = """
+    - categories: category_id, category_name, created_at
+    - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
+    - inventory_logs: log_id, product_id, change_type, quantity, log_date, notes
+    - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+    - invoice_details: detail_id, invoice_id, product_id, quantity, unit_price, total_price
+    - products: product_id, barcode, product_name, category_id, description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+    - user_logins: log_id, employee_id, login_time, logout_time, ip_address
+    """
+
+    # Proposal prompt for individual models
+    proposal_template = """
+    Based on the schema and question, propose an accurate SQL query for the SCC School Store Database.
+
+    **Schema:** {schema}
+    **Current date (Singapore):** {current_sg_date}
+    **Current datetime (Singapore):** {current_sg_datetime}
+    **Recent chat:** {chat_summary}
+
+    **Rules:**
+    - Use INNER JOINs for relationships.
+    - Group by unique IDs (e.g., product_id) with names.
+    - For sales, use SUM(id.quantity); for revenue, SUM(i.total).
+    - Filter invalid invoices with WHERE i.total > 0.
+    - Use DECIMAL for money, INTEGER for quantities.
+    - Return only the SQL query.
+
+    **Question:** {question}
+    """
+
+    # Aggregation prompt
+    aggregation_template = """
+    You are an expert SQL query validator. Given a user question, database schema, and three proposed SQL queries, select the most accurate and efficient query or combine elements to create a better one.
+
+    **Schema:** {schema}
+    **Current date (Singapore):** {current_sg_date}
+    **Current datetime (Singapore):** {current_sg_datetime}
+    **Question:** {question}
+    **Proposed Queries:**
+    1. {proposal_1}
+    2. {proposal_2}
+    3. {proposal_3}
+
+    **Rules:**
+    - Ensure INNER JOINs are used correctly.
+    - Verify grouping includes unique IDs and names.
+    - Check for proper aggregation (e.g., SUM(id.quantity) for sales).
+    - Filter invalid invoices with WHERE i.total > 0.
+    - Optimize for clarity and performance.
+    - Return only the final SQL query.
+
+    **Output:** The best SQL query.
+    """
+
+    # Initialize models
+    primary_model = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+    secondary_model_1 = ChatGroq(model="llama3-8b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+    secondary_model_2 = ChatGroq(model="gemma2-9b-it", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+
+    # Proposal chains
+    proposal_prompt = ChatPromptTemplate.from_template(proposal_template)
+    proposal_chain_1 = (
+        RunnablePassthrough.assign(
+            schema=lambda _: schema,
+            current_sg_date=lambda x: x["current_sg_date"],
+            current_sg_datetime=lambda x: x["current_sg_datetime"],
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
+        )
+        | proposal_prompt
+        | primary_model
+        | StrOutputParser()
+    )
+    proposal_chain_2 = (
+        RunnablePassthrough.assign(
+            schema=lambda _: schema,
+            current_sg_date=lambda x: x["current_sg_date"],
+            current_sg_datetime=lambda x: x["current_sg_datetime"],
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
+        )
+        | proposal_prompt
+        | secondary_model_1
+        | StrOutputParser()
+    )
+    proposal_chain_3 = (
+        RunnablePassthrough.assign(
+            schema=lambda _: schema,
+            current_sg_date=lambda x: x["current_sg_date"],
+            current_sg_datetime=lambda x: x["current_sg_datetime"],
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
+        )
+        | proposal_prompt
+        | secondary_prompt
+        | secondary_model_2
+        | StrOutputParser()
+    )
+
+    # Aggregation chain
+    aggregation_prompt = ChatPromptTemplate.from_template(aggregation_template)
+    aggregation_chain = (
+        RunnablePassthrough.assign(
+            schema=lambda _: schema,
+            current_sg_date=lambda x: x["current_sg_date"],
+            current_sg_datetime=lambda x: x["current_sg_datetime"],
+            proposal_1=proposal_chain_1,
+            proposal_2=proposal_chain_2,
+            proposal_3=proposal_chain_3
+        )
+        | aggregation_prompt
+        | primary_model
+        | StrOutputParser()
+    )
+
+    return aggregation_chain
+
+# Generate response
+def get_response(user_query: str, chat_history: list):
+    time_keywords = [
+        "current time", "what time is it", "date and time",
+        "today's date", "now", "time today", "date today"
+    ]
+    data_keywords = [
+        "sales", "invoice", "details", "product", "category", "stock", "revenue",
+        "order", "employee", "payment", "quantity", "price", "total", "subtotal",
+        "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
+        "provide", "get", "fetch", "retrieve", "overview"
+    ]
+
+    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        current_time = datetime.datetime.now(singapore_tz)
+        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        return natural_response, None
+    else:
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        now_sg = datetime.datetime.now(singapore_tz)
+        current_sg_date = now_sg.strftime('%Y-%m-%d')
+        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+
+        sql_chain = get_sql_chain()
+        raw_query = sql_chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+            "current_sg_date": current_sg_date,
+            "current_sg_datetime": current_sg_datetime
+        })
+
+        query = raw_query.split(";")[0] + ";"
+        query = query.replace("```sql", "").replace("```", "").strip()
+        query = "\n".join(
+            [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
+        )
+
+        if not validate_query(query):
+            return "Failed to generate a valid database query. Please try again.", None
+
+        fetch_data_from_api.clear()
+        data = fetch_data_from_api("execute_query", {"query": query}, _date=current_sg_date)
+        if data is None:
+            return "Couldn't retrieve data. Please try again or rephrase your question.", None 
+
+        natural_response = format_natural_response(user_query, data)
+        return natural_response, data
 
 # Handle user queries
 def handle_query(query: str):
@@ -573,148 +784,6 @@ def clear_chat():
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
     st.success("Chat history cleared. Starting a new conversation!")
-
-# Fetch data with caching
-@st.cache_data(ttl=3600)
-def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> dict:
-    if not _date:
-        _date = datetime.datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y-%m-%d')
-    try:
-        payload = {"action": action, "key": st.secrets["API_KEY"]}
-        if params:
-            if "query" in params:
-                st.session_state.last_query = params["query"]
-                params["query"] = quote(params["query"])
-            payload.update(params)
-
-        response = requests.get(
-            st.secrets["API_URL"],
-            params=payload,
-            timeout=15
-        )
-
-        if not response.text.strip():
-            st.error("Received empty response from API")
-            return None
-
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            st.error(f"Invalid JSON response: {response.text[:200]}...")
-            return None
-
-        if data.get("status") == "success":
-            return data["data"]
-        else:
-            error_msg = data.get("error", "Unknown error")
-            st.error(f"API Error: {error_msg}")
-            return None
-    except requests.RequestException as e:
-        st.error(f"Connection error: {str(e)}")
-        return None
-
-# Validate SQL queries
-def validate_query(query):
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
-    query_upper = query.upper()
-    if not query_upper.startswith("SELECT"):
-        return False
-    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
-
-# SQL chain with llama-3.3-70b-versatile
-def get_sql_chain():
-    schema = """
-    - categories: category_id, category_name, created_at
-    - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
-    - inventory_logs: log_id, product_id, change_type, quantity, log_date, notes
-    - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
-    - invoice_details: detail_id, invoice_id, product_id, quantity, unit_price, total_price
-    - products: product_id, barcode, product_name, category_id, description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - user_logins: log_id, employee_id, login_time, logout_time, ip_address
-    """
-
-    template = """
-    Generate an accurate SQL query for the SCC School Store Database based on the schema and user question.
-
-    **Schema:** {schema}
-    **Current date (Singapore):** {current_sg_date}
-    **Current datetime (Singapore):** {current_sg_datetime}
-    **Recent chat:** {chat_summary}
-
-    **Rules:**
-    - Use INNER JOINs.
-    - Group by unique IDs (e.g., product_id) with names.
-    - For sales, use SUM(id.quantity); for revenue, SUM(i.total).
-    - Filter invalid invoices with WHERE i.total > 0.
-    - Use DECIMAL for money, INTEGER for quantities.
-    - Return only the SQL query.
-
-    **Question:** {question}
-    """
-
-    prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
-
-    return (
-        RunnablePassthrough.assign(
-            schema=lambda _: schema,
-            current_sg_date=lambda x: x["current_sg_date"],
-            current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
-        )
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-# Generate response
-def get_response(user_query: str, chat_history: list):
-    time_keywords = [
-        "current time", "what time is it", "date and time",
-        "today's date", "now", "time today", "date today"
-    ]
-    data_keywords = [
-        "sales", "invoice", "details", "product", "category", "stock", "revenue",
-        "order", "employee", "payment", "quantity", "price", "total", "subtotal",
-        "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve", "overview"
-    ]
-
-    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
-        return natural_response, None
-    else:
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-%d')
-        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
-
-        sql_chain = get_sql_chain()
-        raw_query = sql_chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
-        })
-
-        query = raw_query.split(";")[0] + ";"
-        query = query.replace("```sql", "").replace("```", "").strip()
-        query = "\n".join(
-            [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
-        )
-
-        if not validate_query(query):
-            return "Failed to generate a valid database query. Please try again.", None
-
-        fetch_data_from_api.clear()
-        data = fetch_data_from_api("execute_query", {"query": query}, _date=current_sg_date)
-        if data is None:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None 
-
-        natural_response = format_natural_response(user_query, data)
-        return natural_response, data
 
 # Determine chart type
 def determine_chart_type(query, df):
