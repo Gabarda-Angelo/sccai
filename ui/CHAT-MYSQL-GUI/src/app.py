@@ -157,12 +157,16 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
 
         if not response.text.strip():
             st.error("Received empty response from API")
+            with open("error_log.txt", "a") as f:
+                f.write(f"{datetime.datetime.now()}: Empty API response for query '{st.session_state.last_query}'\n")
             return None
 
         try:
             data = response.json()
         except json.JSONDecodeError:
             st.error(f"Invalid JSON response: {response.text[:200]}...")
+            with open("error_log.txt", "a") as f:
+                f.write(f"{datetime.datetime.now()}: Invalid JSON for query '{st.session_state.last_query}'\n")
             return None
 
         if data.get("status") == "success":
@@ -170,18 +174,24 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
         else:
             error_msg = data.get("error", "Unknown error")
             st.error(f"API Error: {error_msg}")
+            with open("error_log.txt", "a") as f:
+                f.write(f"{datetime.datetime.now()}: API error for query '{st.session_state.last_query}': {error_msg}\n")
             return None
     except requests.RequestException as e:
         st.error(f"Connection error: {str(e)}")
+        with open("error_log.txt", "a") as f:
+            f.write(f"{datetime.datetime.now()}: Connection error for query '{st.session_state.last_query}': {str(e)}\n")
         return None
 
 # Function to validate SQL queries
 def validate_query(query):
     """Validate that the SQL query is safe and executable."""
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT"]
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "INNER JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT"]
     query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
+    if "INNER JOIN" in query_upper and "ON" not in query_upper:
+        return False  # Ensure JOINs have ON clauses
     return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
 
 # Function to define SQL chain for query generation
@@ -253,10 +263,9 @@ def get_sql_chain():
 
     prompt = ChatPromptTemplate.from_template(template)
     models = [
-        "llama-4",
-        "llama-3.3-70b-versatile",
-        "llama3-70b-8192",
-        "gemma2-9b-it",
+        "qwen-2.5-coder-32b",  # Optimized for SQL generation
+        "meta-llama/llama-4-maverick-17b-128e-instruct",  # Advanced reasoning
+        "llama-3.3-70b-versatile",  # Stable fallback
     ]
 
     proposal_llms = [
@@ -302,7 +311,7 @@ def get_sql_chain():
             chat_history=lambda x: x["chat_history"],
         )
         | aggregator_prompt
-        | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+        | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
         | StrOutputParser()
     )
 
@@ -346,14 +355,30 @@ def get_response(user_query: str, chat_history: list):
         )
 
         if not validate_query(query):
-            return "Failed to generate a valid database query. Please try again.", None
+            fallback_chain = (
+                ChatPromptTemplate.from_template(
+                    "Explain why no valid database query could be generated for: {question}. Suggest rephrasing."
+                )
+                | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+                | StrOutputParser()
+            )
+            natural_response = fallback_chain.invoke({"question": user_query})
+            return natural_response, None
 
         # Clear cache for best-selling queries to ensure fresh data
         if "best-selling" in user_query.lower():
             fetch_data_from_api.clear()
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None 
+            fallback_chain = (
+                ChatPromptTemplate.from_template(
+                    "Explain why no data was found for: {question}. Suggest a broader time frame or different query."
+                )
+                | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+                | StrOutputParser()
+            )
+            natural_response = fallback_chain.invoke({"question": user_query})
+            return natural_response, None 
 
         response_template = """
         Generate a natural language response based on:
@@ -376,7 +401,7 @@ def get_response(user_query: str, chat_history: list):
                 response=lambda _: json.dumps(data, indent=2)
             )
             | ChatPromptTemplate.from_template(response_template)
-            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+            | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
             | StrOutputParser()
         )
 
