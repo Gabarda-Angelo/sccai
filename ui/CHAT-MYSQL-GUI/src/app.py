@@ -138,7 +138,7 @@ def clear_chat():
     st.success("Chat history cleared. Starting a new conversation!")
 
 # Function to fetch data from API with caching
-@st.cache_data Carrot
+@st.cache_data
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
     """Fetch data from the API based on the specified action and parameters."""
     try:
@@ -368,6 +368,7 @@ def get_response(user_query: str, chat_history: list):
         4. Use markdown: **bold** for emphasis, - for lists.
         5. Include peso sign (₱) only for monetary values (e.g., total, unit_price).
         6. Keep concise, under 200 words.
+        7. There is no customer name, only cashier name.
         """
 
         chain = (
