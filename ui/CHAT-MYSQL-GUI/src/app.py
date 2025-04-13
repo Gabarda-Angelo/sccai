@@ -468,6 +468,7 @@ query_mappings = {
     WHERE p.stock <= p.reorder_level * 1.1
     """
 }
+
 # Local response formatter
 def format_natural_response(query, data):
     if not data:
@@ -548,7 +549,6 @@ def validate_query(query):
         return False
     return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
 
-# MoA SQL chain
 # MoA SQL chain
 def get_sql_chain():
     schema = """
@@ -641,7 +641,7 @@ def get_sql_chain():
             current_sg_datetime=lambda x: x["current_sg_datetime"],
             chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
         )
-        | proposal_prompt  # Fixed: was secondary_prompt
+        | proposal_prompt
         | secondary_model_2
         | StrOutputParser()
     )
@@ -663,6 +663,7 @@ def get_sql_chain():
     )
 
     return aggregation_chain
+
 # Generate response
 def get_response(user_query: str, chat_history: list):
     time_keywords = [
