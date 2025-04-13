@@ -210,15 +210,41 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - When the user mentions "today," use the current date in Singapore, e.g., WHERE order_date = '{current_sg_date}'.
     - Use appropriate joins when data from multiple tables is needed.
     - Consider foreign key relationships between tables.
     - Use aggregate functions if the question implies summarization.
     - Filter data based on conditions mentioned in the question.
     - Order results if the question suggests a specific order.
-    - Assume the most common interpretation if the question is ambiguous.
     - Avoid referencing non-existent tables or columns.
     - Provide only the SQL query as output, without explanations.
+
+    **Specific Guidelines for Query Interpretation:**
+    - For "profit margin" of a product (e.g., "profit margin of SCC SHIRT"), calculate it as:
+      SELECT (p.sale_price - p.purchase_price) / p.sale_price * 100 AS profit_margin 
+      FROM products p 
+      WHERE p.product_name = 'product_name';
+    - For "total profit" from a product, calculate it as:
+      SELECT SUM((id.unit_price - p.purchase_price) * id.quantity) AS total_profit 
+      FROM invoice_details id 
+      JOIN products p ON id.product_id = p.product_id 
+      JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE p.product_name = 'product_name';
+    - For "best-selling product" (highest quantity sold), use:
+      SELECT p.product_name, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      JOIN products p ON id.product_id = p.product_id 
+      GROUP BY p.product_name 
+      ORDER BY total_sold DESC 
+      LIMIT 1;
+    - Time periods:
+      - "from the beginning" means WHERE i.order_date >= (SELECT MIN(order_date) FROM invoices)
+      - "to now" or "until now" means WHERE i.order_date <= '{current_sg_date}'
+      - "today" means WHERE i.order_date = '{current_sg_date}'
+      - For specific ranges (e.g., "2025-02-14 to 2025-04-13"), parse and use:
+        WHERE i.order_date BETWEEN 'start_date' AND 'end_date'
+    - For precise timestamps, use STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') if time is specified (e.g., "last hour").
+    - Assume "best-selling" means highest quantity sold unless revenue is specified.
+    - Ensure calculations use DECIMAL data types for accuracy (e.g., unit_price, sale_price).
 
     **User Question:** {question}
     """
@@ -322,7 +348,6 @@ def get_response(user_query: str, chat_history: list):
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None 
-        
 
         response_template = """
         Generate a natural language response based on:
