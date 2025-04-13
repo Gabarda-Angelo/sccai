@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
@@ -721,7 +721,7 @@ def handle_query(query: str):
 
     with st.spinner("Analyzing your query..."):
         query_lower = query.lower().strip()
-        normalized_query = query_lower.replace("give me the ", "").replace("show me the ", "").strip()
+        normalized_query = query_lower.replace("give me the ", "").replace("show me the ", "").replace("give the ", "").replace("today", "for today").strip()
         if normalized_query in query_mappings:
             query_sql = query_mappings[normalized_query]
             st.session_state.last_mapped_query = normalized_query
@@ -731,10 +731,19 @@ def handle_query(query: str):
             else:
                 natural_response = format_natural_response(query, data)
         else:
+            st.session_state.last_unmapped_query = query
             try:
-                natural_response, data = get_response(query, st.session_state.chat_history)
+                cache_key = f"moa_{query_lower}_{datetime.datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y%m%d')}"
+                if cache_key in st.session_state:
+                    natural_response, data = st.session_state[cache_key]
+                else:
+                    natural_response, data = get_response(query, st.session_state.chat_history)
+                    st.session_state[cache_key] = (natural_response, data)
             except Exception as e:
-                natural_response = f"An error occurred: {str(e)}"
+                if "rate_limit_exceeded" in str(e):
+                    natural_response = "Rate limit reached. Please try again in a few minutes or use a mapped query like 'sales invoices details for today'."
+                else:
+                    natural_response = f"An error occurred: {str(e)}"
                 data = None
 
         st.session_state.chat_history.append(AIMessage(content=natural_response))
@@ -748,7 +757,7 @@ def handle_query(query: str):
                     if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price", "net_total", "base_cost", "profit", "avg_sales_value", "total_inventory_value", "category_value"]):
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                         df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                    elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
+                    elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", " EMERGENCY total_categories", "total_invoices"]:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                 chart_type, columns = determine_chart_type(query, df)
                 if chart_type:
@@ -759,12 +768,12 @@ def handle_query(query: str):
                             df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
                             ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
                             ax.set_xlabel(columns[0])
-                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
                         elif chart_type == 'line':
                             df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                             ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
                             ax.set_xlabel("Date")
-                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
                         elif chart_type == 'pie':
                             ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                             ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
