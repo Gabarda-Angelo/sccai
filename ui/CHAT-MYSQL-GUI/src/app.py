@@ -93,7 +93,8 @@ def handle_query(query: str):
                 if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-            
+                elif col.lower() == "total_sold":
+                    df[col] = pd.to_numeric(df[col], errors='coerce')  # Keep as quantity
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 with st.spinner("Generating chart..."):
@@ -101,17 +102,17 @@ def handle_query(query: str):
                     fig, ax = plt.subplots()
                     if chart_type == 'bar':
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1]} by {columns[0]}")
+                        ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel("Units Sold" if columns[1].lower() == "total_sold" else columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'line':
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1]} Over Time")
+                        ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel("Units Sold" if columns[1].lower() == "total_sold" else columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                        ax.set_title(f"Distribution of {columns[1]}")
+                        ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
                     st.pyplot(fig)
                     st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
@@ -137,7 +138,7 @@ def clear_chat():
     st.success("Chat history cleared. Starting a new conversation!")
 
 # Function to fetch data from API with caching
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data Carrot
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
     """Fetch data from the API based on the specified action and parameters."""
     try:
@@ -210,41 +211,42 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use appropriate joins when data from multiple tables is needed.
-    - Consider foreign key relationships between tables.
-    - Use aggregate functions if the question implies summarization.
-    - Filter data based on conditions mentioned in the question.
-    - Order results if the question suggests a specific order.
-    - Avoid referencing non-existent tables or columns.
+    - Use explicit INNER JOINs to ensure only valid records are included.
+    - Group by both product_id and product_name for best-selling queries to avoid ambiguity.
+    - For 'best-selling products,' calculate SUM(id.quantity) and order by total_sold DESC.
+    - Assume 'of all time' means from the earliest invoice to {current_sg_date}.
+    - Exclude any canceled or invalid invoices (assume invoices with total > 0 are valid).
+    - Ensure quantities are treated as integers for accurate summation.
     - Provide only the SQL query as output, without explanations.
 
     **Specific Guidelines for Query Interpretation:**
-    - For "profit margin" of a product (e.g., "profit margin of SCC SHIRT"), calculate it as:
-      SELECT (p.sale_price - p.purchase_price) / p.sale_price * 100 AS profit_margin 
+    - For "best-selling products of all time":
+      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      GROUP BY p.product_id, p.product_name 
+      ORDER BY total_sold DESC;
+    - For "profit margin" of a product (e.g., "profit margin of SCC SHIRT"):
+      SELECT p.product_id, p.product_name, (p.sale_price - p.purchase_price) / p.sale_price * 100 AS profit_margin 
       FROM products p 
       WHERE p.product_name = 'product_name';
-    - For "total profit" from a product, calculate it as:
-      SELECT SUM((id.unit_price - p.purchase_price) * id.quantity) AS total_profit 
+    - For "total profit" from a product:
+      SELECT p.product_id, p.product_name, SUM((id.unit_price - p.purchase_price) * id.quantity) AS total_profit 
       FROM invoice_details id 
-      JOIN products p ON id.product_id = p.product_id 
-      JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE p.product_name = 'product_name';
-    - For "best-selling product" (highest quantity sold), use:
-      SELECT p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      JOIN products p ON id.product_id = p.product_id 
-      GROUP BY p.product_name 
-      ORDER BY total_sold DESC 
-      LIMIT 1;
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE p.product_name = 'product_name' AND i.total > 0;
     - Time periods:
       - "from the beginning" means WHERE i.order_date >= (SELECT MIN(order_date) FROM invoices)
       - "to now" or "until now" means WHERE i.order_date <= '{current_sg_date}'
       - "today" means WHERE i.order_date = '{current_sg_date}'
-      - For specific ranges (e.g., "2025-02-14 to 2025-04-13"), parse and use:
+      - For specific ranges (e.g., "2025-02-14 to 2025-04-13"):
         WHERE i.order_date BETWEEN 'start_date' AND 'end_date'
     - For precise timestamps, use STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') if time is specified (e.g., "last hour").
     - Assume "best-selling" means highest quantity sold unless revenue is specified.
-    - Ensure calculations use DECIMAL data types for accuracy (e.g., unit_price, sale_price).
+    - Ensure calculations use DECIMAL for monetary fields, but treat quantity as INTEGER.
 
     **User Question:** {question}
     """
@@ -252,7 +254,7 @@ def get_sql_chain():
     prompt = ChatPromptTemplate.from_template(template)
     models = [
         "llama3-8b-8192",
-        "llama-3.3-70b-versatile",  # Updated model replacing mixtral-8x7b-32768
+        "llama-3.3-70b-versatile",
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
@@ -279,9 +281,10 @@ def get_sql_chain():
     Return ONLY the final SQL query without any explanations or formatting.
     The query must:
     1. Start with SELECT
-    2. Use explicit JOIN syntax
-    3. Include proper table aliases
-    4. Contain no comments or markdown
+    2. Use explicit INNER JOIN syntax
+    3. Group by product_id and product_name for best-selling queries
+    4. Include WHERE i.total > 0 for invoice validity
+    5. Contain no comments or markdown
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -291,7 +294,7 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])  # Last 3 messages
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -345,6 +348,9 @@ def get_response(user_query: str, chat_history: list):
         if not validate_query(query):
             return "Failed to generate a valid database query. Please try again.", None
 
+        # Clear cache for best-selling queries to ensure fresh data
+        if "best-selling" in user_query.lower():
+            fetch_data_from_api.clear()
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
             return "Couldn't retrieve data. Please try again or rephrase your question.", None 
@@ -357,10 +363,11 @@ def get_response(user_query: str, chat_history: list):
 
         **Guidelines:**
         1. If results are empty, suggest: "No data found. This could be due to no records for the specified period or item. Try a broader time frame or different product."
-        2. Highlight key insights (e.g., highest/lowest values, trends).
-        3. Use markdown: **bold** for emphasis, - for lists.
-        4. Include peso sign (₱) for monetary values.
-        5. Keep concise, under 200 words.
+        2. For 'best-selling products,' state quantities as 'units sold,' not monetary values.
+        3. Highlight key insights (e.g., top product, highest/lowest values).
+        4. Use markdown: **bold** for emphasis, - for lists.
+        5. Include peso sign (₱) only for monetary values (e.g., total, unit_price).
+        6. Keep concise, under 200 words.
         """
 
         chain = (
