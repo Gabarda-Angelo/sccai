@@ -721,10 +721,15 @@ def handle_query(query: str):
 
     with st.spinner("Analyzing your query..."):
         query_lower = query.lower().strip()
-        if query_lower in query_mappings:
-            query_sql = query_mappings[query_lower]
+        normalized_query = query_lower.replace("give me the ", "").replace("show me the ", "").strip()
+        if normalized_query in query_mappings:
+            query_sql = query_mappings[normalized_query]
+            st.session_state.last_mapped_query = normalized_query
             data = fetch_data_from_api("execute_query", {"query": query_sql})
-            natural_response = format_natural_response(query, data)
+            if data is None:
+                natural_response = "Failed to fetch data from API. Please check connection or try again."
+            else:
+                natural_response = format_natural_response(query, data)
         else:
             try:
                 natural_response, data = get_response(query, st.session_state.chat_history)
