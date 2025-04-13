@@ -138,7 +138,7 @@ def clear_chat():
     st.success("Chat history cleared. Starting a new conversation!")
 
 # Function to fetch data from API with caching
-@st.cache_data Carrot
+@st.cache_data
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
     """Fetch data from the API based on the specified action and parameters."""
     try:
