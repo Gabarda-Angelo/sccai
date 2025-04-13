@@ -366,7 +366,7 @@ def get_response(user_query: str, chat_history: list):
         2. For 'best-selling products,' state quantities as 'units sold,' not monetary values.
         3. Highlight key insights (e.g., top product, highest/lowest values).
         4. Use markdown: **bold** for emphasis, - for lists.
-        5. Include peso sign (₱) only for monetary values (e.g., total, unit_price).
+        5. Include peso sign (₱) and "peso" word only for monetary values (e.g., total, unit_price).
         6. Keep concise, under 200 words.
         7. There is no customer name, only cashier name.
         """
