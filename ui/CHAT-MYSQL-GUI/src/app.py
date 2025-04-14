@@ -636,9 +636,9 @@ def get_sql_chain():
     **Current datetime (Singapore):** {current_sg_datetime}
     **Question:** {question}
     **Proposed Queries:**
-    1. {proposal_1}
-    2. {proposal_2}
-    3. {proposal_3}
+    1. {proposal_0}
+    2. {proposal_1}
+    3. {proposal_2}
 
     **Rules:**
     - Ensure INNER JOINs are used correctly.
@@ -690,9 +690,12 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            proposal_1=proposal_chain["proposal_0"],
-            proposal_2=proposal_chain["proposal_1"],
-            proposal_3=proposal_chain["proposal_2"]
+            proposals=proposal_chain  # Run the parallel chain
+        )
+        | RunnablePassthrough.assign(
+            proposal_0=lambda x: x["proposals"]["proposal_0"],
+            proposal_1=lambda x: x["proposals"]["proposal_1"],
+            proposal_2=lambda x: x["proposals"]["proposal_2"]
         )
         | ChatPromptTemplate.from_template(aggregation_template)
         | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
@@ -700,7 +703,6 @@ def get_sql_chain():
     )
 
     return aggregation_chain
-
 # Generate response
 def get_response(user_query: str, chat_history: list):
     time_keywords = [
