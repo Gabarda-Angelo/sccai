@@ -90,6 +90,29 @@ query_mappings = {
     INNER JOIN categories c ON p.category_id = c.category_id
     WHERE i.total > 0
     """,
+    "total revenue, profit, base cost and profit margin": """
+    SELECT 
+        ROUND(SUM(i.total), 2) AS total_revenue,
+        ROUND(SUM(id.quantity * p.purchase_price), 2) AS base_cost,
+        ROUND((SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)), 2) AS profit,
+        ROUND(((SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)) / SUM(i.total)) * 100, 2) AS profit_margin
+    FROM invoices i
+    INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
+    INNER JOIN products p ON id.product_id = p.product_id
+    WHERE i.total > 0
+    """,
+    "total revenue, profit, base cost and profit margin from february 2025 to present date": """
+    SELECT 
+        ROUND(SUM(i.total), 2) AS total_revenue,
+        ROUND(SUM(id.quantity * p.purchase_price), 2) AS base_cost,
+        ROUND((SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)), 2) AS profit,
+        ROUND(((SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)) / SUM(i.total)) * 100, 2) AS profit_margin
+    FROM invoices i
+    INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
+    INNER JOIN products p ON id.product_id = p.product_id
+    WHERE i.total > 0
+    AND i.order_date BETWEEN '2025-02-01' AND CURDATE()
+    """,
     "best-selling products of all time": """
     SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
     FROM invoice_details id 
@@ -469,6 +492,16 @@ def format_natural_response(query, data):
         invoices = len(set(row["invoice_id"] for row in data))
         products = ", ".join(set(row.get("product_name", "") for row in data if "product_name" in row)) or "various products"
         return f"Today's sales: **{units} units** across **{invoices} invoices**, totaling **₱{revenue:,.2f}**. Products sold include: {products} (Period: 2025-04-13)."
+    elif "total revenue, profit, base cost and profit margin" in query_lower:
+        if data:
+            stats = data[0]
+            period = "2025-02-01 to 2025-04-13" if "february 2025" in query_lower else "all time"
+            return (f"Store performance: "
+                    f"- **Total Revenue**: ₱{stats['total_revenue']:,.2f} "
+                    f"- **Base Cost**: ₱{stats['base_cost']:,.2f} "
+                    f"- **Profit**: ₱{stats['profit']:,.2f} "
+                    f"- **Profit Margin**: {stats['profit_margin']}% "
+                    f"(Period: {period}).")
     elif "total revenue" in query_lower:
         revenue = data[0].get("total_revenue", 0) if data else 0
         period = "2025-04-13" if "today" in query_lower else "2025"
@@ -541,17 +574,16 @@ def validate_query(query):
     allowed_keywords = ["SELECT", "FROM", "WHERE", "INNER JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
     valid_tables = ["invoices", "invoice_details", "products", "categories", "employees", "user_logins", "inventory_logs"]
     query_lower = query.lower()
-    query_upper = query_upper = query.upper()
+    query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
     if "INNER JOIN" in query_upper and "ON" not in query_upper:
         return False
-    # Check for valid table references
     query_tables = re.findall(r'\bFROM\s+([a-z_]+)\b|\bJOIN\s+([a-z_]+)\b', query_lower, re.IGNORECASE)
     query_tables = [t[0] or t[1] for t in query_tables]
-    if not all(t in valid_tables for t in query_tables):
+    if query_tables and not all(t in valid_tables for t in query_tables):
         return False
-    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+    return any(kw in query_upper for kw in allowed_keywords)
 
 # MoA SQL chain
 def get_sql_chain():
@@ -620,7 +652,6 @@ def get_sql_chain():
 
     proposal_prompt = ChatPromptTemplate.from_template(proposal_template)
 
-    # Define individual proposal chains
     proposal_chains = [
         (
             RunnablePassthrough.assign(
@@ -636,30 +667,20 @@ def get_sql_chain():
         for llm in proposal_llms
     ]
 
-    try:
-        # Preferred: Parallel execution
-        proposal_chain = RunnableParallel(
-            proposal_0=proposal_chains[0],
-            proposal_1=proposal_chains[1],
-            proposal_2=proposal_chains[2]
-        )
-    except NameError:
-        # Fallback: Sequential execution
-        def sequential_proposals(input_dict):
-            results = {}
-            for i, chain in enumerate(proposal_chains):
-                results[f"proposal_{i}"] = chain.invoke(input_dict)
-            return results
-        proposal_chain = sequential_proposals
+    proposal_chain = RunnableParallel(
+        proposal_0=proposal_chains[0],
+        proposal_1=proposal_chains[1],
+        proposal_2=proposal_chains[2]
+    )
 
     aggregation_chain = (
         RunnablePassthrough.assign(
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            proposal_1=proposal_chains[0],
-            proposal_2=proposal_chains[1],
-            proposal_3=proposal_chains[2]
+            proposal_1=proposal_chain["proposal_0"],
+            proposal_2=proposal_chain["proposal_1"],
+            proposal_3=proposal_chain["proposal_2"]
         )
         | ChatPromptTemplate.from_template(aggregation_template)
         | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
@@ -694,13 +715,14 @@ def get_response(user_query: str, chat_history: list):
     # Check query mappings
     query_lower = user_query.lower().strip()
     normalized_query = query_lower.replace("give me the ", "").replace("show me the ", "").replace("give the ", "").replace("today", "for today").strip()
-    if normalized_query in query_mappings:
-        query_sql = query_mappings[normalized_query]
-        st.session_state.last_mapped_query = normalized_query
-        data = fetch_data_from_api("execute_query", {"query": query_sql}, _date=current_sg_date)
-        if data is None:
-            return "Failed to fetch data from API. Please check connection or try again (Period: 2025-04-13).", None
-        return format_natural_response(user_query, data), data
+    for key in query_mappings:
+        if normalized_query.startswith(key):
+            query_sql = query_mappings[key]
+            st.session_state.last_mapped_query = key
+            data = fetch_data_from_api("execute_query", {"query": query_sql}, _date=current_sg_date)
+            if data is None:
+                return "Failed to fetch data from API. Please check connection or try again (Period: 2025-04-13).", None
+            return format_natural_response(user_query, data), data
 
     # Handle unmapped queries with MoA
     st.session_state.last_unmapped_query = user_query
@@ -764,7 +786,7 @@ def handle_query(query: str):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
-               with st.spinner("Generating chart..."):
+                with st.spinner("Generating chart..."):
                     st.markdown(f"### {chart_type.capitalize()} Chart")
                     fig, ax = plt.subplots()
                     if chart_type == 'bar':
@@ -862,7 +884,8 @@ def main():
                 # Quick Queries Expanders
                 with st.expander("📊 Overview", expanded=True):
                     overview_queries = [
-                        "Show overview statistics"
+                        "Show overview statistics",
+                        "Give the total revenue, profit, base cost and profit margin"
                     ]
                     for q in overview_queries:
                         if st.button(q, key=f"overview_{q}"):
