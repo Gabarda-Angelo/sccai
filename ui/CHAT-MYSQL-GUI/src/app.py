@@ -12,6 +12,11 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Set page configuration
 st.set_page_config(
@@ -49,7 +54,8 @@ def authenticate(email, password):
         response = requests.post(
             st.secrets["API_URL"],
             params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
-            json={"email": email, "password": password}
+            json={"email": email, "password": password},
+            timeout=10
         )
         data = response.json() if response.text.strip() else {}
         if response.status_code == 200 and data.get("status") == "success" and "data" in data:
@@ -58,9 +64,12 @@ def authenticate(email, password):
             st.success("Login Successful!")
             return True
         else:
-            st.error(f"Login failed: {data.get('error', 'Invalid credentials')}")
+            error_msg = data.get('error', 'Invalid credentials')
+            st.error(f"Login failed: {error_msg}")
+            logging.error(f"Authentication failed: {error_msg}")
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
+        logging.error(f"Authentication exception: {str(e)}")
     return False
 
 # Fetch data from API with caching
@@ -76,42 +85,60 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
         response = requests.get(st.secrets["API_URL"], params=payload, timeout=15)
         if not response.text.strip():
             st.error("Received empty response from API")
+            logging.error("Empty API response")
             return None
         data = response.json()
         if data.get("status") == "success":
             return data["data"]
         else:
-            st.error(f"API Error: {data.get('error', 'Unknown error')}")
+            error_msg = data.get('error', 'Unknown error')
+            st.error(f"API Error: {error_msg}")
+            logging.error(f"API error: {error_msg}")
             return None
     except Exception as e:
         st.error(f"Connection error: {str(e)}")
+        logging.error(f"API connection error: {str(e)}")
         return None
 
 # Validate SQL queries
 def validate_query(query):
-    query_upper = query.upper().strip()
-    if not query_upper.startswith("SELECT"):
+    try:
+        query_upper = query.upper().strip()
+        # Allow SELECT queries only
+        if not query_upper.startswith("SELECT"):
+            logging.warning(f"Invalid query (non-SELECT): {query}")
+            return False
+        # Block dangerous keywords
+        disallowed = ["DELETE", "UPDATE", "INSERT", "DROP", "ALTER", "TRUNCATE", "EXECUTE", "CREATE"]
+        if any(kw in query_upper for kw in disallowed):
+            logging.warning(f"Invalid query (contains disallowed keyword): {query}")
+            return False
+        # Basic syntax check (ends with semicolon, balanced quotes)
+        if not query.strip().endswith(';'):
+            logging.warning(f"Invalid query (no semicolon): {query}")
+            return False
+        return True
+    except Exception as e:
+        logging.error(f"Query validation error: {str(e)} - Query: {query}")
         return False
-    disallowed = ["DELETE", "UPDATE", "INSERT", "DROP", "ALTER", "TRUNCATE"]
-    return not any(kw in query_upper for kw in disallowed)
 
 # SQL chain for query generation
 def get_sql_chain():
     schema = """
     Database Schema:
-    - categories: category_id (PK), category_name, created_at, updated_at
-    - employees: employee_id (PK), first_name, last_name, role, email, password_hash, created_at, updated_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type, quantity, log_date, notes, created_at, updated_at
-    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at, updated_at
-    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
-    - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address, created_at, updated_at
-    - sync_log: id (PK), table_name, record_id, action, timestamp, synced
+    - categories: category_id (PK, int), category_name (varchar), created_at (datetime), updated_at (timestamp)
+    - employees: employee_id (PK, int), first_name (varchar), last_name (varchar), role (enum 'Owner','Admin','Cashier'), email (varchar), password_hash (varchar), created_at (datetime), updated_at (timestamp)
+    - inventory_logs: log_id (PK, int), product_id (FK to products, int), change_type (enum 'Sale','Restock','Adjustment'), quantity (int), log_date (datetime), notes (text), created_at (timestamp), updated_at (timestamp)
+    - invoices: invoice_id (PK, int), employee_id (FK to employees, int), order_date (date), order_time (time), subtotal (decimal), discount (decimal), total (decimal), paid (decimal), due (decimal), payment_type (enum 'Cash','Card','Check'), created_at (datetime), updated_at (timestamp)
+    - invoice_details: detail_id (PK, int), invoice_id (FK to invoices, int), product_id (FK to products, int), quantity (int, >0), unit_price (decimal), total_price (decimal), created_at (timestamp), updated_at (timestamp)
+    - products: product_id (PK, int), barcode (varchar, unique), product_name (varchar), category_id (FK to categories, int), description (text), stock (int, >=0), reorder_level (int), purchase_price (decimal, >=0), sale_price (decimal, >=purchase_price), image (varchar), created_at (datetime), updated_at (datetime)
+    - user_logins: log_id (PK, int), employee_id (FK to employees, int), login_time (datetime), logout_time (datetime), ip_address (varchar), created_at (timestamp), updated_at (timestamp)
+    - sync_log: id (PK, int), table_name (varchar), record_id (int), action (enum 'INSERT','UPDATE','DELETE'), timestamp (datetime), synced (tinyint)
     """
 
     template = """
-    You are an AI assistant generating SQL queries for the SCC School Store Database.
-    Based on the schema, create an accurate SQL query to answer the user's question.
+    You are an expert SQL query generator for the SCC School Store Database.
+    Based on the schema, create a precise SQL query to answer the user's question.
 
     **Database Schema:**
     {schema}
@@ -122,33 +149,41 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use explicit INNER JOINs with table aliases (e.g., invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id).
-    - For quantities, use invoice_details.quantity; for revenue, use invoice_details.total_price.
-    - Calculate totals as SUM(id.total_price); base cost as SUM(id.quantity * p.purchase_price).
-    - For overview stats, include:
+    - Write SELECT queries only, starting with SELECT and ending with a semicolon.
+    - Use explicit INNER JOINs with table aliases (e.g., invoices i, invoice_details id, products p).
+    - For quantities, use id.quantity; for revenue, use id.total_price.
+    - Calculate metrics as follows:
       - Total invoices: COUNT(DISTINCT i.invoice_id)
       - Average sales: ROUND(AVG(i.total), 2)
       - Total revenue: SUM(id.total_price)
       - Base cost: COALESCE(SUM(id.quantity * p.purchase_price), 0)
       - Profit: SUM(id.total_price) - COALESCE(SUM(id.quantity * p.purchase_price), 0)
-      - Profit margin: ((SUM(id.total_price) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(id.total_price)) * 100
-      - Low stock: COUNT(p.stock <= p.reorder_level)
-      - Top product: Product with highest SUM(id.quantity)
-    - For best-selling products, group by p.product_id, p.product_name, sum id.quantity, and order by quantity DESC.
-    - Apply time filters using CONCAT(i.order_date, ' ', i.order_time) for periods (e.g., today: '{current_sg_date} 00:00:00' to '{current_sg_date} 23:59:59').
+      - Profit margin: ((SUM(id.total_price) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / NULLIF(SUM(id.total_price), 0)) * 100
+      - Low stock: COUNT(DISTINCT p.product_id) WHERE p.stock <= p.reorder_level
+      - Top product: p.product_name with highest SUM(id.quantity)
+    - For best-selling products:
+      - SELECT p.product_id, p.product_name, SUM(id.quantity) AS units_sold, SUM(id.total_price) AS total_revenue
+      - GROUP BY p.product_id, p.product_name
+      - ORDER BY units_sold DESC
+      - LIMIT 5
+    - Apply time filters using CONCAT(i.order_date, ' ', i.order_time):
+      - "today": '{current_sg_date} 00:00:00' to '{current_sg_date} 23:59:59'
+      - "this month": '{current_sg_date}' LIKE 'YYYY-MM%'
+      - "this year": '{current_sg_date}' LIKE 'YYYY%'
     - Use COALESCE for NULL handling in aggregations.
     - Avoid double-counting with DISTINCT where needed.
-    - If no period is specified, include all records.
-    - Ensure query starts with SELECT and contains no comments.
-    - Handle edge cases (e.g., no sales) with meaningful results.
+    - If no period is specified, include all records unless question implies a period (e.g., "today").
+    - Handle edge cases (e.g., no sales) with meaningful results (e.g., 0 for sums).
+    - Do not include comments or markdown in the query.
 
     **User Question:** {question}
+
+    **Output:** A single SQL query.
     """
 
     prompt = ChatPromptTemplate.from_template(template)
     models = [
         "llama3-8b-8192",
-        "llama-3.3-70b-versatile",
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
@@ -161,20 +196,26 @@ def get_sql_chain():
     )
 
     aggregator_template = """
-    Synthesize the best SQL query from:
+    Synthesize the best SQL query from the following proposals:
     {proposals}
 
     **Original Question:** {question}
     **Schema:** {schema}
 
-    Return ONLY the final SQL query. Ensure it:
-    - Starts with SELECT
-    - Uses INNER JOINs with aliases
-    - Calculates quantities as invoice_details.quantity
-    - Uses invoice_details.total_price for revenue
-    - Avoids double-counting
-    - Aligns with overview stats (invoices, revenue, cost, profit, margin)
-    - Applies time filters correctly
+    **Instructions:**
+    - Return a single SELECT query, ending with a semicolon.
+    - Ensure it:
+      - Uses INNER JOINs with aliases (i, id, p)
+      - Calculates quantities via id.quantity
+      - Uses id.total_price for revenue
+      - Matches metrics: invoices, revenue, cost, profit, margin
+      - Applies time filters correctly
+      - Handles NULLs with COALESCE
+      - Avoids double-counting
+    - Fix any syntax errors or schema misalignments.
+    - If all proposals fail, generate a new query based on the question and schema.
+
+    **Output:** Only the final SQL query.
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -203,6 +244,7 @@ def get_response(user_query: str, chat_history: list):
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
+        logging.info(f"Time query: {user_query} - Response: {current_time}")
         return f"Current time and date: {current_time.strftime('%Y-%m-%d %H:%M:%S')}.", None
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
@@ -211,20 +253,28 @@ def get_response(user_query: str, chat_history: list):
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
         sql_chain = get_sql_chain()
-        raw_query = sql_chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
-        })
-        query = raw_query.split(";")[0] + ";"
-        query = query.replace("```sql", "").replace("```", "").strip()
+        try:
+            raw_query = sql_chain.invoke({
+                "question": user_query,
+                "chat_history": chat_history,
+                "current_sg_date": current_sg_date,
+                "current_sg_datetime": current_sg_datetime
+            })
+            query = raw_query.strip()
+            if not query.endswith(';'):
+                query += ';'
+            logging.info(f"Generated SQL query: {query}")
+        except Exception as e:
+            logging.error(f"SQL generation error: {str(e)} - Question: {user_query}")
+            return "Failed to generate a valid SQL query. Please try again.", None
 
         if not validate_query(query):
+            logging.warning(f"Query validation failed: {query}")
             return "Invalid database query generated. Please rephrase your question.", None
 
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
+            logging.error(f"No data returned for query: {query}")
             return "Couldn't retrieve data. Please try again.", None
 
         response_template = """
@@ -236,7 +286,10 @@ def get_response(user_query: str, chat_history: list):
         **Guidelines:**
         - If results are empty, state: "No data found for the specified period or item."
         - Distinguish quantities ("X units") from monetary values ("₱Y pesos").
-        - For best-selling products, list top 5 by quantity, including revenue (₱).
+        - For best-selling products:
+          - List top 5 by units_sold
+          - Format: "- **Product Name**: X units, ₱Y pesos"
+          - Include insights (e.g., "leads in units", "highest revenue")
         - For overview queries, include:
           - Total invoices: X transactions
           - Average sales value: ₱Y pesos
@@ -248,6 +301,7 @@ def get_response(user_query: str, chat_history: list):
           - Low stock: E items
         - Use markdown: **bold** for emphasis, - for lists.
         - Keep concise, under 200 words.
+        - Format monetary values with "₱" and 2 decimals.
         """
 
         chain = (
@@ -256,15 +310,21 @@ def get_response(user_query: str, chat_history: list):
             | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
             | StrOutputParser()
         )
-        natural_response = chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-        })
+        try:
+            natural_response = chain.invoke({
+                "question": user_query,
+                "chat_history": chat_history,
+            })
+            logging.info(f"Natural response generated: {natural_response}")
+        except Exception as e:
+            logging.error(f"Response generation error: {str(e)}")
+            natural_response = "Error processing the response. Please try again."
         return natural_response, data
 
 # Determine chart type
 def determine_chart_type(query, df):
     if df.empty or len(df.columns) < 2:
+        logging.info("No chart generated: Empty dataframe or insufficient columns")
         return None, None
     columns = df.columns.tolist()
     query_lower = query.lower()
@@ -273,16 +333,19 @@ def determine_chart_type(query, df):
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
 
     if "quantity" in query_lower or "sold" in query_lower:
-        numerical_cols = [col for col in numerical_columns if "quantity" in col.lower()]
+        numerical_cols = [col for col in numerical_columns if "quantity" in col.lower() or "units" in col.lower()]
     elif any(kw in query_lower for kw in ["revenue", "total", "profit", "cost"]):
         numerical_cols = [col for col in numerical_columns if any(kw in col.lower() for kw in ["total", "revenue", "profit", "cost"])]
     else:
         numerical_cols = numerical_columns
 
     if date_columns and numerical_cols:
+        logging.info(f"Chart type: Line - Columns: {date_columns[0]}, {numerical_cols[0]}")
         return "line", (date_columns[0], numerical_cols[0])
     elif categorical_columns and numerical_cols:
+        logging.info(f"Chart type: Bar - Columns: {categorical_columns[0]}, {numerical_cols[0]}")
         return "bar", (categorical_columns[0], numerical_cols[0])
+    logging.info("No suitable chart type determined")
     return None, None
 
 # Handle user queries
@@ -296,6 +359,7 @@ def handle_query(query: str):
         except Exception as e:
             natural_response = f"Error: {str(e)}"
             data = None
+            logging.error(f"Query handling error: {str(e)} - Query: {query}")
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -304,7 +368,7 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["total", "price", "cost", "profit"]):
+                if any(mon in col.lower() for mon in ["total", "price", "cost", "profit", "revenue"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
@@ -341,6 +405,7 @@ def clear_chat():
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
     st.success("Chat history cleared.")
+    logging.info("Chat history cleared")
 
 # Main application
 def main():
@@ -372,8 +437,7 @@ def main():
                     sales_queries = [
                         "What are the best-selling products of all time?",
                         "What are the top 5 best-selling products this month?",
-                        "What is the total revenue this year?",
-                        "What is the revenue breakdown by product category?"
+                        "What is the total revenue this year?"
                     ]
                     for q in sales_queries:
                         if st.button(q, key=f"sales_{q}"):
@@ -381,16 +445,14 @@ def main():
                 with st.expander("📦 Inventory Management"):
                     inventory_queries = [
                         "Which products are below the reorder level?",
-                        "What is the current stock level for SCC SHIRT?",
-                        "What is the total value of current inventory?"
+                        "What is the current stock level for SCC SHIRT?"
                     ]
                     for q in inventory_queries:
                         if st.button(q, key=f"inv_{q}"):
                             handle_query(q)
                 with st.expander("👥 Employee Performance"):
                     employee_queries = [
-                        "Who is the top-performing employee this month?",
-                        "What are the total sales by each employee this week?"
+                        "Who is the top-performing employee this month?"
                     ]
                     for q in employee_queries:
                         if st.button(q, key=f"emp_{q}"):
@@ -402,14 +464,6 @@ def main():
                     ]
                     for q in financial_queries:
                         if st.button(q, key=f"fin_{q}"):
-                            handle_query(q)
-                with st.expander("🏪 Store Operations"):
-                    ops_queries = [
-                        "What is the busiest hour of the day for sales?",
-                        "What is the average number of transactions per day?"
-                    ]
-                    for q in ops_queries:
-                        if st.button(q, key=f"ops_{q}"):
                             handle_query(q)
             display_chat_history()
             user_query = st.chat_input("Type a message...")
