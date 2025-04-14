@@ -196,7 +196,6 @@ def validate_query(query):
 
 # Function to define SQL chain for query generation
 def get_sql_chain():
-    """Create a chain to generate SQL queries based on user input."""
     schema = """
     Database Schema:
     - categories: category_id (PK), category_name, created_at
@@ -209,63 +208,65 @@ def get_sql_chain():
     """
 
     template = """
-    You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
-    Based on the provided table schema, generate an accurate SQL query to answer the user's question.
+    You are an AI assistant generating SQL queries for the SCC School Store Database.
+    Based on the schema, create an accurate SQL query for the user's question.
 
     **Database Schema:**
     {schema}
 
-    **Current date in Singapore:** {current_sg_date} (format: YYYY-MM-DD)
-    **Current datetime in Singapore:** {current_sg_datetime} (format: YYYY-MM-DD HH:MM:SS)
+    **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
+    **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
 
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use explicit INNER JOINs to ensure only valid records are included.
-    - Group by both product_id and product_name for best-selling queries to avoid ambiguity.
-    - For 'best-selling products,' calculate SUM(id.quantity) and order by total_sold DESC.
-    - Assume 'of all time' means from the earliest invoice to {current_sg_date}.
-    - Exclude any canceled or invalid invoices (assume invoices with total > 0 are valid).
-    - Ensure quantities are treated as integers for accurate summation.
-    - Provide only the SQL query as output, without explanations.
+    - Use INNER JOINs for valid records.
+    - Ensure invoices are valid (i.total > 0).
+    - Calculations:
+      - Revenue: SUM(id.quantity * id.unit_price)
+      - Profit: SUM((id.unit_price - p.purchase_price) * id.quantity)
+      - Profit Margin: ((p.sale_price - p.purchase_price) / p.sale_price) * 100
+      - Base Cost: SUM(p.purchase_price * id.quantity)
+      - Quantity Sold: SUM(id.quantity)
+    - Group by product_id, product_name for product-based queries.
+    - Handle time ranges:
+      - 'all time': i.order_date >= (SELECT MIN(order_date) FROM invoices)
+      - 'today': i.order_date = '{current_sg_date}'
+      - 'this month': i.order_date BETWEEN DATE_SUB('{current_sg_date}', INTERVAL DAY('{current_sg_date}')-1 DAY) AND '{current_sg_date}'
+      - Specific range: i.order_date BETWEEN 'start_date' AND 'end_date'
+    - Use DECIMAL for monetary fields, INTEGER for quantities.
+    - Return only the SQL query, no explanations.
 
-    **Specific Guidelines for Query Interpretation:**
-    - For "best-selling products of all time":
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC;
-    - For "profit margin" of a product (e.g., "profit margin of SCC SHIRT"):
-      SELECT p.product_id, p.product_name, (p.sale_price - p.purchase_price) / p.sale_price * 100 AS profit_margin 
-      FROM products p 
-      WHERE p.product_name = 'product_name';
-    - For "total profit" from a product:
-      SELECT p.product_id, p.product_name, SUM((id.unit_price - p.purchase_price) * id.quantity) AS total_profit 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE p.product_name = 'product_name' AND i.total > 0;
-    - Time periods:
-      - "from the beginning" means WHERE i.order_date >= (SELECT MIN(order_date) FROM invoices)
-      - "to now" or "until now" means WHERE i.order_date <= '{current_sg_date}'
-      - "today" means WHERE i.order_date = '{current_sg_date}'
-      - For specific ranges (e.g., "2025-02-14 to 2025-04-13"):
-        WHERE i.order_date BETWEEN 'start_date' AND 'end_date'
-    - For precise timestamps, use STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') if time is specified (e.g., "last hour").
-    - Assume "best-selling" means highest quantity sold unless revenue is specified.
-    - Ensure calculations use DECIMAL for monetary fields, but treat quantity as INTEGER.
+    **Examples:**
+    - Best-selling products:
+      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold
+      FROM invoice_details id
+      INNER JOIN products p ON id.product_id = p.product_id
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id
+      WHERE i.total > 0
+      GROUP BY p.product_id, p.product_name
+      ORDER BY total_sold DESC
+      LIMIT 5;
+    - Total revenue today:
+      SELECT SUM(id.quantity * id.unit_price) AS total_revenue
+      FROM invoice_details id
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id
+      WHERE i.order_date = '{current_sg_date}' AND i.total > 0;
+    - Profit for SCC SHIRT:
+      SELECT p.product_id, p.product_name, SUM((id.unit_price - p.purchase_price) * id.quantity) AS total_profit
+      FROM invoice_details id
+      INNER JOIN products p ON id.product_id = p.product_id
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id
+      WHERE p.product_name = 'SCC SHIRT' AND i.total > 0;
 
     **User Question:** {question}
     """
 
     prompt = ChatPromptTemplate.from_template(template)
     models = [
-        "qwen-2.5-coder-32b",  # Optimized for SQL generation
-        "meta-llama/llama-4-maverick-17b-128e-instruct",  # Advanced reasoning
-        "llama-3.3-70b-versatile",  # Stable fallback
+        "qwen-2.5-coder-32b",
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "llama-3.3-70b-versatile",
     ]
 
     proposal_llms = [
@@ -281,19 +282,18 @@ def get_sql_chain():
     )
 
     aggregator_template = """
-    Synthesize the best SQL query from these proposals:
+    Synthesize the best SQL query from:
     {proposals}
 
     **Original Question:** {question}
     **Schema:** {schema}
 
-    Return ONLY the final SQL query without any explanations or formatting.
-    The query must:
-    1. Start with SELECT
-    2. Use explicit INNER JOIN syntax
-    3. Group by product_id and product_name for best-selling queries
-    4. Include WHERE i.total > 0 for invoice validity
-    5. Contain no comments or markdown
+    Return ONLY the SQL query. Ensure:
+    1. Starts with SELECT
+    2. Uses INNER JOINs
+    3. Groups by product_id, product_name for product queries
+    4. Includes WHERE i.total > 0
+    5. No comments or markdown
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -314,10 +314,8 @@ def get_sql_chain():
         | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
         | StrOutputParser()
     )
-
 # Function to generate AI response
 def get_response(user_query: str, chat_history: list):
-    """Generate a natural language response and fetch data based on the user's query."""
     time_keywords = [
         "current time", "what time is it", "date and time",
         "today's date", "now", "time today", "date today"
@@ -326,13 +324,13 @@ def get_response(user_query: str, chat_history: list):
         "sales", "invoice", "details", "product", "category", "stock", "revenue",
         "order", "employee", "payment", "quantity", "price", "total", "subtotal",
         "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve"
+        "provide", "get", "fetch", "retrieve", "profit", "margin", "cost"
     ]
 
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        natural_response = f"The current time and date in Singapore is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
@@ -357,7 +355,7 @@ def get_response(user_query: str, chat_history: list):
         if not validate_query(query):
             fallback_chain = (
                 ChatPromptTemplate.from_template(
-                    "Explain why no valid database query could be generated for: {question}. Suggest rephrasing."
+                    "No valid query could be generated for: {question}. Try rephrasing, e.g., 'Show total sales for today' or 'List best-selling products this month'."
                 )
                 | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
                 | StrOutputParser()
@@ -365,35 +363,42 @@ def get_response(user_query: str, chat_history: list):
             natural_response = fallback_chain.invoke({"question": user_query})
             return natural_response, None
 
-        # Clear cache for best-selling queries to ensure fresh data
-        if "best-selling" in user_query.lower():
+        if "best-selling" in user_query.lower() or "revenue" in user_query.lower():
             fetch_data_from_api.clear()
         data = fetch_data_from_api("execute_query", {"query": query})
-        if data is None:
+        if data is None or not data:
             fallback_chain = (
                 ChatPromptTemplate.from_template(
-                    "Explain why no data was found for: {question}. Suggest a broader time frame or different query."
+                    "No data found for: {question}. Try a broader time frame (e.g., 'this year') or check product names."
                 )
                 | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
                 | StrOutputParser()
             )
             natural_response = fallback_chain.invoke({"question": user_query})
-            return natural_response, None 
+            return natural_response, None
+
+        # Validate and format data
+        df = pd.DataFrame(data)
+        for col in df.columns:
+            if any(mon in col.lower() for mon in ["revenue", "profit", "cost", "price", "total", "subtotal", "paid", "due"]):
+                df[col] = pd.to_numeric(df[col], errors='coerce').round(2)
+            elif "quantity" in col.lower() or "sold" in col.lower():
+                df[col] = pd.to_numeric(df[col], errors='coerce', downcast='integer')
 
         response_template = """
-        Generate a natural language response based on:
+        Based on:
         - **Question:** {question}
         - **Results:** {response}
         - **History:** {chat_history}
 
         **Guidelines:**
-        1. If results are empty, suggest: "No data found. This could be due to no records for the specified period or item. Try a broader time frame or different product."
-        2. For 'best-selling products,' state quantities as 'units sold,' not monetary values.
-        3. Highlight key insights (e.g., top product, highest/lowest values).
-        4. Use markdown: **bold** for emphasis, - for lists.
-        5. Include peso sign (₱) and "peso" word only for monetary values (e.g., total, unit_price).
-        6. Keep concise, under 200 words.
-        7. There is no customer name, only cashier name.
+        - If empty, say: "No data found. Try a broader time frame or different product."
+        - Quantities: Use "X units sold".
+        - Monetary values: Use "₱X pesos" (e.g., revenue, profit).
+        - Highlight insights (e.g., top product, highest value).
+        - Use markdown: **bold** for emphasis, - for lists.
+        - Keep concise (<200 words).
+        - No customer names, only cashier names.
         """
 
         chain = (
@@ -411,10 +416,8 @@ def get_response(user_query: str, chat_history: list):
         })
 
         return natural_response, data
-
 # Function to determine chart type for data visualization
 def determine_chart_type(query, df):
-    """Determine the appropriate chart type based on query and data."""
     if df.empty or len(df.columns) < 2:
         return None, None
 
@@ -425,16 +428,21 @@ def determine_chart_type(query, df):
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
 
-    if date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
-        unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and "percentage" in query_lower:
-            return "pie", (categorical_columns[0], numerical_columns[0])
-        else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
-    return None, None
+    # Prioritize financial metrics
+    financial_cols = [col for col in numerical_columns if any(k in col.lower() for k in ["revenue", "profit", "cost", "price", "total"])]
+    quantity_cols = [col for col in numerical_columns if any(k in col.lower() for k in ["quantity", "sold"])]
 
+    if date_columns and (financial_cols or quantity_cols):
+        num_col = financial_cols[0] if financial_cols else quantity_cols[0] if quantity_cols else numerical_columns[0]
+        return "line", (date_columns[0], num_col)
+    elif categorical_columns and (financial_cols or quantity_cols):
+        num_col = financial_cols[0] if financial_cols else quantity_cols[0] if quantity_cols else numerical_columns[0]
+        unique_categories = len(df[categorical_columns[0]].unique())
+        if unique_categories <= 6 and ("percentage" in query_lower or "margin" in query_lower):
+            return "pie", (categorical_columns[0], num_col)
+        else:
+            return "bar", (categorical_columns[0], num_col)
+    return None, None
 # Main application logic
 def main():
     """Main function to run the AcaSquad AI application."""
