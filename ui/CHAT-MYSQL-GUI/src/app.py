@@ -7,21 +7,20 @@ import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
-import re
 
-# Set page configuration
+# Set page configuration (must be the first Streamlit command)
 st.set_page_config(
     page_title="AcaSquad AI",
     page_icon=":speech_balloon:",
     layout="wide"
 )
 
-# Function to show pop-up messages
+# Function to show pop-up messages using a JavaScript alert
 def show_popup(message):
     components.html(
         f"""
@@ -33,17 +32,14 @@ def show_popup(message):
         width=0,
     )
 
-# Initialize session state
+# Initialize session state for authentication
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
-    ]
 
-# Function to authenticate user
+# Function to authenticate user via API
 def authenticate(email, password):
+    """Authenticate a user by sending credentials to the API."""
     try:
         response = requests.post(
             st.secrets["API_URL"],
@@ -55,73 +51,833 @@ def authenticate(email, password):
         except json.JSONDecodeError:
             data = {}
 
-        if response.status_code == 200 and data.get("status") == "success" and "data" in data:
-            st.session_state.authenticated = True
-            st.session_state.user = data["data"]
-            st.success("Login Successful!")
-            return True
+        if response.status_code == 200:
+            if data.get("status") == "success" and "data" in data:
+                st.session_state.authenticated = True
+                st.session_state.user = data["data"]
+                st.success("Login Successful!")
+                return True
+            else:
+                error_message = data.get("error", "Invalid credentials")
+                st.error(f"Login failed: {error_message}")
         else:
-            error_message = data.get("error", "Invalid credentials")
-            st.error(f"Login failed: {error_message}")
+            error_message = data.get("error", "Unknown error")
+            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
     return False
 
-# Function to parse date ranges from query
-def parse_date_range(query):
-    query_lower = query.lower()
-    singapore_tz = pytz.timezone('Asia/Singapore')
-    now = datetime.datetime.now(singapore_tz)
-    today = now.strftime('%Y-%m-%d')
-    
-    # Regex for specific date/time ranges
-    date_time_pattern = r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)\s*(?:to|-)\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)'
-    date_pattern = r'(\d{4}-\d{2}-\d{2})\s*(?:to|-)\s*(\d{4}-\d{2}-\d{2})'
-    time_pattern = r'(\d{1,2}(?::\d{2})?(?:\s*[ap]m)?)\s*(?:to|-)\s*(\d{1,2}(?::\d{2})?(?:\s*[ap]m)?)'
-    
-    # Specific date/time range
-    match = re.search(date_time_pattern, query)
-    if match:
-        try:
-            start = datetime.datetime.strptime(match.group(1), '%Y-%m-%d %H:%M:%S')
-            end = datetime.datetime.strptime(match.group(2), '%Y-%m-%d %H:%M:%S')
-            return start.strftime('%Y-%m-%d %H:%M:%S'), end.strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            pass
-    
-    # Date range
-    match = re.search(date_pattern, query)
-    if match:
-        return f"{match.group(1)} 00:00:00", f"{match.group(2)} 23:59:59"
-    
-    # Time range today
-    match = re.search(time_pattern, query_lower)
-    if match:
-        try:
-            start_time = datetime.datetime.strptime(match.group(1), '%I:%M %p').strftime('%H:%M:00')
-            end_time = datetime.datetime.strptime(match.group(2), '%I:%M %p').strftime('%H:%M:59')
-            return f"{today} {start_time}", f"{today} {end_time}"
-        except:
-            pass
-    
-    # Keywords
-    if "today" in query_lower:
-        return f"{today} 00:00:00", f"{today} 23:59:59"
-    if "this week" in query_lower:
-        start = (now - datetime.timedelta(days=now.weekday())).strftime('%Y-%m-%d')
-        return f"{start} 00:00:00", f"{today} 23:59:59"
-    if "this month" in query_lower:
-        start = now.replace(day=1).strftime('%Y-%m-%d')
-        return f"{start} 00:00:00", f"{today} 23:59:59"
-    if "this year" in query_lower:
-        start = now.replace(month=1, day=1).strftime('%Y-%m-%d')
-        return f"{start} 00:00:00", f"{today} 23:59:59"
-    
-    # Default: today
-    return f"{today} 00:00:00", f"{today} 23:59:59"
+# Function to validate SQL queries (syntactic check)
+def validate_query(query):
+    """Validate that the SQL query is safe and executable."""
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
+    query_upper = query.upper()
+    if not query_upper.startswith("SELECT"):
+        return False
+    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
 
-# Function to handle queries
+# Function to check query against schema (semantic validation)
+def validate_query_semantics(query, question, schema):
+    """Check if the query aligns with the schema and user intent, including complex joins."""
+    try:
+        query_lower = query.lower()
+        question_lower = question.lower()
+        
+        # Expected tables and joins
+        table_mappings = {
+            "sales": ["invoices", "invoice_details"],
+            "revenue": ["invoices", "invoice_details"],
+            "products": ["products"],
+            "inventory": ["products", "inventory_logs"],
+            "employee": ["employees", "user_logins"],
+            "category": ["categories"],
+            "best-selling": ["invoices", "invoice_details", "products"],
+            "reorder": ["products"]
+        }
+        
+        # Check required tables
+        required_tables = []
+        for keyword, tables in table_mappings.items():
+            if keyword in question_lower:
+                required_tables.extend(tables)
+        
+        if required_tables and not all(table in query_lower for table in set(required_tables)):
+            return False
+        
+        # Check join correctness for multi-table queries
+        if len(required_tables) > 1:
+            join_pairs = [
+                ("invoices", "invoice_details", "invoice_id"),
+                ("invoice_details", "products", "product_id"),
+                ("products", "categories", "category_id"),
+                ("invoices", "employees", "employee_id"),
+                ("employees", "user_logins", "employee_id")
+            ]
+            for table1, table2, key in join_pairs:
+                if table1 in query_lower and table2 in query_lower:
+                    if f"join {table2} on" not in query_lower or key not in query_lower:
+                        return False
+        
+        # Check expected columns
+        select_clause = query_lower.split("from")[0]
+        if "revenue" in question_lower or "total" in question_lower:
+            if not any(col in select_clause for col in ["total", "subtotal", "total_price"]):
+                return False
+        elif "stock" in question_lower or "reorder" in question_lower:
+            if "stock" not in select_clause:
+                return False
+        elif "employee" in question_lower and "sales" in question_lower:
+            if not any(col in select_clause for col in ["total", "quantity"]):
+                return False
+        
+        # Avoid redundant joins
+        join_count = query_lower.count("join")
+        if join_count > len(set(required_tables)) * 2:
+            return False  # Too many joins for the required tables
+                
+        return True
+    except Exception:
+        return False
+
+# Function to simulate query execution
+def simulate_query_execution(query, question, schema):
+    """Simulate query execution with schema validation first."""
+    # First, validate semantics to avoid unnecessary API calls
+    if not validate_query_semantics(query, question, schema):
+        return False
+    
+    try:
+        # Use EXPLAIN to check query validity without full execution
+        explain_query = f"EXPLAIN {query}"
+        data = fetch_data_from_api("execute_query", {"query": explain_query})
+        if data is None:
+            return False
+        
+        # If EXPLAIN passes, test with LIMIT 1
+        test_query = query.split(";")[0] + " LIMIT 1;"
+        data = fetch_data_from_api("execute_query", {"query": test_query})
+        return data is not None and (not isinstance(data, list) or len(data) > 0)
+    except Exception:
+        return False
+
+# Function to rerank query proposals
+def rerank_proposals(proposals, question, schema):
+    """Rerank query proposals with semantic validation."""
+    rerank_template = """
+    Rank these SQL queries based on relevance to the question and schema:
+    Question: {question}
+    Schema: {schema}
+    Queries:
+    {queries}
+    Guidelines:
+    - Ensure queries reference correct tables and columns for the intent.
+    - Prioritize queries with appropriate aggregations (e.g., SUM for sales).
+    - Penalize queries missing key conditions (e.g., WHERE i.total > 0 for invoices).
+    Provide the best query.
+    """
+    rerank_prompt = ChatPromptTemplate.from_template(rerank_template)
+    chain = (
+        rerank_prompt
+        | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+        | StrOutputParser()
+    )
+    
+    # Filter semantically valid proposals
+    valid_proposals = [
+        p for p in proposals
+        if validate_query_semantics(p, question, schema)
+    ]
+    
+    if not valid_proposals:
+        valid_proposals = proposals  # Fallback to avoid empty list
+    
+    queries_str = "\n".join([f"{i+1}. {p}" for i, p in enumerate(valid_proposals)])
+    best_query = chain.invoke({
+        "question": question,
+        "schema": schema,
+        "queries": queries_str
+    })
+    return best_query.strip()
+
+# Function to fetch data from API with caching
+@st.cache_data
+def fetch_data_from_api(action: str, params: dict = None) -> dict:
+    """Fetch data from the API based on the specified action and parameters."""
+    try:
+        payload = {"action": action, "key": st.secrets["API_KEY"]}
+        if params:
+            if "query" in params:
+                st.session_state.last_query = params["query"]
+                params["query"] = quote(params["query"])
+            payload.update(params)
+
+        response = requests.get(
+            st.secrets["API_URL"],
+            params=payload,
+            timeout=15
+        )
+
+        if not response.text.strip():
+            st.error("Received empty response from API")
+            return None
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            st.error(f"Invalid JSON response: {response.text[:200]}...")
+            return None
+
+        if data.get("status") == "success":
+            return data["data"]
+        else:
+            error_msg = data.get("error", "Unknown error")
+            st.error(f"API Error: {error_msg}")
+            return None
+    except requests.RequestException as e:
+        st.error(f"Connection error: {str(e)}")
+        return None
+
+# Function to log user feedback
+def log_user_feedback(query, response, feedback):
+    """Log user feedback for analysis."""
+    feedback_data = {
+        "query": query,
+        "response": response,
+        "feedback": feedback,
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+    try:
+        with open("feedback_log.json", "a") as f:
+            json.dump(feedback_data, f)
+            f.write("\n")
+    except Exception as e:
+        st.warning(f"Failed to log feedback: {str(e)}")
+
+# Function for fallback queries
+def get_fallback_response(question):
+    """Generate a fallback response for ambiguous or failed queries."""
+    clarifying_questions = {
+        "sales": "Could you specify if you want sales by product, category, or time period? Try 'best-selling products this month'.",
+        "revenue": "Do you want total revenue, daily revenue, or by category? Try 'total revenue this year'.",
+        "products": "Are you asking about product stock, sales, or categories? Try 'current stock levels'.",
+        "inventory": "Would you like to see stock levels, reorder needs, or logs? Try 'products below reorder level'.",
+        "employee": "Are you interested in employee sales, logins, or performance? Try 'top-performing employee'."
+    }
+    question_lower = question.lower()
+    for keyword, clarification in clarifying_questions.items():
+        if keyword in question_lower:
+            return clarification, None
+    return "Your query is unclear. Try a predefined query from the sidebar, like 'daily sales trend'.", None
+
+# Function to define SQL chain for query generation
+def get_sql_chain():
+    """Create a chain to generate SQL queries with execution-guided decoding, reranking, and caching."""
+    schema = """
+    Database Schema:
+    - categories: category_id (PK), category_name, created_at
+    - employees: employee_id (PK), first_name, last_name, role, email, password_hash, created_at
+    - inventory_logs: log_id (PK), product_id (FK to products), change_type, quantity, log_date, notes
+    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
+    - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
+    """
+
+    template = """
+    You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
+    Based on the provided table schema, generate an accurate SQL query to answer the user's question.
+
+    **Database Schema:**
+    {schema}
+
+    **Current date in Singapore:** {current_sg_date} (format: YYYY-MM-DD)
+    **Current datetime in Singapore:** {current_sg_datetime} (format: YYYY-MM-DD HH:MM:SS)
+
+    **Conversation Summary:** {chat_summary}
+
+    **Instructions:**
+    - Use explicit INNER JOINs for data integrity.
+    - Group by unique identifiers (e.g., product_id, invoice_id) alongside names to avoid ambiguity.
+    - For 'best-selling products,' use SUM(id.quantity) and order by total_sold DESC.
+    - For revenue, use SUM(i.total) or SUM(id.total_price) as specified.
+    - Exclude canceled/invalid invoices with WHERE i.total > 0.
+    - Return empty result sets for no data, not errors.
+    - Use DECIMAL for monetary fields; INTEGER for quantities.
+    - Provide only the SQL query, without explanations.
+
+    **Specific Query Mappings:**
+    - "overview statistics":
+      SELECT 
+          ROUND(AVG(i.total), 2) AS avg_sales_value,
+          SUM(i.discount) AS total_discount,
+          COUNT(DISTINCT p.product_id) AS total_products,
+          COUNT(DISTINCT c.category_id) AS total_categories,
+          COUNT(i.invoice_id) AS total_invoices,
+          SUM(i.total) AS total_revenue,
+          SUM(i.total - i.discount) AS net_total,
+          SUM(id.quantity * p.purchase_price) AS base_cost,
+          (SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)) AS profit
+      FROM invoices i
+      INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
+      INNER JOIN products p ON id.product_id = p.product_id
+      INNER JOIN categories c ON p.category_id = c.category_id
+      WHERE i.total > 0
+      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s')
+          BETWEEN '2025-02-14 00:00:00' AND '2025-04-13 13:41:26';
+    - "best-selling products of all time":
+      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      GROUP BY p.product_id, p.product_name 
+      ORDER BY total_sold DESC;
+    - "top 5 best-selling products this month":
+      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      AND MONTH(i.order_date) = MONTH(CURDATE()) 
+      GROUP BY p.product_id, p.product_name 
+      ORDER BY total_sold DESC 
+      LIMIT 5;
+    - "product with highest sales this week":
+      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      AND i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE() 
+      GROUP BY p.product_id, p.product_name 
+      ORDER BY total_sold DESC 
+      LIMIT 1;
+    - "best-selling products in each category":
+      SELECT c.category_name, p.product_name, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      INNER JOIN categories c ON p.category_id = c.category_id 
+      WHERE i.total > 0 
+      GROUP BY c.category_id, c.category_name, p.product_id, p.product_name 
+      HAVING SUM(id.quantity) = (
+          SELECT MAX(total_sold)
+          FROM (
+              SELECT SUM(id2.quantity) AS total_sold
+              FROM invoice_details id2
+              INNER JOIN products p2 ON id2.product_id = p2.product_id
+              INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
+              WHERE i2.total > 0 AND p2.category_id = c.category_id
+              GROUP BY p2.product_id
+          ) AS sub
+      )
+      ORDER BY c.category_name;
+    - "sales trend over the past year":
+      SELECT DATE_FORMAT(i.order_date, '%Y-%m') AS month, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      AND i.order_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) 
+      GROUP BY DATE_FORMAT(i.order_date, '%Y-%m') 
+      ORDER BY month;
+    - "daily sales trend for this month":
+      SELECT i.order_date, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      AND MONTH(i.order_date) = MONTH(CURDATE()) 
+      GROUP BY i.order_date 
+      ORDER BY i.order_date;
+    - "day of the week with highest sales":
+      SELECT DAYNAME(i.order_date) AS day_of_week, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      GROUP BY DAYNAME(i.order_date) 
+      ORDER BY total_sold DESC 
+      LIMIT 1;
+    - "total revenue this year":
+      SELECT SUM(i.total) AS total_revenue 
+      FROM invoices i 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE());
+    - "total revenue for today":
+      SELECT SUM(i.total) AS total_revenue 
+      FROM invoices i 
+      WHERE i.total > 0 
+      AND i.order_date = CURDATE();
+    - "average daily revenue this month":
+      SELECT AVG(daily_total) AS avg_daily_revenue 
+      FROM (
+          SELECT i.order_date, SUM(i.total) AS daily_total 
+          FROM invoices i 
+          WHERE i.total > 0 
+          AND YEAR(i.order_date) = YEAR(CURDATE()) 
+          AND MONTH(i.order_date) = MONTH(CURDATE()) 
+          GROUP BY i.order_date
+      ) AS daily;
+    - "revenue breakdown by product category":
+      SELECT c.category_name, SUM(id.total_price) AS total_revenue 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      INNER JOIN categories c ON p.category_id = c.category_id 
+      WHERE i.total > 0 
+      GROUP BY c.category_id, c.category_name 
+      ORDER BY total_revenue DESC;
+    - "products out of stock":
+      SELECT p.product_name, p.stock 
+      FROM products p 
+      WHERE p.stock = 0;
+    - "products below reorder level":
+      SELECT p.product_name, p.stock, p.reorder_level 
+      FROM products p 
+      WHERE p.stock < p.reorder_level;
+    - "current stock levels for all products":
+      SELECT p.product_name, p.stock 
+      FROM products p 
+      ORDER BY p.product_name;
+    - "total value of current inventory":
+      SELECT SUM(p.stock * p.sale_price) AS total_inventory_value 
+      FROM products p;
+    - "value of inventory by category":
+      SELECT c.category_name, SUM(p.stock * p.sale_price) AS category_value 
+      FROM products p 
+      INNER JOIN categories c ON p.category_id = c.category_id 
+      GROUP BY c.category_id, c.category_name;
+    - "total number of products":
+      SELECT COUNT(*) AS total_products 
+      FROM products;
+    - "product categories":
+      SELECT c.category_name 
+      FROM categories c;
+    - "products added in last 30 days":
+      SELECT p.product_name, p.created_at 
+      FROM products p 
+      WHERE p.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY);
+    - "top-performing employee this month":
+      SELECT e.first_name, e.last_name, SUM(i.total) AS total_sales 
+      FROM invoices i 
+      INNER JOIN employees e ON i.employee_id = e.employee_id 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      AND MONTH(i.order_date) = MONTH(CURDATE()) 
+      GROUP BY e.employee_id, e.first_name, e.last_name 
+      ORDER BY total_sales DESC 
+      LIMIT 1;
+    - "total sales by each employee this week":
+      SELECT e.first_name, e.last_name, SUM(i.total) AS total_sales 
+      FROM invoices i 
+      INNER JOIN employees e ON i.employee_id = e.employee_id 
+      WHERE i.total > 0 
+      AND i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE() 
+      GROUP BY e.employee_id, e.first_name, e.last_name 
+      ORDER BY total_sales DESC;
+    - "employee with highest transactions today":
+      SELECT e.first_name, e.last_name, COUNT(i.invoice_id) AS transaction_count 
+      FROM invoices i 
+      INNER JOIN employees e ON i.employee_id = e.employee_id 
+      WHERE i.total > 0 
+      AND i.order_date = CURDATE() 
+      GROUP BY e.employee_id, e.first_name, e.last_name 
+      ORDER BY transaction_count DESC 
+      LIMIT 1;
+    - "currently logged in employees":
+      SELECT e.first_name, e.last_name 
+      FROM user_logins ul 
+      INNER JOIN employees e ON ul.employee_id = e.employee_id 
+      WHERE ul.login_time IS NOT NULL 
+      AND ul.logout_time IS NULL;
+    - "today’s login and logout times for all employees":
+      SELECT e.first_name, e.last_name, ul.login_time, ul.logout_time 
+      FROM user_logins ul 
+      INNER JOIN employees e ON ul.employee_id = e.employee_id 
+      WHERE DATE(ul.login_time) = CURDATE();
+    - "employee login counts this month":
+      SELECT e.first_name, e.last_name, COUNT(ul.log_id) AS login_count 
+      FROM user_logins ul 
+      INNER JOIN employees e ON ul.employee_id = e.employee_id 
+      WHERE YEAR(ul.login_time) = YEAR(CURDATE()) 
+      AND MONTH(ul.login_time) = MONTH(CURDATE()) 
+      GROUP BY e.employee_id, e.first_name, e.last_name;
+    - "sales invoices details for today":
+      SELECT i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type 
+      FROM invoices i 
+      WHERE i.order_date = CURDATE();
+    - "invoices from last week":
+      SELECT i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type 
+      FROM invoices i 
+      WHERE i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 13 DAY) AND DATE_SUB(CURDATE(), INTERVAL 7 DAY);
+    - "total amount due from unpaid invoices":
+      SELECT SUM(i.due) AS total_due 
+      FROM invoices i 
+      WHERE i.due > 0;
+    - "average transaction value this month":
+      SELECT AVG(i.total) AS avg_transaction_value 
+      FROM invoices i 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      AND MONTH(i.order_date) = MONTH(CURDATE());
+    - "most common payment method":
+      SELECT i.payment_type, COUNT(*) AS usage_count 
+      FROM invoices i 
+      WHERE i.total > 0 
+      GROUP BY i.payment_type 
+      ORDER BY usage_count DESC 
+      LIMIT 1;
+    - "percentage of cash transactions":
+      SELECT (COUNT(*) / (SELECT COUNT(*) FROM invoices WHERE total > 0)) * 100 AS cash_percentage 
+      FROM invoices i 
+      WHERE i.payment_type = 'Cash' 
+      AND i.total > 0;
+    - "card transactions this week":
+      SELECT COUNT(*) AS card_transactions 
+      FROM invoices i 
+      WHERE i.payment_type LIKE '%Card%' 
+      AND i.total > 0 
+      AND i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE();
+    - "total discount given this month":
+      SELECT SUM(i.discount) AS total_discount 
+      FROM invoices i 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      AND MONTH(i.order_date) = MONTH(CURDATE());
+    - "invoices with highest discounts this month":
+      SELECT i.invoice_id, i.discount, GROUP_CONCAT(p.product_name) AS products 
+      FROM invoices i 
+      INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      WHERE i.discount > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      AND MONTH(i.order_date) = MONTH(CURDATE()) 
+      GROUP BY i.invoice_id, i.discount 
+      ORDER BY i.discount DESC 
+      LIMIT 5;
+    - "busiest hour for sales":
+      SELECT HOUR(i.order_time) AS hour, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      GROUP BY HOUR(i.order_time) 
+      ORDER BY total_sold DESC 
+      LIMIT 1;
+    - "day of week with highest foot traffic":
+      SELECT DAYNAME(i.order_date) AS day_of_week, COUNT(i.invoice_id) AS transaction_count 
+      FROM invoices i 
+      WHERE i.total > 0 
+      GROUP BY DAYNAME(i.order_date) 
+      ORDER BY transaction_count DESC 
+      LIMIT 1;
+    - "average transactions per day":
+      SELECT AVG(daily_count) AS avg_transactions 
+      FROM (
+          SELECT COUNT(*) AS daily_count 
+          FROM invoices i 
+          WHERE i.total > 0 
+          GROUP BY i.order_date
+      ) AS daily;
+    - "average time between login and first transaction":
+      SELECT e.first_name, e.last_name, AVG(TIMESTAMPDIFF(MINUTE, ul.login_time, MIN(STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s')))) AS avg_minutes 
+      FROM user_logins ul 
+      INNER JOIN employees e ON ul.employee_id = e.employee_id 
+      INNER JOIN invoices i ON ul.employee_id = i.employee_id 
+      WHERE i.total > 0 
+      AND i.order_date = DATE(ul.login_time) 
+      GROUP BY e.employee_id, e.first_name, e.last_name;
+    - "transactions in last hour":
+      SELECT COUNT(*) AS transaction_count 
+      FROM invoices i 
+      WHERE i.total > 0 
+      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') >= DATE_SUB(NOW(), INTERVAL 1 HOUR);
+    - "inventory changes this week for all products":
+      SELECT p.product_name, il.change_type, il.quantity, il.log_date, il.notes 
+      FROM inventory_logs il 
+      INNER JOIN products p ON il.product_id = p.product_id 
+      WHERE il.log_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE();
+    - "recent inventory adjustments":
+      SELECT p.product_name, il.change_type, il.quantity, il.log_date, il.notes 
+      FROM inventory_logs il 
+      INNER JOIN products p ON il.product_id = p.product_id 
+      ORDER BY il.log_date DESC 
+      LIMIT 10;
+    - "profit margins for all products":
+      SELECT p.product_id, p.product_name, ROUND((p.sale_price - p.purchase_price) / p.sale_price * 100, 2) AS profit_margin 
+      FROM products p 
+      ORDER BY profit_margin DESC;
+    - "total units sold for all products this month":
+      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      AND MONTH(i.order_date) = MONTH(CURDATE()) 
+      GROUP BY p.product_id, p.product_name 
+      ORDER BY total_sold DESC;
+    - "sales history for all products this year":
+      SELECT p.product_name, DATE_FORMAT(i.order_date, '%Y-%m') AS month, SUM(id.quantity) AS total_sold 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      GROUP BY p.product_id, p.product_name, DATE_FORMAT(i.order_date, '%Y-%m') 
+      ORDER BY p.product_name, month;
+    - "category with highest sales this year":
+      SELECT c.category_name, SUM(id.total_price) AS total_revenue 
+      FROM invoice_details id 
+      INNER JOIN products p ON id.product_id = p.product_id 
+      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+      INNER JOIN categories c ON p.category_id = c.category_id 
+      WHERE i.total > 0 
+      AND YEAR(i.order_date) = YEAR(CURDATE()) 
+      GROUP BY c.category_id, c.category_name 
+      ORDER BY total_revenue DESC 
+      LIMIT 1;
+    - "average price of products in each category":
+      SELECT c.category_name, AVG(p.sale_price) AS avg_price 
+      FROM products p 
+      INNER JOIN categories c ON p.category_id = c.category_id 
+      GROUP BY c.category_id, c.category_name;
+    - "products to reorder soon":
+      SELECT p.product_name, p.stock, p.reorder_level 
+      FROM products p 
+      WHERE p.stock < p.reorder_level;
+    - "products within 10% of reorder level":
+      SELECT COUNT(*) AS product_count 
+      FROM products p 
+      WHERE p.stock <= p.reorder_level * 1.1;
+
+    **Guidelines:**
+    - "Sales" means SUM(id.quantity) unless revenue (SUM(i.total)) is specified.
+    - Use 'CURDATE()' for today, 'DATE_SUB(CURDATE(), INTERVAL X)' for periods.
+    - For discounts, use i.discount from invoices table.
+    - Ensure monetary values use ROUND(x, 2) for precision.
+    - Verify category counts against product counts for consistency.
+
+    **User Question:** {question}
+    """
+
+    prompt = ChatPromptTemplate.from_template(template)
+    models = [
+        "llama3-8b-8192",
+        "llama-3.3-70b-versatile",
+        "llama3-70b-8192",
+        "gemma2-9b-it",
+    ]
+
+    proposal_llms = [
+        ChatGroq(model=model, temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+        for model in models
+    ]
+
+    proposal_chain = RunnableParallel(
+        **{
+            f"proposal_{i}": prompt | llm | StrOutputParser()
+            for i, llm in enumerate(proposal_llms)
+        }
+    )
+
+    # Cache for common queries
+    @st.cache_data(show_spinner=False)
+    def cached_query(_question, _schema, _chat_summary, _current_sg_date, _current_sg_datetime):
+        """Cache SQL query results for common questions."""
+        proposals = proposal_chain.invoke({
+            "question": _question,
+            "schema": _schema,
+            "chat_summary": _chat_summary,
+            "current_sg_date": _current_sg_date,
+            "current_sg_datetime": _current_sg_datetime
+        })
+        return proposals
+
+    def filter_valid_proposals(proposals, question, schema):
+        """Filter proposals using execution-guided decoding and semantic validation."""
+        valid_proposals = []
+        for proposal in proposals.values():
+            cleaned_query = proposal.split(";")[0] + ";"
+            if (validate_query(cleaned_query) and 
+                validate_query_semantics(cleaned_query, question, schema) and 
+                simulate_query_execution(cleaned_query, question, schema)):
+                valid_proposals.append(cleaned_query)
+        return valid_proposals if valid_proposals else [list(proposals.values())[0]]  # Fallback
+
+    aggregator_template = """
+    Synthesize the best SQL query from these proposals:
+    {valid_proposals}
+
+    **Original Question:** {question}
+    **Schema:** {schema}
+
+    Return ONLY the final SQL query without any explanations or formatting.
+    The query must:
+    1. Start with SELECT
+    2. Use explicit INNER JOIN syntax
+    3. Include WHERE i.total > 0 for invoice queries
+    4. Group by unique IDs (e.g., product_id) alongside names
+    5. Contain no comments or markdown
+    """
+
+    aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
+
+    return (
+        RunnablePassthrough.assign(
+            schema=lambda _: schema,
+            current_sg_date=lambda x: x["current_sg_date"],
+            current_sg_datetime=lambda x: x["current_sg_datetime"],
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
+        )
+        | RunnablePassthrough.assign(
+            proposals=lambda x: cached_query(
+                x["question"],
+                schema,
+                x["chat_summary"],
+                x["current_sg_date"],
+                x["current_sg_datetime"]
+            ),
+            question=lambda x: x["question"],
+            chat_history=lambda x: x["chat_history"],
+        )
+        | RunnablePassthrough.assign(
+            valid_proposals=lambda x: filter_valid_proposals(x["proposals"], x["question"], x["schema"])
+        )
+        | RunnablePassthrough.assign(
+            best_query=lambda x: rerank_proposals(x["valid_proposals"], x["question"], x["schema"])
+        )
+        | aggregator_prompt
+        | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+        | StrOutputParser()
+    )
+
+# Function to generate AI response
+def get_response(user_query: str, chat_history: list):
+    """Generate a natural language response and fetch data based on the user's query."""
+    time_keywords = [
+        "current time", "what time is it", "date and time",
+        "today's date", "now", "time today", "date today"
+    ]
+    data_keywords = [
+        "sales", "invoice", "details", "product", "category", "stock", "revenue",
+        "order", "employee", "payment", "quantity", "price", "total", "subtotal",
+        "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
+        "provide", "get", "fetch", "retrieve", "overview"
+    ]
+
+    schema = """
+    Database Schema:
+    - categories: category_id (PK), category_name, created_at
+    - employees: employee_id (PK), first_name, last_name, role, email, password_hash, created_at
+    - inventory_logs: log_id (PK), product_id (FK to products), change_type, quantity, log_date, notes
+    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
+    - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
+    """
+
+    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        current_time = datetime.datetime.now(singapore_tz)
+        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        return natural_response, None
+    else:
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        now_sg = datetime.datetime.now(singapore_tz)
+        current_sg_date = now_sg.strftime('%Y-%m-%d')
+        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+
+        sql_chain = get_sql_chain()
+        raw_query = sql_chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+            "current_sg_date": current_sg_date,
+            "current_sg_datetime": current_sg_datetime
+        })
+
+        query = raw_query.split(";")[0] + ";"
+        query = query.replace("```sql", "").replace("```", "").strip()
+        query = "\n".join(
+            [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
+        )
+
+        if not validate_query(query) or not validate_query_semantics(query, user_query, schema):
+            log_data = {"query": user_query, "error": "Invalid query", "timestamp": datetime.datetime.now().isoformat()}
+            with open("error_log.json", "a") as f:
+                json.dump(log_data, f)
+                f.write("\n")
+            return get_fallback_response(user_query)
+
+        # Clear cache for critical queries
+        if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
+            fetch_data_from_api.clear()
+        data = fetch_data_from_api("execute_query", {"query": query})
+        if data is None:
+            log_data = {"query": user_query, "error": "No data returned", "timestamp": datetime.datetime.now().isoformat()}
+            with open("error_log.json", "a") as f:
+                json.dump(log_data, f)
+                f.write("\n")
+            return get_fallback_response(user_query)
+
+        response_template = """
+        Generate a natural language response based on:
+        - **Question:** {question}
+        - **Results:** {response}
+        - **History:** {chat_history}
+
+        **Guidelines:**
+        1. If results are empty, state: "No data found for this query. This could be due to no records matching the criteria."
+        2. For quantities (e.g., total_sold, total_invoices), use 'units', 'items', or 'records'.
+        3. For monetary values, use peso sign (₱) and format to 2 decimal places.
+        4. Highlight key insights (e.g., top item, highest value).
+        5. Use markdown: **bold** for emphasis, - for lists.
+        6. If total_discount = 0, note: "No discounts recorded, which is unusual for this period."
+        7. If total_categories ≥ total_products, caution: "High category count relative to products; verify category assignments."
+        8. Keep concise, under 200 words.
+        """
+
+        chain = (
+            RunnablePassthrough.assign(
+                response=lambda _: json.dumps(data, indent=2)
+            )
+            | ChatPromptTemplate.from_template(response_template)
+            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+            | StrOutputParser()
+        )
+
+        natural_response = chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+        })
+
+        return natural_response, data
+
+# Function to determine chart type for data visualization
+def determine_chart_type(query, df):
+    """Determine the appropriate chart type based on query and data."""
+    if df.empty or len(df.columns) < 2:
+        return None, None
+
+    columns = df.columns.tolist()
+    query_lower = query.lower()
+
+    date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
+    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
+
+    if date_columns and numerical_columns:
+        return "line", (date_columns[0], numerical_columns[0])
+    elif categorical_columns and numerical_columns:
+        unique_categories = len(df[categorical_columns[0]].unique())
+        if unique_categories <= 6 and ("percentage" in query_lower or "breakdown" in query_lower):
+            return "pie", (categorical_columns[0], numerical_columns[0])
+        else:
+            return "bar", (categorical_columns[0], numerical_columns[0])
+    return None, None
+
+# Function to handle user queries
 def handle_query(query: str):
+    """Process a user's query, update chat history, and display response with feedback option."""
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
@@ -136,8 +892,23 @@ def handle_query(query: str):
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
+        # Add feedback button
+        feedback_key = f"feedback_{len(st.session_state.chat_history)}"
+        feedback = st.radio(
+            "Was this response helpful?",
+            options=["Yes", "No"],
+            key=feedback_key,
+            horizontal=True
+        )
+        if feedback == "No":
+            feedback_text = st.text_input("Please explain what was wrong:", key=f"text_{feedback_key}")
+            if st.button("Submit Feedback", key=f"submit_{feedback_key}"):
+                log_user_feedback(query, natural_response, feedback_text)
+                st.success("Thank you for your feedback!")
+        
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            # Preprocess data for charts
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -145,7 +916,7 @@ def handle_query(query: str):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
                 elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    df[col] = pd.to_numeric(df[col], errors='coerce')  # Keep as quantity
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 with st.spinner("Generating chart..."):
@@ -171,6 +942,7 @@ def handle_query(query: str):
 
 # Function to display chat history
 def display_chat_history():
+    """Render the chat history in the UI."""
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
             with st.chat_message("AI", avatar="dist/img/ai.png"):
@@ -179,282 +951,17 @@ def display_chat_history():
             with st.chat_message("Human", avatar="dist/img/Human.png"):
                 st.markdown(message.content)
 
-# Function to clear chat
+# Function to clear chat history
 def clear_chat():
+    """Reset the chat history to start a new conversation."""
     st.session_state.chat_history = [
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
     st.success("Chat history cleared. Starting a new conversation!")
 
-# Function to fetch data from API
-@st.cache_data
-def fetch_data_from_api(action: str, params: dict = None) -> dict:
-    try:
-        payload = {"action": action, "key": st.secrets["API_KEY"]}
-        if params:
-            if "query" in params:
-                st.session_state.last_query = params["query"]
-                params["query"] = quote(params["query"])
-            payload.update(params)
-        response = requests.get(
-            st.secrets["API_URL"],
-            params=payload,
-            timeout=15
-        )
-        if not response.text.strip():
-            st.error("Received empty response from API")
-            return None
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            st.error(f"Invalid JSON response: {response.text[:200]}...")
-            return None
-        if data.get("status") == "success":
-            return data["data"]
-        else:
-            error_msg = data.get("error", "Unknown error")
-            st.error(f"API Error: {error_msg}")
-            return None
-    except requests.RequestException as e:
-        st.error(f"Connection error: {str(e)}")
-        return None
-
-# Function to validate SQL queries
-def validate_query(query):
-    query_upper = query.upper().strip()
-    if not query_upper.startswith("SELECT"):
-        return False, "Query does not start with SELECT"
-    forbidden = ["DELETE", "UPDATE", "INSERT", "DROP", "ALTER", "TRUNCATE", "CREATE", "REPLACE"]
-    for kw in forbidden:
-        if kw in query_upper:
-            return False, f"Query contains forbidden keyword: {kw}"
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "GROUP BY", "ORDER BY", "LIMIT", "HAVING", "COUNT", "SUM", "AVG", "MAX", "MIN", "ROUND", "COALESCE", "STR_TO_DATE", "CONCAT"]
-    if not any(kw in query_upper for kw in allowed_keywords):
-        return False, "Query lacks required SQL keywords"
-    return True, ""
-
-# Function to define SQL chain
-def get_sql_chain():
-    schema = """
-    Database Schema:
-    - categories: category_id (PK), category_name, created_at
-    - employees: employee_id (PK), first_name, last_name, role, email, password_hash, created_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type, quantity, log_date, notes
-    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
-    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
-    - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
-    """
-
-    template = """
-    You are an expert SQL assistant for the SCC School Store Database. Generate a valid, accurate SQL query based on the user's question, adhering strictly to the provided schema and instructions.
-
-    **Database Schema:**
-    {schema}
-
-    **Current Date in Singapore:** {current_sg_date} (YYYY-MM-DD)
-    **Current Datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
-    **Date Range:** From {date_from} to {date_to}
-
-    **Conversation Summary:** {chat_summary}
-
-    **Instructions:**
-    - Generate SELECT queries only, starting with SELECT.
-    - Use INNER JOIN for data integrity unless LEFT JOIN is explicitly needed.
-    - Avoid row duplication:
-      - For invoices, use COUNT(DISTINCT i.invoice_id).
-      - For revenue, use SUM(i.total).
-      - For profit, calculate SUM(i.total) - SUM(id.quantity * p.purchase_price).
-    - Filter with WHERE i.total > 0 to exclude invalid invoices.
-    - Use STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') for datetime comparisons.
-    - Apply date filters with BETWEEN '{date_from}' AND '{date_to}' if specified.
-    - If no period is provided, default to today ({current_sg_date} 00:00:00 to {current_sg_datetime}).
-    - Use ROUND(value, 2) for monetary values.
-    - For best-selling products, sort by SUM(id.quantity) DESC.
-    - Group by unique IDs (e.g., invoice_id, product_id) alongside descriptive fields.
-    - Return empty result sets if no data is found.
-    - Do not use backticks, comments, or markdown in the query.
-    - Ensure the query is executable without errors.
-
-    **Query Mappings:**
-    - "overview statistics":
-      WITH invoice_stats AS (
-          SELECT 
-              COUNT(DISTINCT i.invoice_id) AS total_invoices,
-              ROUND(AVG(i.total), 2) AS avg_sales_value,
-              SUM(i.total) AS total_revenue
-          FROM invoices i
-          WHERE i.total > 0
-          AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}'
-      ),
-      cost_stats AS (
-          SELECT 
-              COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-          FROM invoices i
-          INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
-          INNER JOIN products p ON id.product_id = p.product_id
-          WHERE i.total > 0
-          AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}'
-      )
-      SELECT 
-          i_stats.total_invoices,
-          i_stats.avg_sales_value,
-          i_stats.total_revenue,
-          c_stats.base_cost,
-          (i_stats.total_revenue - c_stats.base_cost) AS profit,
-          ROUND((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue * 100, 1) AS profit_margin,
-          (SELECT COUNT(*) FROM products p WHERE p.stock <= p.reorder_level) AS low_stock_count,
-          (SELECT p.product_name 
-           FROM invoice_details id2
-           INNER JOIN products p ON id2.product_id = p.product_id
-           INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
-           WHERE i2.total > 0
-           AND STR_TO_DATE(CONCAT(i2.order_date, ' ', i2.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}'
-           GROUP BY p.product_id, p.product_name
-           ORDER BY SUM(id2.quantity) DESC
-           LIMIT 1) AS top_product
-      FROM invoice_stats i_stats
-      CROSS JOIN cost_stats c_stats
-    - "best-selling products of all time":
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC
-    - "top 5 best-selling products this month":
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE()) 
-      GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC 
-      LIMIT 5
-    - "total revenue for period":
-      SELECT SUM(i.total) AS total_revenue 
-      FROM invoices i 
-      WHERE i.total > 0 
-      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}'
-    - "invoices in period":
-      SELECT i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type,
-             GROUP_CONCAT(CONCAT(id.quantity, ' ', p.product_name, ' (₱', id.total_price, ')')) AS items
-      FROM invoices i 
-      INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
-      INNER JOIN products p ON id.product_id = p.product_id
-      WHERE i.total > 0 
-      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}'
-      GROUP BY i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type
-
-    **User Question:** {question}
-
-    Generate a single, executable SQL query without backticks, comments, or markdown formatting:
-    """
-
-    prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
-    return prompt | llm | StrOutputParser()
-
-# Function to generate response
-def get_response(user_query: str, chat_history: list):
-    time_keywords = ["current time", "what time is it", "date and time", "today's date", "now"]
-    if any(keyword in user_query.lower() for keyword in time_keywords):
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        current_time = datetime.datetime.now(singapore_tz)
-        return f"Current time in Singapore: {current_time.strftime('%Y-%m-%d %H:%M:%S')}.", None
-    
-    singapore_tz = pytz.timezone('Asia/Singapore')
-    now_sg = datetime.datetime.now(singapore_tz)
-    current_sg_date = now_sg.strftime('%Y-%m-%d')
-    current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
-    
-    date_from, date_to = parse_date_range(user_query)
-    
-    sql_chain = get_sql_chain()
-    raw_query = sql_chain.invoke({
-        "current_sg_date": current_sg_date,
-        "current_sg_datetime": current_sg_datetime,
-        "date_from": date_from,
-        "date_to": date_to,
-        "chat_summary": " ".join([msg.content for msg in chat_history[-3:]]),
-        "question": user_query
-    })
-    
-    query = raw_query.strip()
-    if query.endswith(';'):
-        query = query[:-1]
-    query = query.replace("```sql", "").replace("```", "").strip()
-    query = "\n".join(
-        [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
-    )
-    query = query + ";"
-    
-    is_valid, reason = validate_query(query)
-    if not is_valid:
-        return f"Invalid query generated: {reason}. Please rephrase your question.", None
-    
-    fetch_data_from_api.clear()
-    data = fetch_data_from_api("execute_query", {"query": query})
-    if data is None:
-        return f"No data retrieved for {date_from} to {date_to}. Try rephrasing your query.", None
-    
-    response_template = """
-    Generate a natural language response based on:
-    - **Question:** {question}
-    - **Results:** {response}
-    - **Period:** {date_from} to {date_to}
-
-    **Guidelines:**
-    - If results are empty, state: "No data found for {date_from} to {date_to}."
-    - Use ₱ for monetary values, formatted to 2 decimal places.
-    - Use 'units' for quantities.
-    - Highlight key insights (e.g., **Top Product**: SCC SHIRT).
-    - Keep response concise, under 150 words.
-    - Provide clear, actionable information based on the data.
-    """
-    
-    chain = (
-        RunnablePassthrough.assign(
-            response=lambda _: json.dumps(data, indent=2),
-            date_from=lambda _: date_from,
-            date_to=lambda _: date_to
-        )
-        | ChatPromptTemplate.from_template(response_template)
-        | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
-        | StrOutputParser()
-    )
-    
-    natural_response = chain.invoke({
-        "question": user_query,
-        "chat_history": chat_history,
-    })
-    
-    return natural_response, data
-
-# Function to determine chart type
-def determine_chart_type(query, df):
-    if df.empty or len(df.columns) < 2:
-        return None, None
-    columns = df.columns.tolist()
-    query_lower = query.lower()
-    date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
-    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
-    categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
-    if date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
-        unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and ("percentage" in query_lower or "breakdown" in query_lower):
-            return "pie", (categorical_columns[0], numerical_columns[0])
-        else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
-    return None, None
-
-# Main application
+# Main application logic
 def main():
+    """Main function to run the AcaSquad AI application."""
     if not st.session_state.authenticated:
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
@@ -463,11 +970,15 @@ def main():
                 email = st.text_input("Email")
                 password = st.text_input("Password", type="password")
                 submit = st.form_submit_button("Login")
-                if submit and authenticate(email, password):
-                    st.rerun()
+                if submit:
+                    if authenticate(email, password):
+                        st.session_state.authenticated = True
+                        st.rerun()
     else:
         if st.session_state.user["role"] in ["Owner", "Admin"]:
-            st.title("Chat with AcaSquad AI")
+            st.title("Chat with our AcaSquad AI")
+
+            # Sidebar setup
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
@@ -475,25 +986,115 @@ def main():
                     st.session_state.authenticated = False
                     st.session_state.user = None
                     st.rerun()
+                
+                # Add Clear Chat button
                 if st.button("Clear Chat"):
                     clear_chat()
                     st.rerun()
+
+                # Quick Queries Expanders
                 with st.expander("📈 Sales Performance"):
                     sales_queries = [
                         "What are the best-selling products of all time?",
                         "What are the top 5 best-selling products this month?",
-                        "What is the total revenue from 2025-04-14 15:00:00 to 2025-04-14 15:59:13?",
-                        "List invoices from 2025-04-14 15:00:00 to 2025-04-14 15:59:13"
+                        "Which product has the highest sales this week?",
+                        "What are the best-selling products in each category?",
+                        "Show me the sales trend over the past year.",
+                        "What is the daily sales trend for this month?",
+                        "Which day of the week has the highest sales?",
+                        "What is the total revenue this year?",
+                        "What is the total revenue for today?",
+                        "What is the average daily revenue this month?",
+                        "What is the revenue breakdown by product category?"
                     ]
                     for q in sales_queries:
                         if st.button(q, key=f"sales_{q}"):
                             handle_query(q)
+
+                with st.expander("📦 Inventory Management"):
+                    inventory_queries = [
+                        "Which products are out of stock?",
+                        "Which products are below the reorder level?",
+                        "What are the current stock levels for all products?",
+                        "What is the total value of current inventory?",
+                        "What is the value of inventory by category?",
+                        "How many products do we have in total?",
+                        "What are the product categories we have?",
+                        "List all products added in the last 30 days."
+                    ]
+                    for q in inventory_queries:
+                        if st.button(q, key=f"inv_{q}"):
+                            handle_query(q)
+
+                with st.expander("👥 Employee Performance"):
+                    employee_queries = [
+                        "Who is the top-performing employee this month?",
+                        "What are the total sales by each employee this week?",
+                        "Which employee has the highest number of transactions today?",
+                        "Who is currently logged in?",
+                        "What are today’s login and logout times for all employees?",
+                        "How many times has each employee logged in this month?"
+                    ]
+                    for q in employee_queries:
+                        if st.button(q, key=f"emp_{q}"):
+                            handle_query(q)
+
+                with st.expander("💰 Financial Insights"):
+                    financial_queries = [
+                        "Give me the sales invoices details for today.",
+                        "List all invoices from last week.",
+                        "What is the total amount due from unpaid invoices?",
+                        "What is the average transaction value this month?",
+                        "What is the most common payment method used?",
+                        "What percentage of transactions are paid by cash?",
+                        "How many transactions were made by card this week?",
+                        "What is the total discount given this month?",
+                        "Which invoices had the highest discounts this month?"
+                    ]
+                    for q in financial_queries:
+                        if st.button(q, key=f"fin_{q}"):
+                            handle_query(q)
+
+                with st.expander("🏪 Store Operations"):
+                    ops_queries = [
+                        "What is the busiest hour of the day for sales?",
+                        "Which day of the week has the highest foot traffic?",
+                        "What is the average number of transactions per day?",
+                        "What is the average time between login and first transaction for employees?",
+                        "How many transactions were completed in the last hour?",
+                        "Show me this week’s inventory changes for all products.",
+                        "What are the most recent inventory adjustments?"
+                    ]
+                    for q in ops_queries:
+                        if st.button(q, key=f"ops_{q}"):
+                            handle_query(q)
+
+                with st.expander("🔍 Miscellaneous Insights"):
+                    misc_queries = [
+                        "What are the profit margins for all products?",
+                        "What are the total units sold for all products this month?",
+                        "What is the sales history for all products this year?",
+                        "Which product category has the highest sales this year?",
+                        "What is the average price of products in each category?",
+                        "Which products should we reorder soon?",
+                        "How many products are within 10% of their reorder level?"
+                    ]
+                    for q in misc_queries:
+                        if st.button(q, key=f"misc_{q}"):
+                            handle_query(q)
+
+            # Main area setup
+            if "chat_history" not in st.session_state:
+                st.session_state.chat_history = [
+                    AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+                ]
+
             display_chat_history()
             user_query = st.chat_input("Type a message...")
             if user_query:
                 handle_query(user_query)
         else:
-            st.error("Access denied. Contact Admin.")
+            st.error("Sorry, you can't access this. Please contact the Admin.")
             if st.button("Logout"):
                 st.session_state.authenticated = False
                 st.session_state.user = None
@@ -502,6 +1103,7 @@ def main():
 if __name__ == "__main__":
     main()
 
+# Hide Streamlit default UI elements
 hide_streamlit_style = """
 <style>
 #MainMenu {visibility: hidden;}
