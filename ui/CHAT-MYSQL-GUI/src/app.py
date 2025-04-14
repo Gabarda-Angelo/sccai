@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
