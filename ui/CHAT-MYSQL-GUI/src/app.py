@@ -769,13 +769,6 @@ def main():
                     st.rerun()
 
                 # Quick Queries Expanders
-                with st.expander("📊 Overview", expanded=True):
-                    overview_queries = [
-                        "Show overview statistics"
-                    ]
-                    for q in overview_queries:
-                        if st.button(q, key=f"overview_{q}"):
-                            handle_query(q)
 
                 with st.expander("📈 Sales Performance"):
                     sales_queries = [
