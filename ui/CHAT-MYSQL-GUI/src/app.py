@@ -764,7 +764,7 @@ def handle_query(query: str):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
-               约定with st.spinner("Generating chart..."):
+               with st.spinner("Generating chart..."):
                     st.markdown(f"### {chart_type.capitalize()} Chart")
                     fig, ax = plt.subplots()
                     if chart_type == 'bar':
