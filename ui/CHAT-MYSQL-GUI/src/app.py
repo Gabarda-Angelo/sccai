@@ -12,6 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import re
 
 # Set page configuration (must be the first Streamlit command)
 st.set_page_config(
@@ -90,9 +91,9 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]):
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "profit_margin"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                    df.rename(columns={col: f"{col} (₱)" if "margin" not in col.lower() else f"{col} (%)"}, inplace=True)
             
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
@@ -103,12 +104,12 @@ def handle_query(query: str):
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} by {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)').replace(' (%)', ' (%)'))
                     elif chart_type == 'line':
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)').replace(' (%)', ' (%)'))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
@@ -177,11 +178,12 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
 # Function to validate SQL queries
 def validate_query(query):
     """Validate that the SQL query is safe and executable."""
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT"]
-    query_upper = query.upper()
+    query_upper = query.upper().strip()
     if not query_upper.startswith("SELECT"):
         return False
-    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+    if "FROM" not in query_upper:
+        return False
+    return True
 
 # Function to validate calculations
 def validate_calculations(data, query):
@@ -195,12 +197,12 @@ def validate_calculations(data, query):
     query_lower = query.lower()
     for col in numerical_columns:
         # Check for negative values in monetary fields
-        if any(term in col.lower() for term in ["subtotal", "total", "price", "paid"]) and (df[col] < 0).any():
+        if any(term in col.lower() for term in ["subtotal", "total", "price", "paid", "profit"]) and (df[col] < 0).any():
             st.warning(f"Warning: Negative values found in {col}, which may indicate an error.")
             return False
 
         # Verify sums/averages for specific queries
-        if "total" in query_lower and "sum" in query_lower.lower():
+        if any(term in query_lower for term in ["total", "revenue", "profit"]) and any(term in col.lower() for term in ["total", "sum", "profit"]):
             total = df[col].sum()
             if total == 0 and len(df) > 0:
                 st.warning(f"Warning: Sum of {col} is zero, which may be unexpected.")
@@ -220,6 +222,12 @@ def get_sql_chain():
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
     - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
+
+    Notes:
+    - 'Profit' is calculated as (p.sale_price - p.purchase_price) * id.quantity for each product in invoice_details.
+    - 'Profit margin' is ((p.sale_price - p.purchase_price) / p.sale_price) * 100 as a percentage.
+    - 'Base cost' refers to p.purchase_price * id.quantity.
+    - 'Revenue' is the sum of i.total from invoices or id.total_price from invoice_details.
     """
 
     template = """
@@ -236,16 +244,26 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_sg_date}' for queries mentioning 'today' (e.g., WHERE order_date = '{current_sg_date}').
-    - For time periods (e.g., 'this month', 'last week'), calculate exact date ranges (e.g., '2025-04-01' to '{current_sg_date}' for this month).
-    - For calculations (e.g., SUM, AVG), use COALESCE(value, 0) to handle NULLs and ROUND(value, 2) for monetary values.
+    - For 'this month', use dates from '{current_sg_date}' with day '01' to '{current_sg_date}'.
+    - For 'this week', use dates from the Monday before '{current_sg_date}' to '{current_sg_date}'.
+    - If no time period is specified (e.g., 'best selling products'), assume all time (no date filter).
+    - For calculations (e.g., SUM, AVG), use COALESCE(value, 0) and ROUND(value, 2) for monetary values.
     - Use explicit JOINs with table aliases (e.g., invoices i JOIN invoice_details id ON i.invoice_id = id.invoice_id).
     - Return a JSON object with:
-      - 'query': The SQL query.
-      - 'time_period': A description of the time period (e.g., 'today (2025-04-13)', 'this month (2025-04-01 to 2025-04-13)').
+      - 'query': The SQL query (ending with semicolon).
+      - 'time_period': A description (e.g., 'today (2025-04-13)', 'all time', 'this month (2025-04-01 to 2025-04-13)').
     - Avoid non-existent tables/columns.
     - Ensure queries are safe (SELECT only).
+    - For 'profit', calculate (p.sale_price - p.purchase_price) * id.quantity.
+    - For 'profit margin', calculate ((p.sale_price - p.purchase_price) / p.sale_price) * 100.
 
     **User Question:** {question}
+
+    **Example Output:**
+    {
+      "query": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM products p JOIN invoice_details id ON p.product_id = id.product_id GROUP BY p.product_name ORDER BY total_sold DESC LIMIT 5;",
+      "time_period": "all time"
+    }
     """
 
     prompt = ChatPromptTemplate.from_template(template)
@@ -275,17 +293,25 @@ def get_sql_chain():
     **Original Question:** {question}
     **Schema:** {schema}
 
-    Return a JSON object:
-    {{
-        "query": "SELECT ...",
-        "time_period": "e.g., today (2025-04-13) or this month (2025-04-01 to 2025-04-13)"
-    }}
+    Return a JSON object and nothing else:
+    {
+      "query": "SELECT ...;",
+      "time_period": "e.g., today (2025-04-13) or all time"
+    }
 
     Ensure:
     1. Query starts with SELECT and uses explicit JOINs.
     2. Calculations use ROUND(value, 2) and COALESCE(value, 0).
-    3. Time period is accurate and matches the question.
-    4. No comments or markdown in the query.
+    3. Time period matches the question or defaults to 'all time'.
+    4. No comments, markdown, or extra text in the query.
+    5. Handle 'profit' as (sale_price - purchase_price) * quantity.
+    6. Handle 'profit margin' as ((sale_price - purchase_price) / sale_price) * 100.
+
+    **Example Output:**
+    {
+      "query": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM products p JOIN invoice_details id ON p.product_id = id.product_id GROUP BY p.product_name ORDER BY total_sold DESC LIMIT 5;",
+      "time_period": "all time"
+    }
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -318,7 +344,7 @@ def get_response(user_query: str, chat_history: list):
         "sales", "invoice", "details", "product", "category", "stock", "revenue",
         "order", "employee", "payment", "quantity", "price", "total", "subtotal",
         "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve"
+        "provide", "get", "fetch", "retrieve", "profit", "cost", "margin"
     ]
 
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
@@ -329,7 +355,7 @@ def get_response(user_query: str, chat_history: list):
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-DD')
+        current_sg_date = now_sg.strftime('%Y-%m-%d')
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
         sql_chain = get_sql_chain()
@@ -340,30 +366,41 @@ def get_response(user_query: str, chat_history: list):
             "current_sg_datetime": current_sg_datetime
         })
 
-        # Parse JSON response
+        # Parse JSON response with regex to handle extra text
         try:
-            response_dict = json.loads(raw_response)
-            query = response_dict.get("query", "").split(";")[0] + ";"
-            time_period = response_dict.get("time_period", "unspecified period")
+            json_match = re.search(r'\{.*?\}', raw_response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                response_dict = json.loads(json_str)
+                query = response_dict.get("query", "").split(";")[0] + ";"
+                time_period = response_dict.get("time_period", "unspecified period")
+            else:
+                raise json.JSONDecodeError("No JSON object found", raw_response, 0)
         except json.JSONDecodeError:
-            query = raw_response.split(";")[0] + ";"
+            st.write(f"Debug: Raw aggregator response: {raw_response}")
+            query = raw_response.split(";")[0] + ";" if ";" in raw_response else raw_response
             time_period = "unspecified period"
 
+        # Clean query
         query = query.replace("```sql", "").replace("```", "").strip()
         query = "\n".join(
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
 
+        # Debug output
+        st.write(f"Debug: Generated SQL query: {query}")
+
         if not validate_query(query):
+            st.write("Debug: Query validation failed.")
             return "Failed to generate a valid database query. Please try again.", None
 
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None
+            return f"Couldn't retrieve data for {time_period}. Please try again or rephrase your question.", None
 
         # Validate calculations
         if not validate_calculations(data, user_query):
-            return "Calculation error detected in the data. Please verify your query.", None
+            return f"Calculation error detected in the data for {time_period}. Please verify your query.", None
 
         response_template = """
         Generate a natural language response based on:
@@ -377,7 +414,7 @@ def get_response(user_query: str, chat_history: list):
         2. If results are empty, say: "No data found for {time_period}. Try a broader time frame or different product."
         3. Highlight key insights (e.g., highest/lowest values, trends).
         4. Use markdown: **bold** for emphasis, - for lists.
-        5. Include peso sign (₱) for monetary values.
+        5. Include peso sign (₱) for monetary values, percentage (%) for margins.
         6. Keep concise, under 200 words.
         """
 
@@ -416,7 +453,7 @@ def determine_chart_type(query, df):
         return "line", (date_columns[0], numerical_columns[0])
     elif categorical_columns and numerical_columns:
         unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and "percentage" in query_lower:
+        if unique_categories <= 6 and any(term in query_lower for term in ["percentage", "margin", "distribution"]):
             return "pie", (categorical_columns[0], numerical_columns[0])
         else:
             return "bar", (categorical_columns[0], numerical_columns[0])
