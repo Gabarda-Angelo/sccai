@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
@@ -221,12 +221,17 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
 
 # Function to validate SQL queries
 def validate_query(query):
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "INNER JOIN", "GROUP BY", "ORDER BY", "LIMIT", "HAVING", "COUNT", "SUM", "AVG", "ROUND"]
-    query_upper = query.upper()
+    query_upper = query.upper().strip()
     if not query_upper.startswith("SELECT"):
-        return False
-    forbidden = ["DELETE", "UPDATE", "INSERT", "DROP", "ALTER"]
-    return all(kw not in query_upper for kw in forbidden) and any(kw in query_upper for kw in allowed_keywords)
+        return False, "Query does not start with SELECT"
+    forbidden = ["DELETE", "UPDATE", "INSERT", "DROP", "ALTER", "TRUNCATE", "CREATE", "REPLACE"]
+    for kw in forbidden:
+        if kw in query_upper:
+            return False, f"Query contains forbidden keyword: {kw}"
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "GROUP BY", "ORDER BY", "LIMIT", "HAVING", "COUNT", "SUM", "AVG", "MAX", "MIN", "ROUND", "COALESCE", "STR_TO_DATE", "CONCAT"]
+    if not any(kw in query_upper for kw in allowed_keywords):
+        return False, "Query lacks required SQL keywords"
+    return True, ""
 
 # Function to define SQL chain
 def get_sql_chain():
@@ -242,31 +247,34 @@ def get_sql_chain():
     """
 
     template = """
-    You are an AI assistant for the SCC School Store Database.
-    Generate an accurate SQL query based on the user's question, using the provided schema.
+    You are an expert SQL assistant for the SCC School Store Database. Generate a valid, accurate SQL query based on the user's question, adhering strictly to the provided schema and instructions.
 
     **Database Schema:**
     {schema}
 
-    **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
-    **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
+    **Current Date in Singapore:** {current_sg_date} (YYYY-MM-DD)
+    **Current Datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
     **Date Range:** From {date_from} to {date_to}
 
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use INNER JOIN for data integrity.
-    - Group by unique IDs (e.g., invoice_id, product_id) alongside names.
-    - For 'best-selling products,' use SUM(id.quantity) DESC.
-    - For revenue, use SUM(i.total).
-    - For profit, use SUM(i.total) - SUM(id.quantity * p.purchase_price).
-    - For invoices, use COUNT(DISTINCT i.invoice_id).
-    - Exclude invalid invoices with WHERE i.total > 0.
-    - Use STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') for datetime filtering.
-    - Return empty result sets for no data.
-    - Use ROUND(x, 2) for monetary values.
-    - If date range is provided, filter with BETWEEN {date_from} AND {date_to}.
-    - If no period is specified, default to today ({current_sg_date} 00:00:00 to {current_sg_datetime}).
+    - Generate SELECT queries only, starting with SELECT.
+    - Use INNER JOIN for data integrity unless LEFT JOIN is explicitly needed.
+    - Avoid row duplication:
+      - For invoices, use COUNT(DISTINCT i.invoice_id).
+      - For revenue, use SUM(i.total).
+      - For profit, calculate SUM(i.total) - SUM(id.quantity * p.purchase_price).
+    - Filter with WHERE i.total > 0 to exclude invalid invoices.
+    - Use STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') for datetime comparisons.
+    - Apply date filters with BETWEEN '{date_from}' AND '{date_to}' if specified.
+    - If no period is provided, default to today ({current_sg_date} 00:00:00 to {current_sg_datetime}).
+    - Use ROUND(value, 2) for monetary values.
+    - For best-selling products, sort by SUM(id.quantity) DESC.
+    - Group by unique IDs (e.g., invoice_id, product_id) alongside descriptive fields.
+    - Return empty result sets if no data is found.
+    - Do not use backticks, comments, or markdown in the query.
+    - Ensure the query is executable without errors.
 
     **Query Mappings:**
     - "overview statistics":
@@ -306,7 +314,7 @@ def get_sql_chain():
            ORDER BY SUM(id2.quantity) DESC
            LIMIT 1) AS top_product
       FROM invoice_stats i_stats
-      CROSS JOIN cost_stats c_stats;
+      CROSS JOIN cost_stats c_stats
     - "best-selling products of all time":
       SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
       FROM invoice_details id 
@@ -314,7 +322,7 @@ def get_sql_chain():
       INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
       WHERE i.total > 0 
       GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC;
+      ORDER BY total_sold DESC
     - "top 5 best-selling products this month":
       SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
       FROM invoice_details id 
@@ -325,12 +333,12 @@ def get_sql_chain():
       AND MONTH(i.order_date) = MONTH(CURDATE()) 
       GROUP BY p.product_id, p.product_name 
       ORDER BY total_sold DESC 
-      LIMIT 5;
+      LIMIT 5
     - "total revenue for period":
       SELECT SUM(i.total) AS total_revenue 
       FROM invoices i 
       WHERE i.total > 0 
-      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}';
+      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}'
     - "invoices in period":
       SELECT i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type,
              GROUP_CONCAT(CONCAT(id.quantity, ' ', p.product_name, ' (₱', id.total_price, ')')) AS items
@@ -339,34 +347,16 @@ def get_sql_chain():
       INNER JOIN products p ON id.product_id = p.product_id
       WHERE i.total > 0 
       AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') BETWEEN '{date_from}' AND '{date_to}'
-      GROUP BY i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type;
+      GROUP BY i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type
 
     **User Question:** {question}
+
+    Generate a single, executable SQL query without backticks, comments, or markdown formatting:
     """
 
     prompt = ChatPromptTemplate.from_template(template)
-    models = ["llama3-70b-8192"]  # Use single reliable model
-    proposal_llms = [
-        ChatGroq(model=model, temperature=0, api_key=st.secrets["GROQ_API_KEY"])
-        for model in models
-    ]
-    proposal_chain = prompt | proposal_llms[0] | StrOutputParser()
-
-    return (
-        RunnablePassthrough.assign(
-            schema=lambda _: schema,
-            current_sg_date=lambda x: x["current_sg_date"],
-            current_sg_datetime=lambda x: x["current_sg_datetime"],
-            date_from=lambda x: x["date_from"],
-            date_to=lambda x: x["date_to"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
-        )
-        | RunnablePassthrough.assign(
-            proposals=proposal_chain,
-            question=lambda x: x["question"],
-        )
-        | proposal_chain
-    )
+    llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+    return prompt | llm | StrOutputParser()
 
 # Function to generate response
 def get_response(user_query: str, chat_history: list):
@@ -385,40 +375,45 @@ def get_response(user_query: str, chat_history: list):
     
     sql_chain = get_sql_chain()
     raw_query = sql_chain.invoke({
-        "question": user_query,
-        "chat_history": chat_history,
         "current_sg_date": current_sg_date,
         "current_sg_datetime": current_sg_datetime,
         "date_from": date_from,
-        "date_to": date_to
+        "date_to": date_to,
+        "chat_summary": " ".join([msg.content for msg in chat_history[-3:]]),
+        "question": user_query
     })
     
-    query = raw_query.split(";")[0] + ";"
+    query = raw_query.strip()
+    if query.endswith(';'):
+        query = query[:-1]
     query = query.replace("```sql", "").replace("```", "").strip()
     query = "\n".join(
         [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
     )
+    query = query + ";"
     
-    if not validate_query(query):
-        return "Invalid query generated. Please rephrase your question.", None
+    is_valid, reason = validate_query(query)
+    if not is_valid:
+        return f"Invalid query generated: {reason}. Please rephrase your question.", None
     
     fetch_data_from_api.clear()
     data = fetch_data_from_api("execute_query", {"query": query})
     if data is None:
-        return "No data retrieved. Try rephrasing your query.", None
+        return f"No data retrieved for {date_from} to {date_to}. Try rephrasing your query.", None
     
     response_template = """
-    Generate a response based on:
+    Generate a natural language response based on:
     - **Question:** {question}
     - **Results:** {response}
     - **Period:** {date_from} to {date_to}
 
     **Guidelines:**
-    - If empty results, say: "No data found for {date_from} to {date_to}."
-    - Use ₱ for monetary values, 2 decimal places.
+    - If results are empty, state: "No data found for {date_from} to {date_to}."
+    - Use ₱ for monetary values, formatted to 2 decimal places.
     - Use 'units' for quantities.
-    - Highlight insights (e.g., **Top Product**: SCC SHIRT).
-    - Keep under 150 words.
+    - Highlight key insights (e.g., **Top Product**: SCC SHIRT).
+    - Keep response concise, under 150 words.
+    - Provide clear, actionable information based on the data.
     """
     
     chain = (
