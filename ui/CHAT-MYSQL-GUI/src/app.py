@@ -112,7 +112,7 @@ query_mappings = {
     ORDER BY total_sold DESC 
     LIMIT 5
     """,
-    "product with highest sales this week": """ 
+    "product with highest sales this week": """
     SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
     FROM invoice_details id 
     INNER JOIN products p ON id.product_id = p.product_id 
@@ -540,7 +540,8 @@ def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> 
 def validate_query(query):
     allowed_keywords = ["SELECT", "FROM", "WHERE", "INNER JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
     valid_tables = ["invoices", "invoice_details", "products", "categories", "employees", "user_logins", "inventory_logs"]
-    query_upper = query.upper()
+    query_lower = query.lower()
+    query_upper = query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
     if "INNER JOIN" in query_upper and "ON" not in query_upper:
@@ -617,31 +618,48 @@ def get_sql_chain():
         for model in models
     ]
 
-    proposal_chain = RunnableParallel(
-        **{
-            f"proposal_{i}": (
-                RunnablePassthrough.assign(
-                    schema=lambda _: schema,
-                    current_sg_date=lambda x: x["current_sg_date"],
-                    current_sg_datetime=lambda x: x["current_sg_datetime"],
-                    chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
-                )
-                | ChatPromptTemplate.from_template(proposal_template)
-                | llm
-                | StrOutputParser()
+    proposal_prompt = ChatPromptTemplate.from_template(proposal_template)
+
+    # Define individual proposal chains
+    proposal_chains = [
+        (
+            RunnablePassthrough.assign(
+                schema=lambda _: schema,
+                current_sg_date=lambda x: x["current_sg_date"],
+                current_sg_datetime=lambda x: x["current_sg_datetime"],
+                chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
             )
-            for i, llm in enumerate(proposal_llms)
-        }
-    )
+            | proposal_prompt
+            | llm
+            | StrOutputParser()
+        )
+        for llm in proposal_llms
+    ]
+
+    try:
+        # Preferred: Parallel execution
+        proposal_chain = RunnableParallel(
+            proposal_0=proposal_chains[0],
+            proposal_1=proposal_chains[1],
+            proposal_2=proposal_chains[2]
+        )
+    except NameError:
+        # Fallback: Sequential execution
+        def sequential_proposals(input_dict):
+            results = {}
+            for i, chain in enumerate(proposal_chains):
+                results[f"proposal_{i}"] = chain.invoke(input_dict)
+            return results
+        proposal_chain = sequential_proposals
 
     aggregation_chain = (
         RunnablePassthrough.assign(
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            proposal_1=proposal_chain["proposal_0"],
-            proposal_2=proposal_chain["proposal_1"],
-            proposal_3=proposal_chain["proposal_2"]
+            proposal_1=proposal_chains[0],
+            proposal_2=proposal_chains[1],
+            proposal_3=proposal_chains[2]
         )
         | ChatPromptTemplate.from_template(aggregation_template)
         | ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
@@ -746,7 +764,7 @@ def handle_query(query: str):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
-                with st.spinner("Generating chart..."):
+               约定with st.spinner("Generating chart..."):
                     st.markdown(f"### {chart_type.capitalize()} Chart")
                     fig, ax = plt.subplots()
                     if chart_type == 'bar':
