@@ -260,10 +260,10 @@ def get_sql_chain():
     **User Question:** {question}
 
     **Example Output:**
-    {
+    {{
       "query": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM products p JOIN invoice_details id ON p.product_id = id.product_id GROUP BY p.product_name ORDER BY total_sold DESC LIMIT 5;",
       "time_period": "all time"
-    }
+    }}
     """
 
     prompt = ChatPromptTemplate.from_template(template)
@@ -294,10 +294,10 @@ def get_sql_chain():
     **Schema:** {schema}
 
     Return a JSON object and nothing else:
-    {
+    {{
       "query": "SELECT ...;",
       "time_period": "e.g., today (2025-04-13) or all time"
-    }
+    }}
 
     Ensure:
     1. Query starts with SELECT and uses explicit JOINs.
@@ -308,10 +308,10 @@ def get_sql_chain():
     6. Handle 'profit margin' as ((sale_price - purchase_price) / sale_price) * 100.
 
     **Example Output:**
-    {
+    {{
       "query": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM products p JOIN invoice_details id ON p.product_id = id.product_id GROUP BY p.product_name ORDER BY total_sold DESC LIMIT 5;",
       "time_period": "all time"
-    }
+    }}
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -359,12 +359,19 @@ def get_response(user_query: str, chat_history: list):
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
         sql_chain = get_sql_chain()
-        raw_response = sql_chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
-        })
+        try:
+            # Debug input to sql_chain
+            input_dict = {
+                "question": user_query,
+                "chat_history": chat_history,
+                "current_sg_date": current_sg_date,
+                "current_sg_datetime": current_sg_datetime
+            }
+            st.write(f"Debug: SQL chain input: {input_dict}")
+            raw_response = sql_chain.invoke(input_dict)
+        except Exception as e:
+            st.write(f"Debug: SQL chain error: {str(e)}")
+            return f"Failed to generate query due to: {str(e)}", None
 
         # Parse JSON response with regex to handle extra text
         try:
