@@ -399,6 +399,8 @@ def get_response(user_query: str, chat_history: list):
         - Use markdown: **bold** for emphasis, - for lists.
         - Keep concise (<200 words).
         - No customer names, only cashier names.
+        - Give accurate and correct response from the database data.
+        - Include the time stamp period (e.g, we get this data from: (Period: 2025-02-14 00:00:00 - 2025-04-14 08:39:04))
         """
 
         chain = (
