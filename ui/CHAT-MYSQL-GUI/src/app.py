@@ -12,7 +12,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
-import re
 
 # Set page configuration (must be the first Streamlit command)
 st.set_page_config(
@@ -70,7 +69,7 @@ def authenticate(email, password):
 
 # Function to handle user queries
 def handle_query(query: str):
-    """Process a user's query, update chat history, and display response with time period."""
+    """Process a user's query, update chat history, and display response."""
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
@@ -91,9 +90,9 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "profit_margin"]):
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)" if "margin" not in col.lower() else f"{col} (%)"}, inplace=True)
+                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
@@ -104,12 +103,12 @@ def handle_query(query: str):
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} by {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)').replace(' (%)', ' (%)'))
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'line':
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)').replace(' (%)', ' (%)'))
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
@@ -178,41 +177,15 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
 # Function to validate SQL queries
 def validate_query(query):
     """Validate that the SQL query is safe and executable."""
-    query_upper = query.upper().strip()
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT"]
+    query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
-    if "FROM" not in query_upper:
-        return False
-    return True
-
-# Function to validate calculations
-def validate_calculations(data, query):
-    """Validate numerical calculations in the API response."""
-    if not data or not isinstance(data, list):
-        return True  # No data to validate
-
-    df = pd.DataFrame(data)
-    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns
-
-    query_lower = query.lower()
-    for col in numerical_columns:
-        # Check for negative values in monetary fields
-        if any(term in col.lower() for term in ["subtotal", "total", "price", "paid", "profit"]) and (df[col] < 0).any():
-            st.warning(f"Warning: Negative values found in {col}, which may indicate an error.")
-            return False
-
-        # Verify sums/averages for specific queries
-        if any(term in query_lower for term in ["total", "revenue", "profit"]) and any(term in col.lower() for term in ["total", "sum", "profit"]):
-            total = df[col].sum()
-            if total == 0 and len(df) > 0:
-                st.warning(f"Warning: Sum of {col} is zero, which may be unexpected.")
-                return False
-
-    return True
+    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
 
 # Function to define SQL chain for query generation
 def get_sql_chain():
-    """Create a chain to generate SQL queries with precise calculations and time period clarity."""
+    """Create a chain to generate SQL queries based on user input."""
     schema = """
     Database Schema:
     - categories: category_id (PK), category_name, created_at
@@ -222,17 +195,11 @@ def get_sql_chain():
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
     - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
-
-    Notes:
-    - 'Profit' is calculated as (p.sale_price - p.purchase_price) * id.quantity for each product in invoice_details.
-    - 'Profit margin' is ((p.sale_price - p.purchase_price) / p.sale_price) * 100 as a percentage.
-    - 'Base cost' refers to p.purchase_price * id.quantity.
-    - 'Revenue' is the sum of i.total from invoices or id.total_price from invoice_details.
     """
 
     template = """
-    You are an AI assistant generating SQL queries for the SCC School Store Database.
-    Based on the schema, create an accurate SQL query to answer the user's question, focusing on precise calculations and clear time periods.
+    You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
+    Based on the provided table schema, generate an accurate SQL query to answer the user's question.
 
     **Database Schema:**
     {schema}
@@ -243,33 +210,23 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use 'today' as '{current_sg_date}' for queries mentioning 'today' (e.g., WHERE order_date = '{current_sg_date}').
-    - For 'this month', use dates from '{current_sg_date}' with day '01' to '{current_sg_date}'.
-    - For 'this week', use dates from the Monday before '{current_sg_date}' to '{current_sg_date}'.
-    - If no time period is specified (e.g., 'best selling products'), assume all time (no date filter).
-    - For calculations (e.g., SUM, AVG), use COALESCE(value, 0) and ROUND(value, 2) for monetary values.
-    - Use explicit JOINs with table aliases (e.g., invoices i JOIN invoice_details id ON i.invoice_id = id.invoice_id).
-    - Return a JSON object with:
-      - 'query': The SQL query (ending with semicolon).
-      - 'time_period': A description (e.g., 'today (2025-04-13)', 'all time', 'this month (2025-04-01 to 2025-04-13)').
-    - Avoid non-existent tables/columns.
-    - Ensure queries are safe (SELECT only).
-    - For 'profit', calculate (p.sale_price - p.purchase_price) * id.quantity.
-    - For 'profit margin', calculate ((p.sale_price - p.purchase_price) / p.sale_price) * 100.
+    - When the user mentions "today," use the current date in Singapore, e.g., WHERE order_date = '{current_sg_date}'.
+    - Use appropriate joins when data from multiple tables is needed.
+    - Consider foreign key relationships between tables.
+    - Use aggregate functions if the question implies summarization.
+    - Filter data based on conditions mentioned in the question.
+    - Order results if the question suggests a specific order.
+    - Assume the most common interpretation if the question is ambiguous.
+    - Avoid referencing non-existent tables or columns.
+    - Provide only the SQL query as output, without explanations.
 
     **User Question:** {question}
-
-    **Example Output:**
-    {{
-      "query": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM products p JOIN invoice_details id ON p.product_id = id.product_id GROUP BY p.product_name ORDER BY total_sold DESC LIMIT 5;",
-      "time_period": "all time"
-    }}
     """
 
     prompt = ChatPromptTemplate.from_template(template)
     models = [
         "llama3-8b-8192",
-        "llama-3.3-70b-versatile",
+        "llama-3.3-70b-versatile",  # Updated model replacing mixtral-8x7b-32768
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
@@ -287,31 +244,18 @@ def get_sql_chain():
     )
 
     aggregator_template = """
-    Synthesize the best SQL query and time period from these proposals:
+    Synthesize the best SQL query from these proposals:
     {proposals}
 
     **Original Question:** {question}
     **Schema:** {schema}
 
-    Return a JSON object and nothing else:
-    {{
-      "query": "SELECT ...;",
-      "time_period": "e.g., today (2025-04-13) or all time"
-    }}
-
-    Ensure:
-    1. Query starts with SELECT and uses explicit JOINs.
-    2. Calculations use ROUND(value, 2) and COALESCE(value, 0).
-    3. Time period matches the question or defaults to 'all time'.
-    4. No comments, markdown, or extra text in the query.
-    5. Handle 'profit' as (sale_price - purchase_price) * quantity.
-    6. Handle 'profit margin' as ((sale_price - purchase_price) / sale_price) * 100.
-
-    **Example Output:**
-    {{
-      "query": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM products p JOIN invoice_details id ON p.product_id = id.product_id GROUP BY p.product_name ORDER BY total_sold DESC LIMIT 5;",
-      "time_period": "all time"
-    }}
+    Return ONLY the final SQL query without any explanations or formatting.
+    The query must:
+    1. Start with SELECT
+    2. Use explicit JOIN syntax
+    3. Include proper table aliases
+    4. Contain no comments or markdown
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -321,7 +265,7 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])  # Last 3 messages
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -335,7 +279,7 @@ def get_sql_chain():
 
 # Function to generate AI response
 def get_response(user_query: str, chat_history: list):
-    """Generate a response with time period and validated calculations."""
+    """Generate a natural language response and fetch data based on the user's query."""
     time_keywords = [
         "current time", "what time is it", "date and time",
         "today's date", "now", "time today", "date today"
@@ -344,13 +288,13 @@ def get_response(user_query: str, chat_history: list):
         "sales", "invoice", "details", "product", "category", "stock", "revenue",
         "order", "employee", "payment", "quantity", "price", "total", "subtotal",
         "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve", "profit", "cost", "margin"
+        "provide", "get", "fetch", "retrieve"
     ]
 
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"The current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
@@ -359,76 +303,44 @@ def get_response(user_query: str, chat_history: list):
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
         sql_chain = get_sql_chain()
-        try:
-            # Debug input to sql_chain
-            input_dict = {
-                "question": user_query,
-                "chat_history": chat_history,
-                "current_sg_date": current_sg_date,
-                "current_sg_datetime": current_sg_datetime
-            }
-            st.write(f"Debug: SQL chain input: {input_dict}")
-            raw_response = sql_chain.invoke(input_dict)
-        except Exception as e:
-            st.write(f"Debug: SQL chain error: {str(e)}")
-            return f"Failed to generate query due to: {str(e)}", None
+        raw_query = sql_chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+            "current_sg_date": current_sg_date,
+            "current_sg_datetime": current_sg_datetime
+        })
 
-        # Parse JSON response with regex to handle extra text
-        try:
-            json_match = re.search(r'\{.*?\}', raw_response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-                response_dict = json.loads(json_str)
-                query = response_dict.get("query", "").split(";")[0] + ";"
-                time_period = response_dict.get("time_period", "unspecified period")
-            else:
-                raise json.JSONDecodeError("No JSON object found", raw_response, 0)
-        except json.JSONDecodeError:
-            st.write(f"Debug: Raw aggregator response: {raw_response}")
-            query = raw_response.split(";")[0] + ";" if ";" in raw_response else raw_response
-            time_period = "unspecified period"
-
-        # Clean query
+        query = raw_query.split(";")[0] + ";"
         query = query.replace("```sql", "").replace("```", "").strip()
         query = "\n".join(
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
 
-        # Debug output
-        st.write(f"Debug: Generated SQL query: {query}")
-
         if not validate_query(query):
-            st.write("Debug: Query validation failed.")
             return "Failed to generate a valid database query. Please try again.", None
 
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
-            return f"Couldn't retrieve data for {time_period}. Please try again or rephrase your question.", None
-
-        # Validate calculations
-        if not validate_calculations(data, user_query):
-            return f"Calculation error detected in the data for {time_period}. Please verify your query.", None
+            return "Couldn't retrieve data. Please try again or rephrase your question.", None 
+        
 
         response_template = """
         Generate a natural language response based on:
         - **Question:** {question}
         - **Results:** {response}
-        - **Time Period:** {time_period}
         - **History:** {chat_history}
 
         **Guidelines:**
-        1. Start with: "For {time_period}, ..."
-        2. If results are empty, say: "No data found for {time_period}. Try a broader time frame or different product."
-        3. Highlight key insights (e.g., highest/lowest values, trends).
-        4. Use markdown: **bold** for emphasis, - for lists.
-        5. Include peso sign (₱) for monetary values, percentage (%) for margins.
-        6. Keep concise, under 200 words.
+        1. If results are empty, suggest: "No data found. This could be due to no records for the specified period or item. Try a broader time frame or different product."
+        2. Highlight key insights (e.g., highest/lowest values, trends).
+        3. Use markdown: **bold** for emphasis, - for lists.
+        4. Include peso sign (₱) for monetary values.
+        5. Keep concise, under 200 words.
         """
 
         chain = (
             RunnablePassthrough.assign(
-                response=lambda _: json.dumps(data, indent=2),
-                time_period=lambda _: time_period
+                response=lambda _: json.dumps(data, indent=2)
             )
             | ChatPromptTemplate.from_template(response_template)
             | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
@@ -438,7 +350,6 @@ def get_response(user_query: str, chat_history: list):
         natural_response = chain.invoke({
             "question": user_query,
             "chat_history": chat_history,
-            "time_period": time_period
         })
 
         return natural_response, data
@@ -460,7 +371,7 @@ def determine_chart_type(query, df):
         return "line", (date_columns[0], numerical_columns[0])
     elif categorical_columns and numerical_columns:
         unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and any(term in query_lower for term in ["percentage", "margin", "distribution"]):
+        if unique_categories <= 6 and "percentage" in query_lower:
             return "pie", (categorical_columns[0], numerical_columns[0])
         else:
             return "bar", (categorical_columns[0], numerical_columns[0])
