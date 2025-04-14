@@ -219,6 +219,8 @@ def get_sql_chain():
     - Assume the most common interpretation if the question is ambiguous.
     - Avoid referencing non-existent tables or columns.
     - Provide only the SQL query as output, without explanations.
+    - When the user doesn't mention a date period, it means you should start from the very first record in the database.
+    - give correct and accurate calculations.
 
     **User Question:** {question}
     """
@@ -334,7 +336,7 @@ def get_response(user_query: str, chat_history: list):
         1. If results are empty, suggest: "No data found. This could be due to no records for the specified period or item. Try a broader time frame or different product."
         2. Highlight key insights (e.g., highest/lowest values, trends).
         3. Use markdown: **bold** for emphasis, - for lists.
-        4. Include peso sign (₱) for monetary values.
+        4. Include the peso sign (₱) and the word "peso" only for monetary values.
         5. Keep concise, under 200 words.
         """
 
