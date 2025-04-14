@@ -182,8 +182,7 @@ query_mappings = {
     WHERE i.total > 0 
     AND i.order_date = CURDATE()
     """,
-    "average daily revenue thisага
-    month": """
+    "average daily revenue this month": """
     SELECT AVG(daily_total) AS avg_daily_revenue 
     FROM (
         SELECT i.order_date, SUM(i.total) AS daily_total 
@@ -192,7 +191,13 @@ query_mappings = {
         AND YEAR(i.order_date) = YEAR(CURDATE()) 
         AND MONTH(i.order_date) = MONTH(CURDATE()) 
         GROUP BY i.order_date
-    ) AS daily
+    ) AS daily;
+    """,
+    "total revenue for today": """
+    SELECT SUM(i.total) AS total_revenue 
+    FROM invoices i 
+    WHERE i.total > 0 
+    AND i.order_date = CURDATE();
     """,
     "revenue breakdown by product category": """
     SELECT c.category_name, SUM(id.total_price) AS total_revenue 
