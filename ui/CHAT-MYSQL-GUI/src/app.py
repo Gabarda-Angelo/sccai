@@ -1,50 +1,126 @@
 import streamlit as st
-import pandas as pd
+import streamlit.components.v1 as components
+import requests
 import json
+import pandas as pd
+import matplotlib.pyplot as plt
+from urllib.parse import quote
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.output_parsers import StrOutputParser
+from langchain_groq import ChatGroq
 import datetime
 import pytz
-import requests
-from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
-import plotly.express as px
 
-# Initialize session state for chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Set page configuration (must be the first Streamlit command)
+st.set_page_config(
+    page_title="AcaSquad AI",
+    page_icon=":speech_balloon:",
+    layout="wide"
+)
 
-# Streamlit app layout
-st.title("SCC School Store Analytics")
-st.write("Ask about sales, inventory, or other store metrics, and I'll provide insights with charts where relevant.")
+# Function to show pop-up messages using a JavaScript alert
+def show_popup(message):
+    components.html(
+        f"""
+        <script>
+            alert("{message}");
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
-# Sidebar for settings
-with st.sidebar:
-    st.header("Settings")
-    st.write("Adjust the API key or clear chat history.")
-    groq_api_key = st.text_input("GROQ API Key", type="password", value=st.secrets.get("GROQ_API_KEY", ""))
-    if st.button("Clear Chat History"):
-        st.session_state.messages = []
-        st.rerun()
+# Initialize session state for authentication and chat history
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.user = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+    ]
+if "last_query" not in st.session_state:
+    st.session_state.last_query = None
 
-# Function to validate SQL query
-def validate_query(query: str) -> bool:
-    """Validate if the query is a SELECT statement and safe to execute."""
-    query = query.strip().upper()
-    return query.startswith("SELECT") and not any(keyword in query for keyword in ["DELETE", "UPDATE", "INSERT", "DROP"])
-
-# Function to fetch data from API
-def fetch_data_from_api(endpoint: str, payload: dict):
-    """Fetch data from the API endpoint."""
+# Function to authenticate user via API
+def authenticate(email, password):
+    """Authenticate a user by sending credentials to the API."""
     try:
-        response = requests.post(f"https://your-api-endpoint/{endpoint}", json=payload, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        response = requests.post(
+            st.secrets["API_URL"],
+            params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
+            json={"email": email, "password": password}
+        )
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            data = {}
+
+        if response.status_code == 200:
+            if data.get("status") == "success" and "data" in data:
+                st.session_state.authenticated = True
+                st.session_state.user = data["data"]
+                st.success("Login Successful!")
+                return True
+            else:
+                error_message = data.get("error", "Invalid credentials")
+                st.error(f"Login failed: {error_message}")
+        else:
+            error_message = data.get("error", "Unknown error")
+            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
+    except Exception as e:
+        st.error(f"Authentication error: {str(e)}")
+    return False
+
+# Function to fetch data from API with caching
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_data_from_api(action: str, params: dict = None) -> dict:
+    """Fetch data from the API based on the specified action and parameters."""
+    try:
+        payload = {"action": action, "key": st.secrets["API_KEY"]}
+        if params:
+            if "query" in params:
+                st.session_state.last_query = params["query"]
+                params["query"] = quote(params["query"])
+            payload.update(params)
+
+        response = requests.get(
+            st.secrets["API_URL"],
+            params=payload,
+            timeout=15
+        )
+
+        if not response.text.strip():
+            st.error("Received empty response from API")
+            return None
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            st.error(f"Invalid JSON response: {response.text[:200]}...")
+            return None
+
+        if data.get("status") == "success":
+            return data["data"]
+        else:
+            error_msg = data.get("error", "Unknown error")
+            st.error(f"API Error: {error_msg}")
+            return None
     except requests.RequestException as e:
-        st.error(f"API error: {str(e)}")
+        st.error(f"Connection error: {str(e)}")
         return None
 
-# Function to generate SQL chain
+# Function to validate SQL queries
+def validate_query(query):
+    """Validate that the SQL query is safe and executable."""
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT"]
+    query_upper = query.upper()
+    if not query_upper.startswith("SELECT"):
+        return False
+    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+
+# Function to define SQL chain for query generation
 def get_sql_chain():
     """Create a chain to generate SQL queries based on user input."""
     schema = """
@@ -96,6 +172,7 @@ def get_sql_chain():
       - Units sold: SUM(invoice_details.quantity)
       - Profit: SUM(invoice_details.total_price - (invoice_details.quantity * products.purchase_price))
     - Handle edge cases (e.g., no sales, zero stock) by returning meaningful results.
+    - For time-based filters, use CONCAT(i.order_date, ' ', i.order_time) when comparing datetimes.
 
     **User Question:** {question}
     """
@@ -157,7 +234,7 @@ def get_sql_chain():
         | StrOutputParser()
     )
 
-# Function to generate natural language response
+# Function to generate AI response
 def get_response(user_query: str, chat_history: list):
     """Generate a natural language response and fetch data based on the user's query."""
     time_keywords = [
@@ -174,7 +251,7 @@ def get_response(user_query: str, chat_history: list):
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"The current date and time in Singapore is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
         return natural_response, None
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
@@ -244,7 +321,7 @@ def get_response(user_query: str, chat_history: list):
 
         return natural_response, data
 
-# Function to determine chart type
+# Function to determine chart type for data visualization
 def determine_chart_type(query, df):
     """Determine the appropriate chart type based on query and data."""
     if df.empty or len(df.columns) < 2:
@@ -257,7 +334,7 @@ def determine_chart_type(query, df):
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
 
-    # Prioritize quantity or total_price for sales-related queries
+    # Prioritize quantity or monetary columns for sales-related queries
     if "quantity" in query_lower or "sold" in query_lower:
         numerical_cols = [col for col in numerical_columns if "quantity" in col.lower()]
     elif any(kw in query_lower for kw in ["revenue", "total", "price", "profit", "cost", "margin"]):
@@ -275,45 +352,219 @@ def determine_chart_type(query, df):
             return "bar", (categorical_columns[0], numerical_cols[0])
     return None, None
 
-# Main app logic
-def main():
-    """Main function to handle user queries and display results."""
-    user_query = st.text_input("Enter your question:", placeholder="E.g., How many units of SCC Shirt were sold today?")
-    
-    if user_query:
-        with st.spinner("Processing your query..."):
-            natural_response, data = get_response(user_query, st.session_state.messages)
-            
-            # Display natural language response
-            st.markdown("### Response")
-            st.markdown(natural_response)
-            
-            # Display data table if available
-            if data:
-                df = pd.DataFrame(data)
-                st.markdown("### Data")
-                st.dataframe(df)
-                
-                # Generate and display chart
-                chart_type, axes = determine_chart_type(user_query, df)
-                if chart_type:
-                    st.markdown("### Visualization")
-                    if chart_type == "bar":
-                        st.bar_chart(df.set_index(axes[0])[axes[1]])
-                    elif chart_type == "line":
-                        st.line_chart(df.set_index(axes[0])[axes[1]])
-                    elif chart_type == "pie":
-                        st.plotly_chart(px.pie(df, names=axes[0], values=axes[1]))
-            
-            # Update chat history
-            st.session_state.messages.append({"role": "user", "content": user_query})
-            st.session_state.messages.append({"role": "assistant", "content": natural_response})
+# Function to handle user queries
+def handle_query(query: str):
+    """Process a user's query, update chat history, and display response."""
+    st.session_state.chat_history.append(HumanMessage(content=query))
+    with st.chat_message("Human", avatar="dist/img/Human.png"):
+        st.markdown(query)
 
-    # Display chat history
-    st.markdown("### Chat History")
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+    with st.spinner("Analyzing your query..."):
+        try:
+            natural_response, data = get_response(query, st.session_state.chat_history)
+        except Exception as e:
+            natural_response = f"An error occurred: {str(e)}"
+            data = None
+
+    st.session_state.chat_history.append(AIMessage(content=natural_response))
+    with st.chat_message("AI", avatar="dist/img/ai.png"):
+        st.markdown(natural_response)
+        if data and isinstance(data, list) and len(data) >= 1:
+            df = pd.DataFrame(data)
+            # Preprocess data for charts
+            for col in df.columns:
+                if "date" in col.lower():
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due"]):
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+            
+            chart_type, columns = determine_chart_type(query, df)
+            if chart_type:
+                with st.spinner("Generating chart..."):
+                    st.markdown(f"### {chart_type.capitalize()} Chart")
+                    fig, ax = plt.subplots()
+                    if chart_type == 'bar':
+                        df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                        ax.set_title(f"{columns[1]} by {columns[0]}")
+                        ax.set_xlabel(columns[0])
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                    elif chart_type == 'line':
+                        df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                        ax.set_title(f"{columns[1]} Over Time")
+                        ax.set_xlabel("Date")
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                    elif chart_type == 'pie':
+                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                        ax.set_title(f"Distribution of {columns[1]}")
+                    st.pyplot(fig)
+                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+            if len(df) > 1 or len(df.columns) > 1:
+                st.table(df)
+
+# Function to display chat history
+def display_chat_history():
+    """Render the chat history in the UI."""
+    for message in st.session_state.chat_history:
+        if isinstance(message, AIMessage):
+            with st.chat_message("AI", avatar="dist/img/ai.png"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("Human", avatar="dist/img/Human.png"):
+                st.markdown(message.content)
+
+# Function to clear chat history
+def clear_chat():
+    """Reset the chat history to start a new conversation."""
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+    ]
+    st.success("Chat history cleared. Starting a new conversation!")
+
+# Main application logic
+def main():
+    """Main function to run the AcaSquad AI application."""
+    if not st.session_state.authenticated:
+        col1, col2, col3 = st.columns([1, 3, 1])
+        with col2:
+            st.title("Login to AcaSquad AI")
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Login")
+                if submit:
+                    if authenticate(email, password):
+                        st.session_state.authenticated = True
+                        st.rerun()
+    else:
+        if st.session_state.user["role"] in ["Owner", "Admin"]:
+            st.title("Chat with our AcaSquad AI")
+
+            # Sidebar setup
+            with st.sidebar:
+                st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
+                st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
+                if st.button("Logout"):
+                    st.session_state.authenticated = False
+                    st.session_state.user = None
+                    st.rerun()
+                
+                # Add Clear Chat button
+                if st.button("Clear Chat"):
+                    clear_chat()
+                    st.rerun()
+
+                # Quick Queries Expanders
+                with st.expander("📈 Sales Performance", expanded=True):
+                    sales_queries = [
+                        "What are the best-selling products of all time?",
+                        "What are the top 5 best-selling products this month?",
+                        "Which product has the highest sales this week?",
+                        "What are the best-selling products in each category?",
+                        "Show me the sales trend over the past year.",
+                        "What is the daily sales trend for this month?",
+                        "Which day of the week has the highest sales?",
+                        "What is the total revenue this year?",
+                        "What is the total revenue for today?",
+                        "What is the average daily revenue this month?",
+                        "What is the revenue breakdown by product category?"
+                    ]
+                    for q in sales_queries:
+                        if st.button(q, key=f"sales_{q}"):
+                            handle_query(q)
+
+                with st.expander("📦 Inventory Management"):
+                    inventory_queries = [
+                        "Which products are out of stock?",
+                        "Which products are below the reorder level?",
+                        "What is the current stock level for [specific product]?",
+                        "What is the total value of current inventory?",
+                        "What is the value of inventory by category?",
+                        "How many products do we have in total?",
+                        "What are the product categories we have?",
+                        "List all products added in the last 30 days."
+                    ]
+                    for q in inventory_queries:
+                        if st.button(q, key=f"inv_{q}"):
+                            handle_query(q)
+
+                with st.expander("👥 Employee Performance"):
+                    employee_queries = [
+                        "Who is the top-performing employee this month?",
+                        "What are the total sales by each employee this week?",
+                        "Which employee has the highest number of transactions today?",
+                        "Who is currently logged in?",
+                        "What are the login and logout times for [specific employee] today?",
+                        "How many times has each employee logged in this month?"
+                    ]
+                    for q in employee_queries:
+                        if st.button(q, key=f"emp_{q}"):
+                            handle_query(q)
+
+                with st.expander("💰 Financial Insights"):
+                    financial_queries = [
+                        "Give me the sales invoices details for today.",
+                        "List all invoices from last week.",
+                        "What is the total amount due from unpaid invoices?",
+                        "What is the average transaction value this month?",
+                        "What is the most common payment method used?",
+                        "What percentage of transactions are paid by cash?",
+                        "How many transactions were made by card this week?",
+                        "What is the total discount given this month?",
+                        "Which products have the highest discounts applied?"
+                    ]
+                    for q in financial_queries:
+                        if st.button(q, key=f"fin_{q}"):
+                            handle_query(q)
+
+                with st.expander("🏪 Store Operations"):
+                    ops_queries = [
+                        "What is the busiest hour of the day for sales?",
+                        "Which day of the week has the highest foot traffic?",
+                        "What is the average number of transactions per day?",
+                        "What is the average time between login and first transaction for employees?",
+                        "How many transactions were completed in the last hour?",
+                        "Show me the inventory changes for [specific product] this week.",
+                        "What are the most recent inventory adjustments?"
+                    ]
+                    for q in ops_queries:
+                        if st.button(q, key=f"ops_{q}"):
+                            handle_query(q)
+
+                with st.expander("🔍 Miscellaneous Insights"):
+                    misc_queries = [
+                        "What is the profit margin for [specific product]?",
+                        "How many units of [specific product] were sold this month?",
+                        "What is the sales history for [specific product]?",
+                        "Which product category has the highest sales this year?",
+                        "What is the average price of products in each category?",
+                        "Which products should we reorder soon?",
+                        "How many products are within 10% of their reorder level?"
+                    ]
+                    for q in misc_queries:
+                        if st.button(q, key=f"misc_{q}"):
+                            handle_query(q)
+
+            # Main area setup
+            display_chat_history()
+            user_query = st.chat_input("Type a message...")
+            if user_query:
+                handle_query(user_query)
+        else:
+            st.error("Sorry, you can't access this. Please contact the Admin.")
+            if st.button("Logout"):
+                st.session_state.authenticated = False
+                st.session_state.user = None
+                st.rerun()
 
 if __name__ == "__main__":
     main()
+
+# Hide Streamlit default UI elements
+hide_streamlit_style = """
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+</style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
