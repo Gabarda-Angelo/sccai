@@ -482,7 +482,7 @@ query_mappings = {
 
 # Format natural response
 def format_natural_response(query, data):
-    if not data:
+    if not data or not isinstance(data, list) or not data[0]:
         return "No data found for this query. This could be due to no records matching the criteria (Period: 2025-04-13)."
     
     query_lower = query.lower()
@@ -493,17 +493,23 @@ def format_natural_response(query, data):
         products = ", ".join(set(row.get("product_name", "") for row in data if "product_name" in row)) or "various products"
         return f"Today's sales: **{units} units** across **{invoices} invoices**, totaling **₱{revenue:,.2f}**. Products sold include: {products} (Period: 2025-04-13)."
     elif "total revenue, profit, base cost and profit margin" in query_lower:
-        if data:
-            stats = data[0]
-            period = "2025-02-01 to 2025-04-13" if "february 2025" in query_lower else "all time"
-            return (f"Store performance: "
-                    f"- **Total Revenue**: ₱{stats['total_revenue']:,.2f} "
-                    f"- **Base Cost**: ₱{stats['base_cost']:,.2f} "
-                    f"- **Profit**: ₱{stats['profit']:,.2f} "
-                    f"- **Profit Margin**: {stats['profit_margin']}% "
-                    f"(Period: {period}).")
+        stats = data[0]
+        # Safely handle missing or null values
+        total_revenue = float(stats.get('total_revenue', 0) or 0)
+        base_cost = float(stats.get('base_cost', 0) or 0)
+        profit = float(stats.get('profit', 0) or 0)
+        profit_margin = float(stats.get('profit_margin', 0) or 0)
+        period = "2025-02-01 to 2025-04-13" if "february 2025" in query_lower else "all time"
+        if total_revenue == 0:
+            return "No sales recorded for this period (Period: {}).".format(period)
+        return (f"Store performance: "
+                f"- **Total Revenue**: ₱{total_revenue:,.2f} "
+                f"- **Base Cost**: ₱{base_cost:,.2f} "
+                f"- **Profit**: ₱{profit:,.2f} "
+                f"- **Profit Margin**: {profit_margin:.2f}% "
+                f"(Period: {period}).")
     elif "total revenue" in query_lower:
-        revenue = data[0].get("total_revenue", 0) if data else 0
+        revenue = float(data[0].get("total_revenue", 0) or 0)
         period = "2025-04-13" if "today" in query_lower else "2025"
         return f"Total revenue: **₱{revenue:,.2f}** (Period: {period})."
     elif "best-selling products" in query_lower:
@@ -519,10 +525,14 @@ def format_natural_response(query, data):
     elif "overview statistics" in query_lower:
         if data:
             stats = data[0]
+            total_revenue = float(stats.get('total_revenue', 0) or 0)
+            profit = float(stats.get('profit', 0) or 0)
+            if total_revenue == 0:
+                return "No sales recorded for this period (Period: 2025-02-14 to 2025-04-13)."
             return (f"**Overview**: Avg sales value: **₱{stats['avg_sales_value']:,.2f}**, "
                     f"Total invoices: **{stats['total_invoices']}**, "
-                    f"Revenue: **₱{stats['total_revenue']:,.2f}**, "
-                    f"Profit: **₱{stats['profit']:,.2f}** (Period: 2025-02-14 to 2025-04-13).")
+                    f"Revenue: **₱{total_revenue:,.2f}**, "
+                    f"Profit: **₱{profit:,.2f}** (Period: 2025-02-14 to 2025-04-13).")
     elif "profit margin" in query_lower:
         if data:
             product = data[0]["product_name"]
@@ -555,6 +565,8 @@ def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> 
 
         try:
             data = response.json()
+            # Log response for debugging
+            st.session_state.last_api_response = data
         except json.JSONDecodeError:
             st.error(f"Invalid JSON response: {response.text[:200]}...")
             return None
