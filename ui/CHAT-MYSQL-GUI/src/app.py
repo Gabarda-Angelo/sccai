@@ -7,11 +7,12 @@ import matplotlib.pyplot as plt
 from urllib.parse import quote
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import re
 
 # Set page configuration (must be the first Streamlit command)
 st.set_page_config(
@@ -32,10 +33,12 @@ def show_popup(message):
         width=0,
     )
 
-# Initialize session state for authentication
+# Initialize session state for authentication and caching
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user = None
+if "query_cache" not in st.session_state:
+    st.session_state.query_cache = {}  # NEW: Cache for unmapped queries
 
 # Function to authenticate user via API
 def authenticate(email, password):
@@ -62,12 +65,12 @@ def authenticate(email, password):
                 st.error(f"Login failed: {error_message}")
         else:
             error_message = data.get("error", "Unknown error")
-                st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
+            st.error(f"Login failed: {error_message} (Server error: {response.status_code})")
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
     return False
 
-# NEW: Query mappings dictionary to bypass LangChain for common queries
+# Expanded query mappings to reduce API calls
 query_mappings = {
     "overview statistics": """
     SELECT 
@@ -88,6 +91,17 @@ query_mappings = {
     AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s')
         BETWEEN '2025-02-14 00:00:00' AND '2025-04-13 13:41:26'
     """,
+    "total revenue, profit, base cost and profit margin": """
+    SELECT 
+        ROUND(SUM(i.total), 2) AS total_revenue,
+        ROUND(SUM(id.quantity * p.purchase_price), 2) AS base_cost,
+        ROUND((SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)), 2) AS profit,
+        ROUND(((SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)) / SUM(i.total)) * 100, 2) AS profit_margin
+    FROM invoices i
+    INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
+    INNER JOIN products p ON id.product_id = p.product_id
+    WHERE i.total > 0
+    """,
     "best-selling products of all time": """
     SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
     FROM invoice_details id 
@@ -96,6 +110,7 @@ query_mappings = {
     WHERE i.total > 0 
     GROUP BY p.product_id, p.product_name 
     ORDER BY total_sold DESC
+    LIMIT 5
     """,
     "top 5 best-selling products this month": """
     SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
@@ -470,11 +485,11 @@ query_mappings = {
     """
 }
 
-# NEW: Local response formatter to avoid Groq API calls
+# Local response formatter to avoid Groq API calls
 def format_natural_response(query, data):
     """Generate natural language response locally to save tokens."""
-    if not data:
-        return "No data found for this query. This could be due to no records matching the criteria."
+    if not data or not isinstance(data, list) or not data:
+        return "No data found for this query. This could be due to no records matching the criteria (Period: 2025-04-13)."
     
     query_lower = query.lower()
     if "sales record details today" in query_lower or "sales invoices details for today" in query_lower:
@@ -482,107 +497,37 @@ def format_natural_response(query, data):
         revenue = sum(row.get("total", 0) for row in data)
         invoices = len(set(row["invoice_id"] for row in data))
         products = ", ".join(set(row.get("product_name", "") for row in data if "product_name" in row)) or "various products"
-        return f"Today's sales: **{units} units** across **{invoices} invoices**, totaling **₱{revenue:,.2f}**. Products sold include: {products}."
+        return f"Today's sales: **{units} units** across **{invoices} invoices**, totaling **₱{revenue:,.2f}**. Products sold include: {products} (Period: 2025-04-13)."
     elif "total revenue" in query_lower:
-        revenue = data[0].get("total_revenue", 0) if data else 0
-        return f"Total revenue: **₱{revenue:,.2f}**."
-    elif "best-selling products" in query_lower:
+        revenue = float(data[0].get("total_revenue", 0) or 0)
+        period = "today" if "today" in query_lower else "this year" if "year" in query_lower else "all time"
+        return f"Total revenue: **₱{revenue:,.2f}** (Period: {period})."
+    elif "best-selling products" in query_lower or "top selling products" in query_lower:
         if data:
             top_product = data[0]["product_name"]
             units = data[0]["total_sold"]
-            return f"Top-selling product: **{top_product}** with **{units} units** sold."
+            period = "all time" if "all time" in query_lower else "this month" if "month" in query_lower else "this week"
+            return f"Top-selling product: **{top_product}** with **{units} units** sold (Period: {period})."
     elif "products out of stock" in query_lower or "products below reorder level" in query_lower:
         count = len(data)
         products = ", ".join(row["product_name"] for row in data[:3]) + (" and more" if count > 3 else "")
-        return f"**{count} products** need attention: {products}."
+        return f"**{count} products** need attention: {products} (Period: 2025-04-13)."
     elif "overview statistics" in query_lower:
         if data:
             stats = data[0]
             return (f"**Overview**: Avg sales value: **₱{stats['avg_sales_value']:,.2f}**, "
                     f"Total invoices: **{stats['total_invoices']}**, "
                     f"Revenue: **₱{stats['total_revenue']:,.2f}**, "
-                    f"Profit: **₱{stats['profit']:,.2f}**.")
-    return json.dumps(data, indent=2)  # Fallback for unmapped queries
+                    f"Profit: **₱{stats['profit']:,.2f}** (Period: 2025-02-14 to 2025-04-13).")
+    elif "profit margin" in query_lower:
+        if data:
+            stats = data[0]
+            profit_margin = float(stats.get('profit_margin', 0) or 0)
+            return f"Profit margin: **{profit_margin:.2f}%** (Period: 2025-04-13)."
+    return json.dumps(data, indent=2) + " (Period: 2025-04-13)"
 
-# Function to handle user queries
-def handle_query(query: str):
-    """Process a user's query, update chat history, and display response."""
-    st.session_state.chat_history.append(HumanMessage(content=query))
-    with st.chat_message("Human", avatar="dist/img/Human.png"):
-        st.markdown(query)
-
-    with st.spinner("Analyzing your query..."):
-        # NEW: Check for mapped queries first to bypass LangChain
-        query_lower = query.lower().strip()
-        if query_lower in query_mappings:
-            query_sql = query_mappings[query_lower]
-            data = fetch_data_from_api("execute_query", {"query": query_sql})
-            natural_response = format_natural_response(query, data)
-        else:
-            try:
-                natural_response, data = get_response(query, st.session_state.chat_history)
-            except Exception as e:
-                natural_response = f"An error occurred: {str(e)}"
-                data = None
-
-        st.session_state.chat_history.append(AIMessage(content=natural_response))
-        with st.chat_message("AI", avatar="dist/img/ai.png"):
-            st.markdown(natural_response)
-            if data and isinstance(data, list) and len(data) >= 1:
-                df = pd.DataFrame(data)
-                # Preprocess data for charts
-                for col in df.columns:
-                    if "date" in col.lower():
-                        df[col] = pd.to_datetime(df[col], errors='coerce')
-                    if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price", "net_total", "base_cost", "profit", "avg_sales_value", "total_inventory_value", "category_value"]):
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                        df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                    elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                chart_type, columns = determine_chart_type(query, df)
-                if chart_type:
-                    with st.spinner("Generating chart..."):
-                        st.markdown(f"### {chart_type.capitalize()} Chart")
-                        fig, ax = plt.subplots()
-                        if chart_type == 'bar':
-                            df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
-                            ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
-                            ax.set_xlabel(columns[0])
-                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
-                        elif chart_type == 'line':
-                            df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
-                            ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
-                            ax.set_xlabel("Date")
-                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
-                        elif chart_type == 'pie':
-                            ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                            ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
-                        st.pyplot(fig)
-                        st.download_button("Download Data", df.to_csv(index=False), "data.csv")
-                if len(df) > 0 or len(df.columns) > 1:
-                    st.table(df)
-
-# Function to display chat history
-def display_chat_history():
-    """Render the chat history in the UI."""
-    for message in st.session_state.chat_history:
-        if isinstance(message, AIMessage):
-            with st.chat_message("AI", avatar="dist/img/ai.png"):
-                st.markdown(message.content)
-        elif isinstance(message, HumanMessage):
-            with st.chat_message("Human", avatar="dist/img/Human.png"):
-                st.markdown(message.content)
-
-# Function to clear chat history
-def clear_chat():
-    """Reset the chat history to start a new conversation."""
-    st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
-    ]
-    st.success("Chat history cleared. Starting a new conversation!")
-
-# MODIFIED: Cache with date-based key and shorter TTL
-@st.cache_data(ttl=3600)
+# Cache with date-based key and shorter TTL
+@st.cache_data(ttl=1800)  # Reduced TTL to 30 minutes
 def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> dict:
     """Fetch data from the API based on the specified action and parameters."""
     if not _date:
@@ -598,7 +543,7 @@ def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> 
         response = requests.get(
             st.secrets["API_URL"],
             params=payload,
-            timeout=15
+            timeout=10
         )
 
         if not response.text.strip():
@@ -621,63 +566,67 @@ def fetch_data_from_api(action: str, params: dict = None, _date: str = None) -> 
         st.error(f"Connection error: {str(e)}")
         return None
 
-# Function to validate SQL queries
+# Validate SQL queries
 def validate_query(query):
     """Validate that the SQL query is safe and executable."""
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "INNER JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
+    valid_tables = ["invoices", "invoice_details", "products", "categories", "employees", "user_logins", "inventory_logs"]
+    query_lower = query.lower()
     query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
-    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+    if "INNER JOIN" in query_upper and "ON" not in query_upper:
+        return False
+    query_tables = re.findall(r'\bFROM\s+([a-z_]+)\b|\bJOIN\s+([a-z_]+)\b', query_lower, re.IGNORECASE)
+    query_tables = [t[0] or t[1] for t in query_tables]
+    if query_tables and not all(t in valid_tables for t in query_tables):
+        return False
+    return any(kw in query_upper for kw in allowed_keywords)
 
-# MODIFIED: Slimmed-down SQL chain with smaller model
+# Simplified SQL chain with minimal token usage
 def get_sql_chain():
     """Create a chain to generate SQL queries based on user input."""
     schema = """
-    - categories: category_id, category_name, created_at
-    - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
-    - inventory_logs: log_id, product_id, change_type, quantity, log_date, notes
-    - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+    - categories: category_id, category_name
+    - employees: employee_id, first_name, last_name, role
+    - inventory_logs: log_id, product_id, change_type, quantity, log_date
+    - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, payment_type
     - invoice_details: detail_id, invoice_id, product_id, quantity, unit_price, total_price
-    - products: product_id, barcode, product_name, category_id, description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - user_logins: log_id, employee_id, login_time, logout_time, ip_address
+    - products: product_id, product_name, category_id, stock, reorder_level, purchase_price, sale_price
+    - user_logins: log_id, employee_id, login_time, logout_time
     """
 
     template = """
-    Generate an accurate SQL query for the SCC School Store Database based on the schema and user question.
+    Generate a concise SQL query for the SCC School Store Database based on the schema and question.
 
     **Schema:** {schema}
-    **Current date (Singapore):** {current_sg_date}
-    **Current datetime (Singapore):** {current_sg_datetime}
-    **Recent chat:** {chat_summary}
+    **Current date:** {current_sg_date}
+    **Question:** {question}
 
     **Rules:**
     - Use INNER JOINs.
-    - Group by unique IDs (e.g., product_id) with names.
-    - For sales, use SUM(id.quantity); for revenue, SUM(i.total).
-    - Filter invalid invoices with WHERE i.total > 0.
-    - Use DECIMAL for money, INTEGER for quantities.
+    - Use SUM(id.quantity) for sales, SUM(i.total) for revenue.
+    - Filter with WHERE i.total > 0.
     - Return only the SQL query.
 
     **Question:** {question}
     """
 
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGroq(model="llama3-8b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])  # NEW: Smaller model
+    llm = ChatGroq(model="llama3-8b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
 
     return (
         RunnablePassthrough.assign(
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
-            current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
+            question=lambda x: x["question"]
         )
         | prompt
         | llm
         | StrOutputParser()
     )
 
-# MODIFIED: Simplified response generation
+# Optimized response generation with caching and token limit handling
 def get_response(user_query: str, chat_history: list):
     """Generate a natural language response and fetch data based on the user's query."""
     time_keywords = [
@@ -688,26 +637,43 @@ def get_response(user_query: str, chat_history: list):
         "sales", "invoice", "details", "product", "category", "stock", "revenue",
         "order", "employee", "payment", "quantity", "price", "total", "subtotal",
         "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve", "overview"
+        "provide", "get", "fetch", "retrieve", "profit", "margin", "cost", "overview"
     ]
 
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
-        return natural_response, None
-    else:
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-%d')
-        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+        return f"The current time and date in Singapore is {current_time.strftime('%Y-%m-%d %H:%M:%S')}.", None
 
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_sg = datetime.datetime.now(singapore_tz)
+    current_sg_date = now_sg.strftime('%Y-%m-%d')
+
+    # Check cache for unmapped queries
+    cache_key = f"{user_query.lower().strip()}_{current_sg_date}"
+    if cache_key in st.session_state.query_cache:
+        return st.session_state.query_cache[cache_key]
+
+    # Check query mappings
+    query_lower = user_query.lower().strip()
+    normalized_query = query_lower.replace("give me the ", "").replace("show me the ", "").replace("give the ", "").replace("show ", "").strip()
+    for key in query_mappings:
+        if normalized_query.startswith(key):
+            query_sql = query_mappings[key]
+            data = fetch_data_from_api("execute_query", {"query": query_sql}, _date=current_sg_date)
+            if data is None:
+                response = "Failed to fetch data from API. Please check connection or try again (Period: 2025-04-13)."
+                return response, None
+            response = format_natural_response(user_query, data)
+            st.session_state.query_cache[cache_key] = (response, data)
+            return response, data
+
+    # Handle unmapped queries with Groq API
+    try:
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
             "question": user_query,
-            "chat_history": chat_history,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
+            "current_sg_date": current_sg_date
         })
 
         query = raw_query.split(";")[0] + ";"
@@ -717,15 +683,90 @@ def get_response(user_query: str, chat_history: list):
         )
 
         if not validate_query(query):
-            return "Failed to generate a valid database query. Please try again.", None
+            response = "Failed to generate a valid database query. Try rephrasing, e.g., 'Show total sales for today' (Period: 2025-04-13)."
+            return response, None
 
-        fetch_data_from_api.clear()  # Clear cache for fresh data
         data = fetch_data_from_api("execute_query", {"query": query}, _date=current_sg_date)
         if data is None:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None 
+            response = "No data found. Try a broader time frame or check query (Period: 2025-04-13)."
+            return response, None
 
-        natural_response = format_natural_response(user_query, data)
-        return natural_response, data
+        response = format_natural_response(user_query, data)
+        st.session_state.query_cache[cache_key] = (response, data)
+        return response, data
+
+    except Exception as e:
+        if "rate_limit_exceeded" in str(e).lower() or "token_limit" in str(e).lower():
+            response = "Token limit reached. Please try a simpler query like 'total revenue for today' or wait a moment (Period: 2025-04-13)."
+        else:
+            response = f"An error occurred: {str(e)} (Period: 2025-04-13)."
+        return response, None
+
+# Function to handle user queries
+def handle_query(query: str):
+    """Process a user's query, update chat history, and display response."""
+    st.session_state.chat_history.append(HumanMessage(content=query))
+    with st.chat_message("Human", avatar="dist/img/Human.png"):
+        st.markdown(query)
+
+    with st.spinner("Analyzing your query..."):
+        natural_response, data = get_response(query, st.session_state.chat_history)
+
+        st.session_state.chat_history.append(AIMessage(content=natural_response))
+        with st.chat_message("AI", avatar="dist/img/ai.png"):
+            st.markdown(natural_response)
+            if data and isinstance(data, list) and len(data) >= 1:
+                df = pd.DataFrame(data)
+                for col in df.columns:
+                    if "date" in col.lower():
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                    if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price", "net_total", "base_cost", "profit", "avg_sales_value", "total_inventory_value", "category_value"]):
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                        df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                    elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                chart_type, columns = determine_chart_type(query, df)
+                if chart_type:
+                    with st.spinner("Generating chart..."):
+                        st.markdown(f"### {chart_type.capitalize()} Chart")
+                        fig, ax = plt.subplots()
+                        if chart_type == 'bar':
+                            df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                            ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
+                            ax.set_xlabel(columns[0])
+                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                        elif chart_type == 'line':
+                            df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                            ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
+                            ax.set_xlabel("Date")
+                            ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                        elif chart_type == 'pie':
+                            ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                            ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
+                        st.pyplot(fig)
+                        st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+                if len(df) > 0 and len(df.columns) > 1:
+                    st.table(df)
+
+# Function to display chat history
+def display_chat_history():
+    """Render the chat history in the UI."""
+    for message in st.session_state.chat_history:
+        if isinstance(message, AIMessage):
+            with st.chat_message("AI", avatar="dist/img/ai.png"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("Human", avatar="dist/img/Human.png"):
+                st.markdown(message.content)
+
+# Function to clear chat history
+def clear_chat():
+    """Reset the chat history to start a new conversation."""
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+    ]
+    st.session_state.query_cache = {}  # Clear query cache
+    st.success("Chat history cleared. Starting a new conversation!")
 
 # Function to determine chart type for data visualization
 def determine_chart_type(query, df):
@@ -740,14 +781,18 @@ def determine_chart_type(query, df):
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
 
-    if date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
+    financial_cols = [col for col in numerical_columns if any(k in col.lower() for k in ["revenue", "profit", "cost", "price", "total", "subtotal", "paid", "due", "discount"])]
+    quantity_cols = [col for col in numerical_columns if any(k in col.lower() for k in ["quantity", "sold", "count"])]
+
+    if date_columns and (financial_cols or quantity_cols):
+        num_col = financial_cols[0] if financial_cols else quantity_cols[0] if quantity_cols else numerical_columns[0]
+        return "line", (date_columns[0], num_col)
+    elif categorical_columns and (financial_cols or quantity_cols):
+        num_col = financial_cols[0] if financial_cols else quantity_cols[0] if quantity_cols else numerical_columns[0]
         unique_categories = len(df[categorical_columns[0]].unique())
         if unique_categories <= 6 and ("percentage" in query_lower or "breakdown" in query_lower):
-            return "pie", (categorical_columns[0], numerical_columns[0])
-        else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
+            return "pie", (categorical_columns[0], num_col)
+        return "bar", (categorical_columns[0], num_col)
     return None, None
 
 # Main application logic
@@ -785,7 +830,8 @@ def main():
                 # Quick Queries Expanders
                 with st.expander("📊 Overview", expanded=True):
                     overview_queries = [
-                        "Show overview statistics"
+                        "Show overview statistics",
+                        "Give the total revenue, profit, base cost and profit margin"
                     ]
                     for q in overview_queries:
                         if st.button(q, key=f"overview_{q}"):
