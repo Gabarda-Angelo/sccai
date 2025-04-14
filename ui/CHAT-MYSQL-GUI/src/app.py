@@ -675,8 +675,8 @@ def get_sql_chain():
     """
 
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGroq(model="llama-4-maverick-17b-128e-instruct", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
-
+    llm = ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+                          
     return (
         RunnablePassthrough.assign(
             schema=lambda _: schema,
