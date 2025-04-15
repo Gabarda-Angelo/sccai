@@ -46,7 +46,7 @@ def fetch_data_from_api(action: str, payload_hash: str) -> list:
     """Fetch data from the API with caching."""
     try:
         headers = {"Authorization": f"Bearer {API_TOKEN}"}
-        payload = json.loads(payload_hash)  # Deserialize the hashed payload
+        payload = json.loads(payload_hash)
         payload["action"] = action
         response = requests.post(API_URL, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
@@ -115,11 +115,16 @@ def fuzzy_match_text(query: str) -> str:
         st.session_state.vector_store = initialize_vector_store()
     if not st.session_state.vector_store:
         return json.dumps([])
-    results = st.session_state.vector_store.similarity_search(query, k=3)
-    return json.dumps([
-        {"text": res.page_content, "type": res.metadata["type"], "id": res.metadata["id"]}
-        for res in results
-    ])
+    try:
+        results = st.session_state.vector_store.similarity_search(query, k=3)
+        matches = [
+            {"text": res.page_content, "type": res.metadata["type"], "id": res.metadata["id"]}
+            for res in results
+        ]
+        return json.dumps(matches)
+    except Exception as e:
+        st.error(f"Fuzzy match error: {str(e)}")
+        return json.dumps([])
 
 def validate_query(query: str) -> bool:
     """Validate SQL query for safety and correctness."""
@@ -201,12 +206,15 @@ def get_sql_chain(domain: str):
         Focus on invoices, invoice_details, products.
         Use SUM(id.quantity) for quantities, SUM(i.total) for revenue.
         Always include WHERE i.total > 0.
-        For date-specific queries, use DATE(i.order_date) = 'YYYY-MM-DD'.
-        Example: SELECT i.invoice_id, i.order_date, p.product_name, id.quantity, i.total 
+        For best-selling products, group by product and order by quantity descending.
+        Example: SELECT p.product_name, SUM(id.quantity) as total_sold 
         FROM invoice_details id 
         INNER JOIN products p ON id.product_id = p.product_id 
         INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-        WHERE i.total > 0 AND DATE(i.order_date) = '2025-04-14';
+        WHERE i.total > 0 
+        GROUP BY p.product_id, p.product_name 
+        ORDER BY total_sold DESC 
+        LIMIT 5;
         """,
         "inventory": """
         You are an Inventory Agent specialized in inventory queries.
@@ -254,7 +262,7 @@ def get_sql_chain(domain: str):
     - Use explicit INNER JOINs.
     - Group by unique IDs alongside names.
     - Exclude invalid invoices with WHERE i.total > 0 for sales/financial.
-    - For dates in questions (e.g., 'April 14, 2025'), format as '2025-04-14' in WHERE clauses.
+    - For best-selling products, prioritize SUM(id.quantity) and ORDER BY DESC.
     - Provide only the SQL query.
 
     **User Question:** {question}
@@ -278,11 +286,11 @@ def get_sql_chain(domain: str):
 
     def prepare_inputs(inputs):
         metadata = retrieve_metadata()
-        matched_entities = json.loads(fuzzy_match_text(inputs["question"]))
+        matched_entities = fuzzy_match_text(inputs["question"])
         return {
             "static_schema": schema,
             "dynamic_metadata": json.dumps(metadata, indent=2),
-            "matched_entities": json.dumps(matched_entities, indent=2),
+            "matched_entities": matched_entities,
             "current_sg_date": inputs["current_sg_date"],
             "current_sg_datetime": inputs["current_sg_datetime"],
             "chat_summary": " ".join([msg.content for msg in inputs["chat_history"][-3:]]),
