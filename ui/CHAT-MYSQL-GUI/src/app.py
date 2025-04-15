@@ -17,6 +17,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 import requests
 import os
+import hashlib
 
 # Streamlit page configuration
 st.set_page_config(page_title="AcaSquad AI", page_icon="dist/img/ai.png", layout="wide")
@@ -41,10 +42,11 @@ API_URL = "https://ltmptpysnd-bookstoreapi.hf.space/api/bookstoreapi.php"
 API_TOKEN = st.secrets.get("API_TOKEN", "your_default_token")
 
 @lru_cache(maxsize=100)
-def fetch_data_from_api(action: str, payload: dict) -> list:
+def fetch_data_from_api(action: str, payload_hash: str) -> list:
     """Fetch data from the API with caching."""
     try:
         headers = {"Authorization": f"Bearer {API_TOKEN}"}
+        payload = json.loads(payload_hash)  # Deserialize the hashed payload
         payload["action"] = action
         response = requests.post(API_URL, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
@@ -53,6 +55,10 @@ def fetch_data_from_api(action: str, payload: dict) -> list:
     except requests.RequestException as e:
         st.error(f"API error: {str(e)}")
         return []
+
+def hash_payload(payload: dict) -> str:
+    """Hash the payload for caching."""
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 def retrieve_metadata():
     """Retrieve current schema and recent sync_log entries."""
@@ -68,8 +74,8 @@ def retrieve_metadata():
     ORDER BY timestamp DESC
     LIMIT 100;
     """
-    schema_data = fetch_data_from_api("execute_query", {"query": schema_query})
-    sync_data = fetch_data_from_api("execute_query", {"query": sync_query})
+    schema_data = fetch_data_from_api("execute_query", hash_payload({"query": schema_query}))
+    sync_data = fetch_data_from_api("execute_query", hash_payload({"query": sync_query}))
     return {
         "schema": schema_data if schema_data else [],
         "sync_log": sync_data if sync_data else []
@@ -79,8 +85,8 @@ def initialize_vector_store():
     """Initialize a vector store for product names and categories."""
     products_query = "SELECT product_id, product_name FROM products;"
     categories_query = "SELECT category_id, category_name FROM categories;"
-    products_data = fetch_data_from_api("execute_query", {"query": products_query})
-    categories_data = fetch_data_from_api("execute_query", {"query": categories_query})
+    products_data = fetch_data_from_api("execute_query", hash_payload({"query": products_query}))
+    categories_data = fetch_data_from_api("execute_query", hash_payload({"query": categories_query}))
     
     if not products_data or not categories_data:
         return None
@@ -130,7 +136,7 @@ def validate_query(query: str) -> bool:
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = 'ltmptpysnd_school_store_db';
     """
-    schema_data = fetch_data_from_api("execute_query", {"query": schema_query})
+    schema_data = fetch_data_from_api("execute_query", hash_payload({"query": schema_query}))
     valid_tables = set(item["TABLE_NAME"].lower() for item in schema_data)
     words = query_upper.replace(",", " ").replace(";", " ").split()
     used_tables = set(word.lower() for word in words if word.lower() in valid_tables)
@@ -156,10 +162,10 @@ def log_query(query: str, user_id: str, success: bool):
     VALUES ('query_log', %s, %s, NOW());
     """
     action = "QUERY_SUCCESS" if success else "QUERY_FAILED"
-    fetch_data_from_api("execute_query", {
+    fetch_data_from_api("execute_query", hash_payload({
         "query": log_query_sql,
         "params": [user_id, action]
-    })
+    }))
 
 def classify_query(query: str) -> str:
     """Classify the query into a domain or list of domains."""
@@ -195,7 +201,12 @@ def get_sql_chain(domain: str):
         Focus on invoices, invoice_details, products.
         Use SUM(id.quantity) for quantities, SUM(i.total) for revenue.
         Always include WHERE i.total > 0.
-        Example: SELECT p.product_name, SUM(id.quantity) FROM invoice_details id INNER JOIN products p ON id.product_id = p.product_id INNER JOIN invoices i ON id.invoice_id = i.invoice_id WHERE i.total > 0 GROUP BY p.product_name;
+        For date-specific queries, use DATE(i.order_date) = 'YYYY-MM-DD'.
+        Example: SELECT i.invoice_id, i.order_date, p.product_name, id.quantity, i.total 
+        FROM invoice_details id 
+        INNER JOIN products p ON id.product_id = p.product_id 
+        INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+        WHERE i.total > 0 AND DATE(i.order_date) = '2025-04-14';
         """,
         "inventory": """
         You are an Inventory Agent specialized in inventory queries.
@@ -205,7 +216,9 @@ def get_sql_chain(domain: str):
         "employee": """
         You are an Employee Agent specialized in employee queries.
         Focus on employees, user_logins.
-        Example: SELECT CONCAT(e.first_name, ' ', e.last_name), COUNT(ul.log_id) FROM employees e INNER JOIN user_logins ul ON e.employee_id = ul.employee_id GROUP BY e.employee_id;
+        Example: SELECT CONCAT(e.first_name, ' ', e.last_name), COUNT(ul.log_id) 
+        FROM employees e INNER JOIN user_logins ul ON e.employee_id = ul.employee_id 
+        GROUP BY e.employee_id;
         """,
         "financial": """
         You are a Financial Agent specialized in financial queries.
@@ -215,7 +228,9 @@ def get_sql_chain(domain: str):
         "operations": """
         You are an Operations Agent specialized in store operations.
         Focus on invoices, user_logins.
-        Example: SELECT HOUR(i.order_time), SUM(id.quantity) FROM invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id WHERE i.total > 0 GROUP BY HOUR(i.order_time);
+        Example: SELECT HOUR(i.order_time), SUM(id.quantity) 
+        FROM invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id 
+        WHERE i.total > 0 GROUP BY HOUR(i.order_time);
         """,
         "misc": """
         You are a Miscellaneous Agent for general queries.
@@ -239,6 +254,7 @@ def get_sql_chain(domain: str):
     - Use explicit INNER JOINs.
     - Group by unique IDs alongside names.
     - Exclude invalid invoices with WHERE i.total > 0 for sales/financial.
+    - For dates in questions (e.g., 'April 14, 2025'), format as '2025-04-14' in WHERE clauses.
     - Provide only the SQL query.
 
     **User Question:** {question}
@@ -366,7 +382,7 @@ def orchestrate_query(query: str, chat_history: list, current_sg_date: str, curr
         query = raw_query.split(";")[0] + ";"
         query = query.replace("```sql", "").replace("```", "").strip()
         if validate_query(query) and restrict_query_by_role(query, st.session_state.user_role):
-            data = fetch_data_from_api("execute_query", {"query": query})
+            data = fetch_data_from_api("execute_query", hash_payload({"query": query}))
             log_query(query, st.session_state.get("user_id", "unknown"), data is not None)
             return {"domain": domain, "data": data, "query": query}
         return None
@@ -403,7 +419,6 @@ def orchestrate_query(query: str, chat_history: list, current_sg_date: str, curr
     })
     return natural_response, results[-1]["data"] if results else None
 
-@lru_cache(maxsize=50)
 def get_response(user_query: str, history_tuple: tuple) -> tuple:
     """Generate a natural language response and fetch data."""
     chat_history = [AIMessage(content=msg) if i % 2 else HumanMessage(content=msg) for i, msg in enumerate(history_tuple)]
@@ -453,8 +468,8 @@ def get_response(user_query: str, history_tuple: tuple) -> tuple:
                     return f"Failed to generate a valid query for step: {step['desc']}.", None
 
             if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
-                fetch_data_from_api.clear()
-            data = fetch_data_from_api("execute_query", {"query": query})
+                fetch_data_from_api.cache_clear()
+            data = fetch_data_from_api("execute_query", hash_payload({"query": query}))
             log_query(query, st.session_state.get("user_id", "unknown"), data is not None)
             if data is None:
                 return f"Couldn't retrieve data for step: {step['desc']}.", None
@@ -595,10 +610,10 @@ with st.sidebar:
             SELECT employee_id, role FROM employees 
             WHERE email = %s AND password_hash = %s;
             """
-            login_data = fetch_data_from_api("execute_query", {
+            login_data = fetch_data_from_api("execute_query", hash_payload({
                 "query": login_query,
-                "params": [username, password]  # In production, hash password
-            })
+                "params": [username, password]
+            }))
             if login_data and login_data[0]["role"] == role:
                 st.session_state.user_id = login_data[0]["employee_id"]
                 st.session_state.user_role = role
