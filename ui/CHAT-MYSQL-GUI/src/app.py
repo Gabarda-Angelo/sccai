@@ -281,366 +281,366 @@ def get_sql_chain(domain: str):
         | llm
         | StrOutputParser()
     )
-	def recover_query(user_query: str, failed_query: str, chat_history: list, current_sg_date: str, current_sg_datetime: str) -> str:
-    """Attempt to recover a failed query by regenerating it."""
-    recovery_template = """
-    The following SQL query failed: {failed_query}
-    Error context: Likely invalid syntax, missing table, or incorrect join.
-    Original question: {question}
-    Schema: {schema}
-    Current date: {current_sg_date}
-    Current datetime: {current_sg_datetime}
-    Regenerate a valid SQL query to answer the question.
-    """
-    prompt = ChatPromptTemplate.from_template(recovery_template)
-    chain = (
-        RunnablePassthrough.assign(
-            schema=lambda _: """
-            - categories: category_id, category_name, created_at
-            - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
-            - inventory_logs: log_id, product_id, change_type, quantity, log_date, notes
-            - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
-            - invoice_details: detail_id, invoice_id, product_id, quantity, unit_price, total_price
-            - products: product_id, barcode, product_name, category_id, description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-            - user_logins: log_id, employee_id, login_time, logout_time, ip_address
-            """
-        )
-        | prompt
-        | ChatGroq(model="llama3-70b-8192", temperature=0.1, api_key=st.secrets["GROQ_API_KEY"])
-        | StrOutputParser()
-    )
-    recovered_query = chain.invoke({
-        "question": user_query,
-        "failed_query": failed_query,
-        "current_sg_date": current_sg_date,
-        "current_sg_datetime": current_sg_datetime
-    })
-    return recovered_query.strip()
-
-def plan_multi_hop_query(query: str, schema: str) -> list:
-    """Decompose a query into sequential steps."""
-    planner_template = """
-    You are an AI assistant decomposing a complex database query into sequential SQL steps.
-    **Schema:** {schema}
-    **Query:** {query}
-
-    **Instructions:**
-    - Break the query into logical steps, each requiring a single SQL query.
-    - Ensure steps are ordered so later steps can use results from earlier ones.
-    - For each step, provide:
-      - A brief description (e.g., "Get top-selling products").
-      - The SQL query to execute.
-    - Return a JSON list of steps, e.g.:
-      [
-        {"description": "Get top-selling products", "sql": "SELECT ..."},
-        {"description": "Get stock levels", "sql": "SELECT ..."}
-      ]
-    - If the query is simple, return one step.
-    """
-    prompt = ChatPromptTemplate.from_template(planner_template)
-    chain = (
-        prompt
-        | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
-        | StrOutputParser()
-    )
-    steps_json = chain.invoke({"query": query, "schema": schema})
-    try:
-        steps = json.loads(steps_json)
-        return steps
-    except json.JSONDecodeError:
-        return [{"description": "Execute query directly", "sql": query}]
-
-def orchestrate_query(query: str, chat_history: list, current_sg_date: str, current_sg_datetime: str):
-    """Orchestrate multi-domain queries by coordinating agents."""
-    domains = classify_query(query)
-    if isinstance(domains, str):
-        domains = [domains]
-    
-    def run_agent(domain):
-        sql_chain = get_sql_chain(domain)
-        raw_query = sql_chain.invoke({
-            "question": query,
-            "chat_history": chat_history,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
-        })
-        query = raw_query.split(";")[0] + ";"
-        query = query.replace("```sql", "").replace("```", "").strip()
-        if validate_query(query) and restrict_query_by_role(query, st.session_state.user_role):
-            data = fetch_data_from_api("execute_query", {"query": query})
-            log_query(query, st.session_state.get("user_id", "unknown"), data is not None)
-            return {"domain": domain, "data": data, "query": query}
-        return None
-    
-    with ThreadPoolExecutor() as executor:
-        results = list(filter(None, executor.map(run_agent, domains)))
-    
-    if not results:
-        return "Failed to generate valid queries for any domain.", None
-    
-    aggregator_template = """
-    Combine results from multiple agents:
-    {results}
-    **Original Question:** {question}
-    Generate a natural language response summarizing the data.
-    **Guidelines:**
-    1. If results are empty, state: "No data found."
-    2. For quantities, use 'units', 'items', or 'records'.
-    3. For monetary values, use peso sign (₱) and format to 2 decimal places.
-    4. Highlight key insights with **bold**.
-    5. Use markdown: - for lists.
-    6. If total_discount = 0, note: "No discounts recorded."
-    7. If total_categories ≥ total_products, caution: "High category count."
-    """
-    prompt = ChatPromptTemplate.from_template(aggregator_template)
-    chain = (
-        prompt
-        | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
-        | StrOutputParser()
-    )
-    natural_response = chain.invoke({
-        "question": query,
-        "results": json.dumps(results, indent=2)
-    })
-    return natural_response, results[-1]["data"] if results else None
-
-@lru_cache(maxsize=50)
-def get_response(user_query: str, history_tuple: tuple) -> tuple:
-    """Generate a natural language response and fetch data."""
-    chat_history = [AIMessage(content=msg) if i % 2 else HumanMessage(content=msg) for i, msg in enumerate(history_tuple)]
-    user_role = st.session_state.get("user_role", "Cashier")
-    
-    time_keywords = ["current time", "what time is it", "date and time", "today's date", "now", "time today", "date today"]
-    data_keywords = ["sales", "invoice", "details", "product", "category", "stock", "revenue", "order", "employee", "payment", "quantity", "price", "total", "subtotal", "discount", "due", "paid", "inventory", "log", "detail", "list", "show", "provide", "get", "fetch", "retrieve", "overview"]
-
-    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        current_time = datetime.datetime.now(singapore_tz)
-        natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
-        return natural_response, None
-    else:
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-%d')
-        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
-
-        # Check for multi-domain query
-        domain = classify_query(user_query)
-        if isinstance(domain, list) or " and " in user_query.lower():
-            return orchestrate_query(user_query, chat_history, current_sg_date, current_sg_datetime)
-        
-        # Plan multi-hop query
-        schema = """
-        - categories: category_id, category_name, created_at
-        - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
-        - inventory_logs: log_id, product_id, change_type, quantity, log_date, notes
-        - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
-        - invoice_details: detail_id, invoice_id, product_id, quantity, unit_price, total_price
-        - products: product_id, barcode, product_name, category_id, description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-        - user_logins: log_id, employee_id, login_time, logout_time, ip_address
-        """
-        steps = plan_multi_hop_query(user_query, schema)
-		        # Execute multi-hop steps
-        all_data = []
-        for step in steps:
-            query = step["sql"].strip()
-            if not validate_query(query) or not restrict_query_by_role(query, user_role):
-                recovery_query = recover_query(user_query, query, chat_history, current_sg_date, current_sg_datetime)
-                if recovery_query and validate_query(recovery_query) and restrict_query_by_role(recovery_query, user_role):
-                    query = recovery_query
-                else:
-                    log_query(query, st.session_state.get("user_id", "unknown"), False)
-                    return f"Failed to generate a valid query for step: {step['description']}.", None
-
-            if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
-                fetch_data_from_api.clear()
-            data = fetch_data_from_api("execute_query", {"query": query})
-            log_query(query, st.session_state.get("user_id", "unknown"), data is not None)
-            if data is None:
-                return f"Couldn't retrieve data for step: {step['description']}.", None
-            all_data.append({"step": step["description"], "data": data})
-
-        # Aggregate results
-        response_template = """
-        Generate a natural language response based on:
-        - **Question:** {question}
-        - **Results:** {response}
-        - **History:** {chat_history}
-
-        **Guidelines:**
-        1. If results are empty, state: "No data found."
-        2. For quantities, use 'units', 'items', or 'records'.
-        3. For monetary values, use peso sign (₱) and format to 2 decimal places.
-        4. Highlight key insights with **bold**.
-        5. Use markdown: - for lists.
-        6. If total_discount = 0, note: "No discounts recorded."
-        7. If total_categories ≥ total_products, caution: "High category count."
-        8. Combine multi-step results logically.
-        """
-        chain = (
-            RunnablePassthrough.assign(response=lambda _: json.dumps(all_data, indent=2))
-            | ChatPromptTemplate.from_template(response_template)
-            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
-            | StrOutputParser()
-        )
-
-        natural_response = chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-        })
-
-        combined_data = all_data[-1]["data"] if all_data else []
-        return natural_response, combined_data
-
-def handle_query(query: str):
-    """Process a user's query, update chat history, and display response."""
-    if not query:
-        return
-    
-    st.session_state.chat_history.append(HumanMessage(content=query))
-    with st.chat_message("Human", avatar="dist/img/Human.png"):
-        st.markdown(query)
-
-    with st.spinner("Analyzing your query..."):
-        try:
-            history_tuple = tuple(msg.content for msg in st.session_state.chat_history[-6:])
-            natural_response, data = get_response(query, history_tuple)
-        except Exception as e:
-            natural_response = f"An error occurred: {str(e)}"
-            data = None
-
-    st.session_state.chat_history.append(AIMessage(content=natural_response))
-    with st.chat_message("AI", avatar="dist/img/ai.png"):
-        st.markdown(natural_response)
-        if data and isinstance(data, list) and len(data) >= 1:
-            df = pd.DataFrame(data)
-            for col in df.columns:
-                if "date" in col.lower():
-                    df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price", "net_total", "base_cost", "profit", "avg_sales_value", "total_inventory_value", "category_value"]):
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            chart_type, columns = determine_chart_type(query, df)
-            if chart_type:
-                with st.spinner("Generating chart..."):
-                    st.markdown(f"### {chart_type.capitalize()} Chart")
-                    fig, ax = plt.subplots()
-                    if chart_type == 'bar':
-                        df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
-                        ax.set_xlabel(columns[0])
-                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
-                    elif chart_type == 'line':
-                        df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
-                        ax.set_xlabel("Date")
-                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
-                    elif chart_type == 'pie':
-                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                        ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
-                    st.pyplot(fig)
-                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")
-            if len(df) > 0 or len(df.columns) > 1:
-                st.table(df)
-
-def determine_chart_type(query: str, df: pd.DataFrame):
-    """Determine the appropriate chart type for the query and data."""
-    if df.empty:
-        return None, []
-    
-    query_lower = query.lower()
-    columns = df.columns
-    
-    # Check for date-based columns
-    date_cols = [col for col in columns if "date" in col.lower() or df[col].dtype in ["datetime64[ns]"]]
-    numeric_cols = [col for col in columns if df[col].dtype in ["int64", "float64"] and "id" not in col.lower()]
-    categorical_cols = [col for col in columns if df[col].dtype == "object" and "name" in col.lower() or "category" in col.lower()]
-    
-    # Line chart for time series
-    if date_cols and numeric_cols:
-        return "line", [date_cols[0], numeric_cols[0]]
-    
-    # Pie chart for distributions
-    if "distribution" in query_lower or "share" in query_lower or "percentage" in query_lower:
-        if categorical_cols and numeric_cols:
-            return "pie", [categorical_cols[0], numeric_cols[0]]
-    
-    # Bar chart for comparisons
-    if categorical_cols and numeric_cols:
-        return "bar", [categorical_cols[0], numeric_cols[0]]
-    
-    return None, []
-
-# Streamlit UI
-st.markdown("""
-    <div style='text-align: center;'>
-        <img src='dist/img/AcaSquad.png' alt='AcaSquad Logo' width='150'>
-        <h1>AcaSquad AI</h1>
-        <p style='font-size: 18px; color: #555;'>Your intelligent assistant for the SCC School Store Database.</p>
-    </div>
-""", unsafe_allow_html=True)
-
-# Sidebar for user authentication and settings
-with st.sidebar:
-    st.header("User Settings")
-    if "user_id" not in st.session_state:
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        role = st.selectbox("Role", ["Cashier", "Admin", "Owner"])
-        if st.button("Login"):
-            # Simplified authentication (replace with API call to employees table)
-            login_query = """
-            SELECT employee_id, role FROM employees 
-            WHERE email = %s AND password_hash = %s;
-            """
-            login_data = fetch_data_from_api("execute_query", {
-                "query": login_query,
-                "params": [username, password]  # In production, hash password
-            })
-            if login_data and login_data[0]["role"] == role:
-                st.session_state.user_id = login_data[0]["employee_id"]
-                st.session_state.user_role = role
-                st.success("Logged in successfully!")
-            else:
-                st.error("Invalid credentials or role.")
-    else:
-        st.write(f"Logged in as {st.session_state.user_role}")
-        if st.button("Logout"):
-            del st.session_state.user_id
-            del st.session_state.user_role
-            st.session_state.chat_history = []
-            st.success("Logged out.")
-
-    st.markdown("---")
-    if st.button("Show User Guide"):
-        try:
-            with open("README.md", "r") as f:
-                st.markdown(f.read())
-        except FileNotFoundError:
-            st.markdown("""
-            # AcaSquad AI User Guide
-            ## Overview
-            Query sales, inventory, and more with natural language.
-            ## Common Queries
-            - Sales: "Best-selling products"
-            - Inventory: "Low stock items"
-            - Employee: "Top employees" (Admin/Owner only)
-            ## Troubleshooting
-            - No data? Rephrase or check date.
-            - Errors? Contact admin.
-            """)
-
-# Main chat interface
-st.markdown("### Ask a Question")
-query = st.text_input("Enter your query (e.g., 'Best-selling products this month')", key="query_input")
-if st.button("Submit Query") or query:
-    handle_query(query)
-
-# Display chat history
-st.markdown("### Conversation History")
-for message in st.session_state.chat_history:
-    avatar = "dist/img/Human.png" if isinstance(message, HumanMessage) else "dist/img/ai.png"
-    with st.chat_message("Human" if isinstance(message, HumanMessage) else "AI", avatar=avatar):
-        st.markdown(message.content)
+  	def recover_query(user_query: str, failed_query: str, chat_history: list, current_sg_date: str, current_sg_datetime: str) -> str:
+      """Attempt to recover a failed query by regenerating it."""
+      recovery_template = """
+      The following SQL query failed: {failed_query}
+      Error context: Likely invalid syntax, missing table, or incorrect join.
+      Original question: {question}
+      Schema: {schema}
+      Current date: {current_sg_date}
+      Current datetime: {current_sg_datetime}
+      Regenerate a valid SQL query to answer the question.
+      """
+      prompt = ChatPromptTemplate.from_template(recovery_template)
+      chain = (
+          RunnablePassthrough.assign(
+              schema=lambda _: """
+              - categories: category_id, category_name, created_at
+              - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
+              - inventory_logs: log_id, product_id, change_type, quantity, log_date, notes
+              - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+              - invoice_details: detail_id, invoice_id, product_id, quantity, unit_price, total_price
+              - products: product_id, barcode, product_name, category_id, description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+              - user_logins: log_id, employee_id, login_time, logout_time, ip_address
+              """
+          )
+          | prompt
+          | ChatGroq(model="llama3-70b-8192", temperature=0.1, api_key=st.secrets["GROQ_API_KEY"])
+          | StrOutputParser()
+      )
+      recovered_query = chain.invoke({
+          "question": user_query,
+          "failed_query": failed_query,
+          "current_sg_date": current_sg_date,
+          "current_sg_datetime": current_sg_datetime
+      })
+      return recovered_query.strip()
+  
+  def plan_multi_hop_query(query: str, schema: str) -> list:
+      """Decompose a query into sequential steps."""
+      planner_template = """
+      You are an AI assistant decomposing a complex database query into sequential SQL steps.
+      **Schema:** {schema}
+      **Query:** {query}
+  
+      **Instructions:**
+      - Break the query into logical steps, each requiring a single SQL query.
+      - Ensure steps are ordered so later steps can use results from earlier ones.
+      - For each step, provide:
+        - A brief description (e.g., "Get top-selling products").
+        - The SQL query to execute.
+      - Return a JSON list of steps, e.g.:
+        [
+          {"description": "Get top-selling products", "sql": "SELECT ..."},
+          {"description": "Get stock levels", "sql": "SELECT ..."}
+        ]
+      - If the query is simple, return one step.
+      """
+      prompt = ChatPromptTemplate.from_template(planner_template)
+      chain = (
+          prompt
+          | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+          | StrOutputParser()
+      )
+      steps_json = chain.invoke({"query": query, "schema": schema})
+      try:
+          steps = json.loads(steps_json)
+          return steps
+      except json.JSONDecodeError:
+          return [{"description": "Execute query directly", "sql": query}]
+  
+  def orchestrate_query(query: str, chat_history: list, current_sg_date: str, current_sg_datetime: str):
+      """Orchestrate multi-domain queries by coordinating agents."""
+      domains = classify_query(query)
+      if isinstance(domains, str):
+          domains = [domains]
+      
+      def run_agent(domain):
+          sql_chain = get_sql_chain(domain)
+          raw_query = sql_chain.invoke({
+              "question": query,
+              "chat_history": chat_history,
+              "current_sg_date": current_sg_date,
+              "current_sg_datetime": current_sg_datetime
+          })
+          query = raw_query.split(";")[0] + ";"
+          query = query.replace("```sql", "").replace("```", "").strip()
+          if validate_query(query) and restrict_query_by_role(query, st.session_state.user_role):
+              data = fetch_data_from_api("execute_query", {"query": query})
+              log_query(query, st.session_state.get("user_id", "unknown"), data is not None)
+              return {"domain": domain, "data": data, "query": query}
+          return None
+      
+      with ThreadPoolExecutor() as executor:
+          results = list(filter(None, executor.map(run_agent, domains)))
+      
+      if not results:
+          return "Failed to generate valid queries for any domain.", None
+      
+      aggregator_template = """
+      Combine results from multiple agents:
+      {results}
+      **Original Question:** {question}
+      Generate a natural language response summarizing the data.
+      **Guidelines:**
+      1. If results are empty, state: "No data found."
+      2. For quantities, use 'units', 'items', or 'records'.
+      3. For monetary values, use peso sign (₱) and format to 2 decimal places.
+      4. Highlight key insights with **bold**.
+      5. Use markdown: - for lists.
+      6. If total_discount = 0, note: "No discounts recorded."
+      7. If total_categories ≥ total_products, caution: "High category count."
+      """
+      prompt = ChatPromptTemplate.from_template(aggregator_template)
+      chain = (
+          prompt
+          | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+          | StrOutputParser()
+      )
+      natural_response = chain.invoke({
+          "question": query,
+          "results": json.dumps(results, indent=2)
+      })
+      return natural_response, results[-1]["data"] if results else None
+  
+  @lru_cache(maxsize=50)
+  def get_response(user_query: str, history_tuple: tuple) -> tuple:
+      """Generate a natural language response and fetch data."""
+      chat_history = [AIMessage(content=msg) if i % 2 else HumanMessage(content=msg) for i, msg in enumerate(history_tuple)]
+      user_role = st.session_state.get("user_role", "Cashier")
+      
+      time_keywords = ["current time", "what time is it", "date and time", "today's date", "now", "time today", "date today"]
+      data_keywords = ["sales", "invoice", "details", "product", "category", "stock", "revenue", "order", "employee", "payment", "quantity", "price", "total", "subtotal", "discount", "due", "paid", "inventory", "log", "detail", "list", "show", "provide", "get", "fetch", "retrieve", "overview"]
+  
+      if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
+          singapore_tz = pytz.timezone('Asia/Singapore')
+          current_time = datetime.datetime.now(singapore_tz)
+          natural_response = f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."
+          return natural_response, None
+      else:
+          singapore_tz = pytz.timezone('Asia/Singapore')
+          now_sg = datetime.datetime.now(singapore_tz)
+          current_sg_date = now_sg.strftime('%Y-%m-%d')
+          current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+  
+          # Check for multi-domain query
+          domain = classify_query(user_query)
+          if isinstance(domain, list) or " and " in user_query.lower():
+              return orchestrate_query(user_query, chat_history, current_sg_date, current_sg_datetime)
+          
+          # Plan multi-hop query
+          schema = """
+          - categories: category_id, category_name, created_at
+          - employees: employee_id, first_name, last_name, role, email, password_hash, created_at
+          - inventory_logs: log_id, product_id, change_type, quantity, log_date, notes
+          - invoices: invoice_id, employee_id, order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+          - invoice_details: detail_id, invoice_id, product_id, quantity, unit_price, total_price
+          - products: product_id, barcode, product_name, category_id, description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+          - user_logins: log_id, employee_id, login_time, logout_time, ip_address
+          """
+          steps = plan_multi_hop_query(user_query, schema)
+  		        # Execute multi-hop steps
+          all_data = []
+          for step in steps:
+              query = step["sql"].strip()
+              if not validate_query(query) or not restrict_query_by_role(query, user_role):
+                  recovery_query = recover_query(user_query, query, chat_history, current_sg_date, current_sg_datetime)
+                  if recovery_query and validate_query(recovery_query) and restrict_query_by_role(recovery_query, user_role):
+                      query = recovery_query
+                  else:
+                      log_query(query, st.session_state.get("user_id", "unknown"), False)
+                      return f"Failed to generate a valid query for step: {step['description']}.", None
+  
+              if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
+                  fetch_data_from_api.clear()
+              data = fetch_data_from_api("execute_query", {"query": query})
+              log_query(query, st.session_state.get("user_id", "unknown"), data is not None)
+              if data is None:
+                  return f"Couldn't retrieve data for step: {step['description']}.", None
+              all_data.append({"step": step["description"], "data": data})
+  
+          # Aggregate results
+          response_template = """
+          Generate a natural language response based on:
+          - **Question:** {question}
+          - **Results:** {response}
+          - **History:** {chat_history}
+  
+          **Guidelines:**
+          1. If results are empty, state: "No data found."
+          2. For quantities, use 'units', 'items', or 'records'.
+          3. For monetary values, use peso sign (₱) and format to 2 decimal places.
+          4. Highlight key insights with **bold**.
+          5. Use markdown: - for lists.
+          6. If total_discount = 0, note: "No discounts recorded."
+          7. If total_categories ≥ total_products, caution: "High category count."
+          8. Combine multi-step results logically.
+          """
+          chain = (
+              RunnablePassthrough.assign(response=lambda _: json.dumps(all_data, indent=2))
+              | ChatPromptTemplate.from_template(response_template)
+              | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+              | StrOutputParser()
+          )
+  
+          natural_response = chain.invoke({
+              "question": user_query,
+              "chat_history": chat_history,
+          })
+  
+          combined_data = all_data[-1]["data"] if all_data else []
+          return natural_response, combined_data
+  
+  def handle_query(query: str):
+      """Process a user's query, update chat history, and display response."""
+      if not query:
+          return
+      
+      st.session_state.chat_history.append(HumanMessage(content=query))
+      with st.chat_message("Human", avatar="dist/img/Human.png"):
+          st.markdown(query)
+  
+      with st.spinner("Analyzing your query..."):
+          try:
+              history_tuple = tuple(msg.content for msg in st.session_state.chat_history[-6:])
+              natural_response, data = get_response(query, history_tuple)
+          except Exception as e:
+              natural_response = f"An error occurred: {str(e)}"
+              data = None
+  
+      st.session_state.chat_history.append(AIMessage(content=natural_response))
+      with st.chat_message("AI", avatar="dist/img/ai.png"):
+          st.markdown(natural_response)
+          if data and isinstance(data, list) and len(data) >= 1:
+              df = pd.DataFrame(data)
+              for col in df.columns:
+                  if "date" in col.lower():
+                      df[col] = pd.to_datetime(df[col], errors='coerce')
+                  if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price", "net_total", "base_cost", "profit", "avg_sales_value", "total_inventory_value", "category_value"]):
+                      df[col] = pd.to_numeric(df[col], errors='coerce')
+                      df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                  elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
+                      df[col] = pd.to_numeric(df[col], errors='coerce')
+              chart_type, columns = determine_chart_type(query, df)
+              if chart_type:
+                  with st.spinner("Generating chart..."):
+                      st.markdown(f"### {chart_type.capitalize()} Chart")
+                      fig, ax = plt.subplots()
+                      if chart_type == 'bar':
+                          df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                          ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
+                          ax.set_xlabel(columns[0])
+                          ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                      elif chart_type == 'line':
+                          df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                          ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
+                          ax.set_xlabel("Date")
+                          ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                      elif chart_type == 'pie':
+                          ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                          ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
+                      st.pyplot(fig)
+                      st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+              if len(df) > 0 or len(df.columns) > 1:
+                  st.table(df)
+  
+  def determine_chart_type(query: str, df: pd.DataFrame):
+      """Determine the appropriate chart type for the query and data."""
+      if df.empty:
+          return None, []
+      
+      query_lower = query.lower()
+      columns = df.columns
+      
+      # Check for date-based columns
+      date_cols = [col for col in columns if "date" in col.lower() or df[col].dtype in ["datetime64[ns]"]]
+      numeric_cols = [col for col in columns if df[col].dtype in ["int64", "float64"] and "id" not in col.lower()]
+      categorical_cols = [col for col in columns if df[col].dtype == "object" and "name" in col.lower() or "category" in col.lower()]
+      
+      # Line chart for time series
+      if date_cols and numeric_cols:
+          return "line", [date_cols[0], numeric_cols[0]]
+      
+      # Pie chart for distributions
+      if "distribution" in query_lower or "share" in query_lower or "percentage" in query_lower:
+          if categorical_cols and numeric_cols:
+              return "pie", [categorical_cols[0], numeric_cols[0]]
+      
+      # Bar chart for comparisons
+      if categorical_cols and numeric_cols:
+          return "bar", [categorical_cols[0], numeric_cols[0]]
+      
+      return None, []
+  
+  # Streamlit UI
+  st.markdown("""
+      <div style='text-align: center;'>
+          <img src='dist/img/AcaSquad.png' alt='AcaSquad Logo' width='150'>
+          <h1>AcaSquad AI</h1>
+          <p style='font-size: 18px; color: #555;'>Your intelligent assistant for the SCC School Store Database.</p>
+      </div>
+  """, unsafe_allow_html=True)
+  
+  # Sidebar for user authentication and settings
+  with st.sidebar:
+      st.header("User Settings")
+      if "user_id" not in st.session_state:
+          username = st.text_input("Username")
+          password = st.text_input("Password", type="password")
+          role = st.selectbox("Role", ["Cashier", "Admin", "Owner"])
+          if st.button("Login"):
+              # Simplified authentication (replace with API call to employees table)
+              login_query = """
+              SELECT employee_id, role FROM employees 
+              WHERE email = %s AND password_hash = %s;
+              """
+              login_data = fetch_data_from_api("execute_query", {
+                  "query": login_query,
+                  "params": [username, password]  # In production, hash password
+              })
+              if login_data and login_data[0]["role"] == role:
+                  st.session_state.user_id = login_data[0]["employee_id"]
+                  st.session_state.user_role = role
+                  st.success("Logged in successfully!")
+              else:
+                  st.error("Invalid credentials or role.")
+      else:
+          st.write(f"Logged in as {st.session_state.user_role}")
+          if st.button("Logout"):
+              del st.session_state.user_id
+              del st.session_state.user_role
+              st.session_state.chat_history = []
+              st.success("Logged out.")
+  
+      st.markdown("---")
+      if st.button("Show User Guide"):
+          try:
+              with open("README.md", "r") as f:
+                  st.markdown(f.read())
+          except FileNotFoundError:
+              st.markdown("""
+              # AcaSquad AI User Guide
+              ## Overview
+              Query sales, inventory, and more with natural language.
+              ## Common Queries
+              - Sales: "Best-selling products"
+              - Inventory: "Low stock items"
+              - Employee: "Top employees" (Admin/Owner only)
+              ## Troubleshooting
+              - No data? Rephrase or check date.
+              - Errors? Contact admin.
+              """)
+  
+  # Main chat interface
+  st.markdown("### Ask a Question")
+  query = st.text_input("Enter your query (e.g., 'Best-selling products this month')", key="query_input")
+  if st.button("Submit Query") or query:
+      handle_query(query)
+  
+  # Display chat history
+  st.markdown("### Conversation History")
+  for message in st.session_state.chat_history:
+      avatar = "dist/img/Human.png" if isinstance(message, HumanMessage) else "dist/img/ai.png"
+      with st.chat_message("Human" if isinstance(message, HumanMessage) else "AI", avatar=avatar):
+          st.markdown(message.content)
