@@ -74,16 +74,43 @@ def validate_query(query):
     query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
-    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+    return any(kw in query_upper for kw in allowed_keywords)
 
 # Function to check query against schema (semantic validation)
 def validate_query_semantics(query, question, schema):
-    """Check if the query aligns with the schema and user intent, including complex joins."""
+    """Check if the query aligns with the schema and user intent."""
     try:
         query_lower = query.lower()
         question_lower = question.lower()
         
-        # Expected tables and joins
+        # Check for date-specific queries
+        if "on" in question_lower and "april 14, 2025" in question_lower:
+            if "where" not in query_lower or "2025-04-14" not in query_lower:
+                return False
+        
+        # Check for employee transaction queries
+        if "employee" in question_lower and "transaction" in question_lower:
+            if "employees" not in query_lower or "invoices" not in query_lower or "join" not in query_lower:
+                return False
+        
+        # Check for revenue/profit queries
+        if any(kw in question_lower for kw in ["revenue", "profit", "base cost", "total invoice"]):
+            if "sum" not in query_lower or "total" not in query_lower:
+                return False
+        
+        # Check for invoice details
+        if "invoice" in question_lower and "details" in question_lower:
+            if "invoices" not in query_lower:
+                return False
+        
+        # Check for employee login queries
+        if "employee" in question_lower and "log" in question_lower:
+            if "user_logins" not in query_lower or "employees" not in query_lower:
+                return False
+        
+        # Avoid redundant joins
+        join_count = query_lower.count("join")
+        required_tables = []
         table_mappings = {
             "sales": ["invoices", "invoice_details"],
             "revenue": ["invoices", "invoice_details"],
@@ -92,49 +119,15 @@ def validate_query_semantics(query, question, schema):
             "employee": ["employees", "user_logins"],
             "category": ["categories"],
             "best-selling": ["invoices", "invoice_details", "products"],
-            "reorder": ["products"]
+            "reorder": ["products"],
+            "profit": ["invoices", "invoice_details", "products"]
         }
-        
-        # Check required tables
-        required_tables = []
         for keyword, tables in table_mappings.items():
             if keyword in question_lower:
                 required_tables.extend(tables)
-        
-        if required_tables and not all(table in query_lower for table in set(required_tables)):
+        if join_count > len(set(required_tables)) * 2:
             return False
         
-        # Check join correctness for multi-table queries
-        if len(required_tables) > 1:
-            join_pairs = [
-                ("invoices", "invoice_details", "invoice_id"),
-                ("invoice_details", "products", "product_id"),
-                ("products", "categories", "category_id"),
-                ("invoices", "employees", "employee_id"),
-                ("employees", "user_logins", "employee_id")
-            ]
-            for table1, table2, key in join_pairs:
-                if table1 in query_lower and table2 in query_lower:
-                    if f"join {table2} on" not in query_lower or key not in query_lower:
-                        return False
-        
-        # Check expected columns
-        select_clause = query_lower.split("from")[0]
-        if "revenue" in question_lower or "total" in question_lower:
-            if not any(col in select_clause for col in ["total", "subtotal", "total_price"]):
-                return False
-        elif "stock" in question_lower or "reorder" in question_lower:
-            if "stock" not in select_clause:
-                return False
-        elif "employee" in question_lower and "sales" in question_lower:
-            if not any(col in select_clause for col in ["total", "quantity"]):
-                return False
-        
-        # Avoid redundant joins
-        join_count = query_lower.count("join")
-        if join_count > len(set(required_tables)) * 2:
-            return False  # Too many joins for the required tables
-                
         return True
     except Exception:
         return False
@@ -142,18 +135,17 @@ def validate_query_semantics(query, question, schema):
 # Function to simulate query execution
 def simulate_query_execution(query, question, schema):
     """Simulate query execution with schema validation first."""
-    # First, validate semantics to avoid unnecessary API calls
     if not validate_query_semantics(query, question, schema):
         return False
     
     try:
-        # Use EXPLAIN to check query validity without full execution
+        # Use EXPLAIN to check query validity
         explain_query = f"EXPLAIN {query}"
         data = fetch_data_from_api("execute_query", {"query": explain_query})
         if data is None:
             return False
         
-        # If EXPLAIN passes, test with LIMIT 1
+        # Test with LIMIT 1
         test_query = query.split(";")[0] + " LIMIT 1;"
         data = fetch_data_from_api("execute_query", {"query": test_query})
         return data is not None and (not isinstance(data, list) or len(data) > 0)
@@ -171,8 +163,8 @@ def rerank_proposals(proposals, question, schema):
     {queries}
     Guidelines:
     - Ensure queries reference correct tables and columns for the intent.
-    - Prioritize queries with appropriate aggregations (e.g., SUM for sales).
-    - Penalize queries missing key conditions (e.g., WHERE i.total > 0 for invoices).
+    - Prioritize queries with appropriate aggregations (e.g., SUM for revenue).
+    - Penalize queries missing key conditions (e.g., WHERE for dates).
     Provide the best query.
     """
     rerank_prompt = ChatPromptTemplate.from_template(rerank_template)
@@ -182,14 +174,13 @@ def rerank_proposals(proposals, question, schema):
         | StrOutputParser()
     )
     
-    # Filter semantically valid proposals
     valid_proposals = [
         p for p in proposals
         if validate_query_semantics(p, question, schema)
     ]
     
     if not valid_proposals:
-        valid_proposals = proposals  # Fallback to avoid empty list
+        valid_proposals = proposals
     
     queries_str = "\n".join([f"{i+1}. {p}" for i, p in enumerate(valid_proposals)])
     best_query = chain.invoke({
@@ -256,17 +247,15 @@ def log_user_feedback(query, response, feedback):
 # Function for fallback queries
 def get_fallback_response(question):
     """Generate a fallback response for ambiguous or failed queries."""
-    clarifying_questions = {
-        "sales": "Could you specify if you want sales by product, category, or time period? Try 'best-selling products this month'.",
-        "revenue": "Do you want total revenue, daily revenue, or by category? Try 'total revenue this year'.",
-        "products": "Are you asking about product stock, sales, or categories? Try 'current stock levels'.",
-        "inventory": "Would you like to see stock levels, reorder needs, or logs? Try 'products below reorder level'.",
-        "employee": "Are you interested in employee sales, logins, or performance? Try 'top-performing employee'."
-    }
     question_lower = question.lower()
-    for keyword, clarification in clarifying_questions.items():
-        if keyword in question_lower:
-            return clarification, None
+    if "employee" in question_lower and "transaction" in question_lower:
+        return "Try 'employee with the most transactions on April 14, 2025'.", None
+    if any(kw in question_lower for kw in ["revenue", "profit", "base cost", "total invoice"]):
+        return "Try 'total revenue and profit for April 14, 2025'.", None
+    if "invoice" in question_lower:
+        return "Try 'invoices on April 14, 2025'.", None
+    if "employee" in question_lower and "log" in question_lower:
+        return "Try 'employees logged in on April 14, 2025'.", None
     return "Your query is unclear. Try a predefined query from the sidebar, like 'daily sales trend'.", None
 
 # Function to define SQL chain for query generation
@@ -284,380 +273,36 @@ def get_sql_chain():
     """
 
     template = """
-    You are an AI assistant helping a user retrieve data from the SCC School Store Database via an API.
-    Based on the provided table schema, generate an accurate SQL query to answer the user's question.
+    You are an AI assistant generating SQL queries for the SCC School Store Database.
+    Given the schema and user query, produce a valid SQL query.
 
     **Database Schema:**
     {schema}
 
-    **Current date in Singapore:** {current_sg_date} (format: YYYY-MM-DD)
-    **Current datetime in Singapore:** {current_sg_datetime} (format: YYYY-MM-DD HH:MM:SS)
+    **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
+    **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
 
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
     - Use explicit INNER JOINs for data integrity.
-    - Group by unique identifiers (e.g., product_id, invoice_id) alongside names to avoid ambiguity.
-    - For 'best-selling products,' use SUM(id.quantity) and order by total_sold DESC.
-    - For revenue, use SUM(i.total) or SUM(id.total_price) as specified.
-    - Exclude canceled/invalid invoices with WHERE i.total > 0.
-    - Return empty result sets for no data, not errors.
-    - Use DECIMAL for monetary fields; INTEGER for quantities.
-    - Provide only the SQL query, without explanations.
-
-    **Specific Query Mappings:**
-    - "overview statistics":
-      SELECT 
-          ROUND(AVG(i.total), 2) AS avg_sales_value,
-          SUM(i.discount) AS total_discount,
-          COUNT(DISTINCT p.product_id) AS total_products,
-          COUNT(DISTINCT c.category_id) AS total_categories,
-          COUNT(i.invoice_id) AS total_invoices,
-          SUM(i.total) AS total_revenue,
-          SUM(i.total - i.discount) AS net_total,
-          SUM(id.quantity * p.purchase_price) AS base_cost,
-          (SUM(i.total - i.discount) - SUM(id.quantity * p.purchase_price)) AS profit
-      FROM invoices i
-      INNER JOIN invoice_details id ON id.invoice_id = i.invoice_id
-      INNER JOIN products p ON id.product_id = p.product_id
-      INNER JOIN categories c ON p.category_id = c.category_id
-      WHERE i.total > 0
-      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s')
-          BETWEEN '2025-02-14 00:00:00' AND '2025-04-13 13:41:26';
-    - "best-selling products of all time":
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC;
-    - "top 5 best-selling products this month":
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE()) 
-      GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC 
-      LIMIT 5;
-    - "product with highest sales this week":
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      AND i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE() 
-      GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC 
-      LIMIT 1;
-    - "best-selling products in each category":
-      SELECT c.category_name, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      INNER JOIN categories c ON p.category_id = c.category_id 
-      WHERE i.total > 0 
-      GROUP BY c.category_id, c.category_name, p.product_id, p.product_name 
-      HAVING SUM(id.quantity) = (
-          SELECT MAX(total_sold)
-          FROM (
-              SELECT SUM(id2.quantity) AS total_sold
-              FROM invoice_details id2
-              INNER JOIN products p2 ON id2.product_id = p2.product_id
-              INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
-              WHERE i2.total > 0 AND p2.category_id = c.category_id
-              GROUP BY p2.product_id
-          ) AS sub
-      )
-      ORDER BY c.category_name;
-    - "sales trend over the past year":
-      SELECT DATE_FORMAT(i.order_date, '%Y-%m') AS month, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      AND i.order_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) 
-      GROUP BY DATE_FORMAT(i.order_date, '%Y-%m') 
-      ORDER BY month;
-    - "daily sales trend for this month":
-      SELECT i.order_date, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE()) 
-      GROUP BY i.order_date 
-      ORDER BY i.order_date;
-    - "day of the week with highest sales":
-      SELECT DAYNAME(i.order_date) AS day_of_week, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      GROUP BY DAYNAME(i.order_date) 
-      ORDER BY total_sold DESC 
-      LIMIT 1;
-    - "total revenue this year":
-      SELECT SUM(i.total) AS total_revenue 
-      FROM invoices i 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE());
-    - "total revenue for today":
-      SELECT SUM(i.total) AS total_revenue 
-      FROM invoices i 
-      WHERE i.total > 0 
-      AND i.order_date = CURDATE();
-    - "average daily revenue this month":
-      SELECT AVG(daily_total) AS avg_daily_revenue 
-      FROM (
-          SELECT i.order_date, SUM(i.total) AS daily_total 
-          FROM invoices i 
-          WHERE i.total > 0 
-          AND YEAR(i.order_date) = YEAR(CURDATE()) 
-          AND MONTH(i.order_date) = MONTH(CURDATE()) 
-          GROUP BY i.order_date
-      ) AS daily;
-    - "revenue breakdown by product category":
-      SELECT c.category_name, SUM(id.total_price) AS total_revenue 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      INNER JOIN categories c ON p.category_id = c.category_id 
-      WHERE i.total > 0 
-      GROUP BY c.category_id, c.category_name 
-      ORDER BY total_revenue DESC;
-    - "products out of stock":
-      SELECT p.product_name, p.stock 
-      FROM products p 
-      WHERE p.stock = 0;
-    - "products below reorder level":
-      SELECT p.product_name, p.stock, p.reorder_level 
-      FROM products p 
-      WHERE p.stock < p.reorder_level;
-    - "current stock levels for all products":
-      SELECT p.product_name, p.stock 
-      FROM products p 
-      ORDER BY p.product_name;
-    - "total value of current inventory":
-      SELECT SUM(p.stock * p.sale_price) AS total_inventory_value 
-      FROM products p;
-    - "value of inventory by category":
-      SELECT c.category_name, SUM(p.stock * p.sale_price) AS category_value 
-      FROM products p 
-      INNER JOIN categories c ON p.category_id = c.category_id 
-      GROUP BY c.category_id, c.category_name;
-    - "total number of products":
-      SELECT COUNT(*) AS total_products 
-      FROM products;
-    - "product categories":
-      SELECT c.category_name 
-      FROM categories c;
-    - "products added in last 30 days":
-      SELECT p.product_name, p.created_at 
-      FROM products p 
-      WHERE p.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY);
-    - "top-performing employee this month":
-      SELECT e.first_name, e.last_name, SUM(i.total) AS total_sales 
-      FROM invoices i 
-      INNER JOIN employees e ON i.employee_id = e.employee_id 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE()) 
-      GROUP BY e.employee_id, e.first_name, e.last_name 
-      ORDER BY total_sales DESC 
-      LIMIT 1;
-    - "total sales by each employee this week":
-      SELECT e.first_name, e.last_name, SUM(i.total) AS total_sales 
-      FROM invoices i 
-      INNER JOIN employees e ON i.employee_id = e.employee_id 
-      WHERE i.total > 0 
-      AND i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE() 
-      GROUP BY e.employee_id, e.first_name, e.last_name 
-      ORDER BY total_sales DESC;
-    - "employee with highest transactions today":
-      SELECT e.first_name, e.last_name, COUNT(i.invoice_id) AS transaction_count 
-      FROM invoices i 
-      INNER JOIN employees e ON i.employee_id = e.employee_id 
-      WHERE i.total > 0 
-      AND i.order_date = CURDATE() 
-      GROUP BY e.employee_id, e.first_name, e.last_name 
-      ORDER BY transaction_count DESC 
-      LIMIT 1;
-    - "currently logged in employees":
-      SELECT e.first_name, e.last_name 
-      FROM user_logins ul 
-      INNER JOIN employees e ON ul.employee_id = e.employee_id 
-      WHERE ul.login_time IS NOT NULL 
-      AND ul.logout_time IS NULL;
-    - "today’s login and logout times for all employees":
-      SELECT e.first_name, e.last_name, ul.login_time, ul.logout_time 
-      FROM user_logins ul 
-      INNER JOIN employees e ON ul.employee_id = e.employee_id 
-      WHERE DATE(ul.login_time) = CURDATE();
-    - "employee login counts this month":
-      SELECT e.first_name, e.last_name, COUNT(ul.log_id) AS login_count 
-      FROM user_logins ul 
-      INNER JOIN employees e ON ul.employee_id = e.employee_id 
-      WHERE YEAR(ul.login_time) = YEAR(CURDATE()) 
-      AND MONTH(ul.login_time) = MONTH(CURDATE()) 
-      GROUP BY e.employee_id, e.first_name, e.last_name;
-    - "sales invoices details for today":
-      SELECT i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type 
-      FROM invoices i 
-      WHERE i.order_date = CURDATE();
-    - "invoices from last week":
-      SELECT i.invoice_id, i.order_date, i.order_time, i.subtotal, i.discount, i.total, i.paid, i.due, i.payment_type 
-      FROM invoices i 
-      WHERE i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 13 DAY) AND DATE_SUB(CURDATE(), INTERVAL 7 DAY);
-    - "total amount due from unpaid invoices":
-      SELECT SUM(i.due) AS total_due 
-      FROM invoices i 
-      WHERE i.due > 0;
-    - "average transaction value this month":
-      SELECT AVG(i.total) AS avg_transaction_value 
-      FROM invoices i 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE());
-    - "most common payment method":
-      SELECT i.payment_type, COUNT(*) AS usage_count 
-      FROM invoices i 
-      WHERE i.total > 0 
-      GROUP BY i.payment_type 
-      ORDER BY usage_count DESC 
-      LIMIT 1;
-    - "percentage of cash transactions":
-      SELECT (COUNT(*) / (SELECT COUNT(*) FROM invoices WHERE total > 0)) * 100 AS cash_percentage 
-      FROM invoices i 
-      WHERE i.payment_type = 'Cash' 
-      AND i.total > 0;
-    - "card transactions this week":
-      SELECT COUNT(*) AS card_transactions 
-      FROM invoices i 
-      WHERE i.payment_type LIKE '%Card%' 
-      AND i.total > 0 
-      AND i.order_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE();
-    - "total discount given this month":
-      SELECT SUM(i.discount) AS total_discount 
-      FROM invoices i 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE());
-    - "invoices with highest discounts this month":
-      SELECT i.invoice_id, i.discount, GROUP_CONCAT(p.product_name) AS products 
-      FROM invoices i 
-      INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      WHERE i.discount > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE()) 
-      GROUP BY i.invoice_id, i.discount 
-      ORDER BY i.discount DESC 
-      LIMIT 5;
-    - "busiest hour for sales":
-      SELECT HOUR(i.order_time) AS hour, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      GROUP BY HOUR(i.order_time) 
-      ORDER BY total_sold DESC 
-      LIMIT 1;
-    - "day of week with highest foot traffic":
-      SELECT DAYNAME(i.order_date) AS day_of_week, COUNT(i.invoice_id) AS transaction_count 
-      FROM invoices i 
-      WHERE i.total > 0 
-      GROUP BY DAYNAME(i.order_date) 
-      ORDER BY transaction_count DESC 
-      LIMIT 1;
-    - "average transactions per day":
-      SELECT AVG(daily_count) AS avg_transactions 
-      FROM (
-          SELECT COUNT(*) AS daily_count 
-          FROM invoices i 
-          WHERE i.total > 0 
-          GROUP BY i.order_date
-      ) AS daily;
-    - "average time between login and first transaction":
-      SELECT e.first_name, e.last_name, AVG(TIMESTAMPDIFF(MINUTE, ul.login_time, MIN(STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s')))) AS avg_minutes 
-      FROM user_logins ul 
-      INNER JOIN employees e ON ul.employee_id = e.employee_id 
-      INNER JOIN invoices i ON ul.employee_id = i.employee_id 
-      WHERE i.total > 0 
-      AND i.order_date = DATE(ul.login_time) 
-      GROUP BY e.employee_id, e.first_name, e.last_name;
-    - "transactions in last hour":
-      SELECT COUNT(*) AS transaction_count 
-      FROM invoices i 
-      WHERE i.total > 0 
-      AND STR_TO_DATE(CONCAT(i.order_date, ' ', i.order_time), '%Y-%m-%d %H:%i:%s') >= DATE_SUB(NOW(), INTERVAL 1 HOUR);
-    - "inventory changes this week for all products":
-      SELECT p.product_name, il.change_type, il.quantity, il.log_date, il.notes 
-      FROM inventory_logs il 
-      INNER JOIN products p ON il.product_id = p.product_id 
-      WHERE il.log_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE();
-    - "recent inventory adjustments":
-      SELECT p.product_name, il.change_type, il.quantity, il.log_date, il.notes 
-      FROM inventory_logs il 
-      INNER JOIN products p ON il.product_id = p.product_id 
-      ORDER BY il.log_date DESC 
-      LIMIT 10;
-    - "profit margins for all products":
-      SELECT p.product_id, p.product_name, ROUND((p.sale_price - p.purchase_price) / p.sale_price * 100, 2) AS profit_margin 
-      FROM products p 
-      ORDER BY profit_margin DESC;
-    - "total units sold for all products this month":
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      AND MONTH(i.order_date) = MONTH(CURDATE()) 
-      GROUP BY p.product_id, p.product_name 
-      ORDER BY total_sold DESC;
-    - "sales history for all products this year":
-      SELECT p.product_name, DATE_FORMAT(i.order_date, '%Y-%m') AS month, SUM(id.quantity) AS total_sold 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      GROUP BY p.product_id, p.product_name, DATE_FORMAT(i.order_date, '%Y-%m') 
-      ORDER BY p.product_name, month;
-    - "category with highest sales this year":
-      SELECT c.category_name, SUM(id.total_price) AS total_revenue 
-      FROM invoice_details id 
-      INNER JOIN products p ON id.product_id = p.product_id 
-      INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
-      INNER JOIN categories c ON p.category_id = c.category_id 
-      WHERE i.total > 0 
-      AND YEAR(i.order_date) = YEAR(CURDATE()) 
-      GROUP BY c.category_id, c.category_name 
-      ORDER BY total_revenue DESC 
-      LIMIT 1;
-    - "average price of products in each category":
-      SELECT c.category_name, AVG(p.sale_price) AS avg_price 
-      FROM products p 
-      INNER JOIN categories c ON p.category_id = c.category_id 
-      GROUP BY c.category_id, c.category_name;
-    - "products to reorder soon":
-      SELECT p.product_name, p.stock, p.reorder_level 
-      FROM products p 
-      WHERE p.stock < p.reorder_level;
-    - "products within 10% of reorder level":
-      SELECT COUNT(*) AS product_count 
-      FROM products p 
-      WHERE p.stock <= p.reorder_level * 1.1;
+    - Group by unique IDs (e.g., product_id, invoice_id) with names.
+    - For specific dates (e.g., "April 14, 2025"), use WHERE order_date = '2025-04-14'.
+    - For employee transactions, join employees and invoices on employee_id.
+    - For revenue, use SUM(i.total); for profit, use SUM(i.total - id.quantity * p.purchase_price).
+    - For profit margin, calculate (profit / revenue * 100).
+    - Exclude invalid invoices with WHERE i.total > 0.
+    - Use DECIMAL for monetary fields, INTEGER for quantities.
+    - Return only the SQL query, no explanations.
 
     **Guidelines:**
-    - "Sales" means SUM(id.quantity) unless revenue (SUM(i.total)) is specified.
+    - "Sales" means SUM(id.quantity) unless revenue is specified.
     - Use 'CURDATE()' for today, 'DATE_SUB(CURDATE(), INTERVAL X)' for periods.
-    - For discounts, use i.discount from invoices table.
-    - Ensure monetary values use ROUND(x, 2) for precision.
-    - Verify category counts against product counts for consistency.
+    - For discounts, use i.discount.
+    - ROUND monetary values to 2 decimals.
+    - Verify category counts vs. product counts.
 
-    **User Question:** {question}
+    **User Query:** {question}
     """
 
     prompt = ChatPromptTemplate.from_template(template)
@@ -680,7 +325,6 @@ def get_sql_chain():
         }
     )
 
-    # Cache for common queries
     @st.cache_data(show_spinner=False)
     def cached_query(_question, _schema, _chat_summary, _current_sg_date, _current_sg_datetime):
         """Cache SQL query results for common questions."""
@@ -702,7 +346,7 @@ def get_sql_chain():
                 validate_query_semantics(cleaned_query, question, schema) and 
                 simulate_query_execution(cleaned_query, question, schema)):
                 valid_proposals.append(cleaned_query)
-        return valid_proposals if valid_proposals else [list(proposals.values())[0]]  # Fallback
+        return valid_proposals if valid_proposals else [list(proposals.values())[0]]
 
     aggregator_template = """
     Synthesize the best SQL query from these proposals:
@@ -711,7 +355,7 @@ def get_sql_chain():
     **Original Question:** {question}
     **Schema:** {schema}
 
-    Return ONLY the final SQL query without any explanations or formatting.
+    Return ONLY the final SQL query without explanations or formatting.
     The query must:
     1. Start with SELECT
     2. Use explicit INNER JOIN syntax
@@ -762,7 +406,7 @@ def get_response(user_query: str, chat_history: list):
         "sales", "invoice", "details", "product", "category", "stock", "revenue",
         "order", "employee", "payment", "quantity", "price", "total", "subtotal",
         "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve", "overview"
+        "provide", "get", "fetch", "retrieve", "overview", "profit", "base cost"
     ]
 
     schema = """
@@ -801,20 +445,26 @@ def get_response(user_query: str, chat_history: list):
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
 
-        if not validate_query(query) or not validate_query_semantics(query, user_query, schema):
-            log_data = {"query": user_query, "error": "Invalid query", "timestamp": datetime.datetime.now().isoformat()}
-            with open("error_log.json", "a") as f:
+        if not validate_query(query):
+            log_data = {"query": user_query, "generated_sql": query, "error": "Syntactic validation failed", "timestamp": datetime.datetime.now().isoformat()}
+            with open("query_log.json", "a") as f:
+                json.dump(log_data, f)
+                f.write("\n")
+            return get_fallback_response(user_query)
+        
+        if not validate_query_semantics(query, user_query, schema):
+            log_data = {"query": user_query, "generated_sql": query, "error": "Semantic validation failed", "timestamp": datetime.datetime.now().isoformat()}
+            with open("query_log.json", "a") as f:
                 json.dump(log_data, f)
                 f.write("\n")
             return get_fallback_response(user_query)
 
-        # Clear cache for critical queries
-        if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
+        if any(kw in user_query.lower() for kw in ["revenue", "sales", "profit", "inventory", "overview"]):
             fetch_data_from_api.clear()
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
-            log_data = {"query": user_query, "error": "No data returned", "timestamp": datetime.datetime.now().isoformat()}
-            with open("error_log.json", "a") as f:
+            log_data = {"query": user_query, "generated_sql": query, "error": "No data returned", "timestamp": datetime.datetime.now().isoformat()}
+            with open("query_log.json", "a") as f:
                 json.dump(log_data, f)
                 f.write("\n")
             return get_fallback_response(user_query)
@@ -892,7 +542,6 @@ def handle_query(query: str):
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
-        # Add feedback button
         feedback_key = f"feedback_{len(st.session_state.chat_history)}"
         feedback = st.radio(
             "Was this response helpful?",
@@ -908,15 +557,14 @@ def handle_query(query: str):
         
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
-            # Preprocess data for charts
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "total_revenue", "avg_price", "net_total", "base_cost", "profit", "avg_sales_value", "total_inventory_value", "category_value"]):
+                if any(mon in col.lower() for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "discount", "revenue", "profit", "base_cost"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_products", "total_categories", "total_invoices"]:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')  # Keep as quantity
+                elif col.lower() in ["total_sold", "transaction_count", "login_count", "product_count", "total_invoices"]:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 with st.spinner("Generating chart..."):
@@ -926,12 +574,12 @@ def handle_query(query: str):
                         df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'line':
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "transaction_count", "login_count", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
@@ -978,7 +626,6 @@ def main():
         if st.session_state.user["role"] in ["Owner", "Admin"]:
             st.title("Chat with our AcaSquad AI")
 
-            # Sidebar setup
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
@@ -987,12 +634,10 @@ def main():
                     st.session_state.user = None
                     st.rerun()
                 
-                # Add Clear Chat button
                 if st.button("Clear Chat"):
                     clear_chat()
                     st.rerun()
 
-                # Quick Queries Expanders
                 with st.expander("📈 Sales Performance"):
                     sales_queries = [
                         "What are the best-selling products of all time?",
@@ -1083,7 +728,6 @@ def main():
                         if st.button(q, key=f"misc_{q}"):
                             handle_query(q)
 
-            # Main area setup
             if "chat_history" not in st.session_state:
                 st.session_state.chat_history = [
                     AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
