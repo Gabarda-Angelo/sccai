@@ -16,6 +16,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
+import re
 
 # Set page configuration
 st.set_page_config(
@@ -145,12 +146,17 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
 
 # Validate SQL queries
 def validate_query(query):
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
-    query_upper = query.upper()
-    if not query_upper.startswith("SELECT"):
+    # Normalize query: remove extra whitespace, convert to uppercase
+    query_normalized = " ".join(query.split()).upper()
+    if not query_normalized.startswith("SELECT"):
         return False
     forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE"]
-    return all(kw not in query_upper for kw in forbidden) and any(kw in query_upper for kw in allowed_keywords)
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "HAVING"]
+    # Check for forbidden keywords
+    if any(kw in query_normalized for kw in forbidden):
+        return False
+    # Check for at least one allowed keyword
+    return any(kw in query_normalized for kw in allowed_keywords)
 
 # Classify query domain
 def classify_query(query: str) -> str:
@@ -166,19 +172,29 @@ def classify_query(query: str) -> str:
 # Plan multi-hop query
 def plan_multi_hop_query(query: str, schema: str) -> list:
     planner_template = """
-    Decompose the query into sequential SQL steps.
+    Decompose the query into sequential SQL steps for the SCC School Store Database.
     **Schema:** {schema}
     **Query:** {query}
-    Return a JSON list of steps, each with 'desc' and 'sql' keys.
-    Example: [{"desc": "Get top products", "sql": "SELECT ..."}]
+    Return a JSON list of steps, each with 'description' and 'sql' keys.
+    Instructions:
+    - Generate only SELECT queries using INNER JOINs.
+    - Avoid INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE.
+    - For sales queries like 'top selling products', use SUM(id.quantity) from invoice_details, join with products and invoices, and ORDER BY DESC.
+    - For invoice queries with dates (e.g., 'sales invoice details on April 14, 2025'), filter invoices by order_date (format: 'YYYY-MM-DD') and include details from invoice_details.
+    - Ensure each SQL query is valid and includes FROM, GROUP BY, or WHERE as needed.
+    Example:
+    [
+        {{"description": "Get top products", "sql": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM invoice_details id INNER JOIN products p ON id.product_id = p.product_id INNER JOIN invoices i ON id.invoice_id = i.invoice_id WHERE i.total > 0 GROUP BY p.product_id, p.product_name ORDER BY total_sold DESC LIMIT 5;"}},
+        {{"description": "Get invoice details for a date", "sql": "SELECT i.invoice_id, i.order_date, i.total, id.quantity, p.product_name FROM invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id INNER JOIN products p ON id.product_id = p.product_id WHERE i.order_date = '2025-04-14' AND i.total > 0;"}}
+    ]
     """
     prompt = ChatPromptTemplate.from_template(planner_template)
     chain = prompt | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"]) | StrOutputParser()
     try:
         steps = json.loads(chain.invoke({"query": query, "schema": schema}))
-        return steps if isinstance(steps, list) else [{"desc": "Execute query", "sql": query}]
+        return steps if isinstance(steps, list) else [{"description": "Execute query", "sql": ""}]
     except json.JSONDecodeError:
-        return [{"desc": "Execute query", "sql": query}]
+        return [{"description": "Execute query", "sql": ""}]
 
 # Define specialized SQL chain
 def get_sql_chain(domain: str):
@@ -218,7 +234,7 @@ def get_sql_chain(domain: str):
         """,
         "financial": """
         Focus on invoices, invoice_details.
-        Example: SELECT SUM(i.total) FROM invoices i WHERE i.total > 0;
+        Example: SELECT i.invoice_id, i.order_date, i.total FROM invoices i WHERE i.total > 0;
         """,
         "operations": """
         Focus on invoices, user_logins.
@@ -377,18 +393,66 @@ def get_response(user_query: str, chat_history: list):
         - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
         """
 
+        # Check for multi-domain or complex query
+        domain = classify_query(user_query)
+        if isinstance(domain, list) or " and " in user_query.lower():
+            return orchestrate_query(user_query, chat_history, current_sg_date, current_sg_datetime)
+
+        # Plan multi-hop query
         steps = plan_multi_hop_query(user_query, schema)
         all_data = []
         for step in steps:
-            query = step["sql"].strip()
+            query = step.get("sql", "").strip()
+            step_desc = step.get("description", "Execute query")
+            st.write(f"Raw SQL from plan_multi_hop_query for step '{step_desc}': {query}")  # Debug raw output
+            # Extract limit for sales queries
+            limit = 5
+            if "top" in user_query.lower() and "selling" in user_query.lower():
+                match = re.search(r'top\s+(\d+)', user_query.lower())
+                limit = int(match.group(1)) if match else 5
+            # Fallback for sales queries
+            if not query and "sell" in user_query.lower():
+                query = f"""
+                SELECT p.product_name, SUM(id.quantity) as total_sold 
+                FROM invoice_details id 
+                INNER JOIN products p ON id.product_id = p.product_id 
+                INNER JOIN invoices i ON id.invoice_id = i.invoice_id 
+                WHERE i.total > 0 
+                GROUP BY p.product_id, p.product_name 
+                ORDER BY total_sold DESC 
+                LIMIT {limit};
+                """
+                step_desc = f"Get top {limit} selling products"
+            # Fallback for invoice queries
+            elif not query and "invoice" in user_query.lower():
+                # Parse date from query
+                date_match = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},\s+\d{4}', user_query.lower())
+                date_str = current_sg_date
+                if date_match:
+                    try:
+                        date_obj = datetime.datetime.strptime(date_match.group(0), "%B %d, %Y")
+                        date_str = date_obj.strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+                query = f"""
+                SELECT i.invoice_id, i.order_date, i.total, id.quantity, p.product_name 
+                FROM invoices i 
+                INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id 
+                INNER JOIN products p ON id.product_id = p.product_id 
+                WHERE i.order_date = '{date_str}' AND i.total > 0;
+                """
+                step_desc = f"Get invoice details for {date_str}"
+            # Normalize query for validation
+            query = " ".join(query.split()).strip()
+            st.write(f"Generated SQL for step '{step_desc}': {query}")  # Debugging output
             if not validate_query(query):
-                return "Invalid query generated.", None
+                return f"Invalid query generated for step: {step_desc}.", None
             if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
                 fetch_data_from_api.clear()
             data = fetch_data_from_api("execute_query", {"query": query})
             if data is None:
-                return f"No data for step: {step['desc']}.", None
-            all_data.append({"step": step["desc"], "data": data})
+                return f"No data for step: {step_desc}.", None
+            all_data.append({"step": step_desc, "data": data})
 
         response_template = """
         Generate a response based on:
