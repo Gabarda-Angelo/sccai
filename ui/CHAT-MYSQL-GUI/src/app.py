@@ -8,13 +8,13 @@ import pytz
 import re
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from langchain_community.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 import requests
 import os
 
@@ -328,13 +328,11 @@ def plan_multi_hop_query(query: str, schema: str) -> list:
     **Instructions:**
     - Break the query into logical steps, each requiring a single SQL query.
     - Ensure steps are ordered so later steps can use results from earlier ones.
-    - For each step, provide:
-      - A brief description (e.g., "Get top-selling products").
-      - The SQL query to execute.
+    - For each step, provide a JSON object with 'desc' and 'sql' keys.
     - Return a JSON list of steps, e.g.:
       [
-        {"description": "Get top-selling products", "sql": "SELECT ..."},
-        {"description": "Get stock levels", "sql": "SELECT ..."}
+        {{"desc": "Get top-selling products", "sql": "SELECT ..."}},
+        {{"desc": "Get stock levels", "sql": "SELECT ..."}}
       ]
     - If the query is simple, return one step.
     """
@@ -349,7 +347,7 @@ def plan_multi_hop_query(query: str, schema: str) -> list:
         steps = json.loads(steps_json)
         return steps
     except json.JSONDecodeError:
-        return [{"description": "Execute query directly", "sql": query}]
+        return [{"desc": "Execute query directly", "sql": query}]
 
 def orchestrate_query(query: str, chat_history: list, current_sg_date: str, current_sg_datetime: str):
     """Orchestrate multi-domain queries by coordinating agents."""
@@ -452,15 +450,15 @@ def get_response(user_query: str, history_tuple: tuple) -> tuple:
                     query = recovery_query
                 else:
                     log_query(query, st.session_state.get("user_id", "unknown"), False)
-                    return f"Failed to generate a valid query for step: {step['description']}.", None
+                    return f"Failed to generate a valid query for step: {step['desc']}.", None
 
             if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview"]):
                 fetch_data_from_api.clear()
             data = fetch_data_from_api("execute_query", {"query": query})
             log_query(query, st.session_state.get("user_id", "unknown"), data is not None)
             if data is None:
-                return f"Couldn't retrieve data for step: {step['description']}.", None
-            all_data.append({"step": step["description"], "data": data})
+                return f"Couldn't retrieve data for step: {step['desc']}.", None
+            all_data.append({"step": step["desc"], "data": data})
 
         # Aggregate results
         response_template = """
