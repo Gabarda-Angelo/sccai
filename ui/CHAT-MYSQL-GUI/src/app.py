@@ -18,6 +18,9 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import re
 import logging
+import seaborn as sns
+import uuid
+from typing import Dict, List, Optional, Tuple
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +34,7 @@ st.set_page_config(
 )
 
 # Function to show pop-up messages
-def show_popup(message):
+def show_popup(message: str) -> None:
     components.html(
         f"""
         <script>
@@ -50,11 +53,15 @@ if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+        AIMessage(content="Hello! I'm your AcaSquad AI assistant. Ask me anything about your store.")
     ]
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
+if "query_cache" not in st.session_state:
+    st.session_state.query_cache = {}
 
 # Function to authenticate user via API
-def authenticate(email, password):
+def authenticate(email: str, password: str) -> bool:
     try:
         response = requests.post(
             st.secrets["API_URL"],
@@ -78,14 +85,14 @@ def authenticate(email, password):
 
 # Initialize vector store for RAG
 @lru_cache(maxsize=1)
-def initialize_vector_store():
-    products_query = "SELECT product_id, product_name FROM products;"
+def initialize_vector_store() -> Optional[FAISS]:
+    products_query = "SELECT product_id, product_name, description FROM products;"
     categories_query = "SELECT category_id, category_name FROM categories;"
     products_data = fetch_data_from_api("execute_query", {"query": products_query})
     categories_data = fetch_data_from_api("execute_query", {"query": categories_query})
     
     texts = (
-        [item["product_name"] for item in products_data if item.get("product_name")] +
+        [f"{item['product_name']}: {item.get('description', '')}" for item in products_data if item.get('product_name')] +
         [item["category_name"] for item in categories_data if item.get("category_name")]
     )
     metadatas = (
@@ -114,7 +121,7 @@ def fuzzy_match_text(query: str) -> str:
     if not st.session_state.vector_store:
         return json.dumps([])
     try:
-        results = st.session_state.vector_store.similarity_search(query, k=3)
+        results = st.session_state.vector_store.similarity_search(query, k=5)
         matches = [
             {"text": res.page_content, "type": res.metadata.get("type", ""), "id": res.metadata.get("id", "")}
             for res in results if res.page_content and res.metadata
@@ -126,8 +133,8 @@ def fuzzy_match_text(query: str) -> str:
         return json.dumps([])
 
 # Fetch data from API with caching
-@st.cache_data
-def fetch_data_from_api(action: str, params: dict = None) -> dict:
+@st.cache_data(ttl=300)
+def fetch_data_from_api(action: str, params: dict = None) -> Optional[Dict]:
     try:
         payload = {"action": action, "key": st.secrets["API_KEY"]}
         if params:
@@ -163,7 +170,7 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
         return None
 
 # Validate SQL queries
-def validate_query(query):
+def validate_query(query: str) -> bool:
     if not query:
         logger.warning("Validation failed: Query is empty")
         return False
@@ -197,25 +204,27 @@ def classify_query(query: str) -> str:
         return "misc"
 
 # Plan multi-hop query
-def plan_multi_hop_query(query: str, schema: str) -> list:
+def plan_multi_hop_query(query: str, schema: str) -> List[Dict[str, str]]:
     planner_template = """
     Decompose the query into sequential SQL steps for the SCC School Store Database.
     **Schema:** {schema}
     **Query:** {query}
     Return a JSON list of steps, each with 'description' and 'sql' keys.
     Instructions:
-    - Generate only SELECT queries using INNER JOINs.
+    - Generate only SELECT queries using INNER JOINs or LEFT JOINs where appropriate.
     - Avoid INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE.
     - For sales queries like 'top selling products', use SUM(id.quantity) from invoice_details, join with products and invoices, and ORDER BY DESC.
     - For invoice queries with dates (e.g., 'sales invoice details on April 14, 2025'), filter invoices by order_date (format: 'YYYY-MM-DD') and include details from invoice_details.
     - For financial queries like 'revenue, profit', calculate SUM(i.total) for revenue, SUM(id.quantity * p.purchase_price) for cost, and derive profit and margin.
     - For employee queries like 'logged in details', use user_logins and employees, filter by login_time or date.
+    - For inventory queries, use products and inventory_logs, filter by stock or log_date.
     - Ensure each SQL query is valid and includes FROM, GROUP BY, or WHERE as needed.
+    - Handle complex queries by breaking into intermediate steps (e.g., aggregate sales then join with categories).
     Example:
     [
         {{"description": "Get top products", "sql": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM invoice_details id INNER JOIN products p ON id.product_id = p.product_id INNER JOIN invoices i ON id.invoice_id = i.invoice_id WHERE i.total > 0 GROUP BY p.product_id, p.product_name ORDER BY total_sold DESC LIMIT 5;"}},
         {{"description": "Get invoice details for a date", "sql": "SELECT i.invoice_id, i.order_date, i.total, id.quantity, p.product_name FROM invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id INNER JOIN products p ON id.product_id = p.product_id WHERE i.order_date = '2025-04-14' AND i.total > 0;"}},
-        {{"description": "Get financial metrics", "sql": "SELECT SUM(i.total) as revenue, SUM(id.quantity * p.purchase_price) as base_cost, (SUM(i.total) - SUM(id.quantity * p.purchase_price)) as profit, ((SUM(i.total) - SUM(id.quantity * p.purchase_price)) / SUM(i.total) * 100) as profit_margin FROM invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id INNER JOIN products p ON id.product_id = p.product_id WHERE i.total > 0;"}},
+        {{"description": "Get financial metrics", "sql": "SELECT SUM(i.total) as revenue, SUM(id.quantity * p.purchase_price) as base_cost, (SUM(i.total) - SUM(id.quantity * p.purchase_price)) as profit, ((SUM(i.total) - SUM(id.quantity * p.purchase_price)) / NULLIF(SUM(i.total), 0) * 100) as profit_margin FROM invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id INNER JOIN products p ON id.product_id = p.product_id WHERE i.total > 0;"}},
         {{"description": "Get login details", "sql": "SELECT e.first_name, e.last_name, ul.login_time FROM employees e INNER JOIN user_logins ul ON e.employee_id = ul.employee_id WHERE DATE(ul.login_time) = '2025-04-15';"}}
     ]
     """
@@ -232,19 +241,25 @@ def plan_multi_hop_query(query: str, schema: str) -> list:
 def get_sql_chain(domain: str):
     schema = """
     Database Schema:
-    - categories: category_id (PK), category_name, created_at
-    - employees: employee_id (PK), first_name, last_name, role, email, password_hash, created_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type, quantity, log_date, notes
-    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+    - categories: category_id (PK), category_name, created_at, updated_at
+    - employees: employee_id (PK), first_name, last_name, role (Owner, Admin, Cashier), email, password_hash, created_at, updated_at, last_password_change
+    - inventory_logs: log_id (PK), product_id (FK to products), change_type (Sale, Restock, Adjustment), quantity, log_date, notes, created_at, updated_at
+    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash, Card, Check), created_at, updated_at
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
     - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
+    - discount_logs: discount_id (PK), invoice_id (FK to invoices, nullable), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
+    - void_logs: void_id (PK), invoice_id (FK to invoices, nullable), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
+    - action_requests: request_id (PK), admin_id (FK to employees), action_type (EDIT, DELETE, UPDATE, INSERT), table_name, record_id, status (PENDING, APPROVED, DENIED), approver_id (FK to employees), created_at, updated_at
+    - admin_action_logs: log_id (PK), admin_id (FK to employees), action_type (EDIT, DELETE, UPDATE, INSERT), table_name, record_id, request_id (FK to action_requests), created_at
+    - sync_log: id (PK), table_name, record_id, action (INSERT, UPDATE, DELETE), timestamp, synced
     """
 
     domain_prompts = {
         "sales": """
-        Focus on invoices, invoice_details, products.
+        Focus on invoices, invoice_details, products, discount_logs, void_logs.
         Use SUM(id.quantity) for quantities, SUM(i.total) for revenue.
+        Include discount_logs for discount details and void_logs for voided transactions.
         Example: SELECT p.product_name, SUM(id.quantity) as total_sold 
         FROM invoice_details id 
         INNER JOIN products p ON id.product_id = p.product_id 
@@ -256,27 +271,38 @@ def get_sql_chain(domain: str):
         """,
         "inventory": """
         Focus on products, inventory_logs.
-        Example: SELECT product_name, stock FROM products WHERE stock < reorder_level;
+        Example: SELECT p.product_name, p.stock, p.reorder_level 
+        FROM products p 
+        WHERE p.stock < p.reorder_level;
         """,
         "employee": """
-        Focus on employees, user_logins.
-        Example: SELECT e.first_name, COUNT(ul.log_id) FROM employees e 
+        Focus on employees, user_logins, action_requests, admin_action_logs.
+        Example: SELECT e.first_name, COUNT(ul.log_id) as login_count 
+        FROM employees e 
         INNER JOIN user_logins ul ON e.employee_id = ul.employee_id 
         GROUP BY e.employee_id;
         """,
         "financial": """
-        Focus on invoices, invoice_details.
-        Example: SELECT i.invoice_id, i.order_date, i.total FROM invoices i WHERE i.total > 0;
+        Focus on invoices, invoice_details, products, discount_logs.
+        Example: SELECT SUM(i.total) as revenue, SUM(id.quantity * p.purchase_price) as cost 
+        FROM invoices i 
+        INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id 
+        INNER JOIN products p ON id.product_id = p.product_id 
+        WHERE i.total > 0;
         """,
         "operations": """
-        Focus on invoices, user_logins.
-        Example: SELECT HOUR(i.order_time), SUM(id.quantity) 
-        FROM invoices i INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id 
-        WHERE i.total > 0 GROUP BY HOUR(i.order_time);
+        Focus on invoices, user_logins, sync_log.
+        Example: SELECT HOUR(i.order_time) as hour, SUM(id.quantity) as total_quantity 
+        FROM invoices i 
+        INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id 
+        WHERE i.total > 0 
+        GROUP BY HOUR(i.order_time);
         """,
         "misc": """
-        General queries.
-        Example: SELECT product_name, sale_price FROM products;
+        General queries across all tables.
+        Example: SELECT p.product_name, p.sale_price, c.category_name 
+        FROM products p 
+        INNER JOIN categories c ON p.category_id = c.category_id;
         """
     }
 
@@ -290,10 +316,12 @@ def get_sql_chain(domain: str):
     **Conversation Summary:** {chat_summary}
 
     Instructions:
-    - Use INNER JOINs.
+    - Use INNER JOINs or LEFT JOINs where appropriate.
     - Group by unique IDs and names.
-    - For sales, use WHERE i.total > 0.
+    - For sales, use WHERE i.total > 0 and check discount_logs/void_logs if relevant.
     - For best-selling products, use SUM(id.quantity) and ORDER BY DESC.
+    - Handle date filters using order_date or log_date in 'YYYY-MM-DD' format.
+    - Ensure query is valid and optimized.
     - Return only the SQL query.
 
     **Question:** {question}
@@ -316,9 +344,10 @@ def get_sql_chain(domain: str):
     **Schema:** {schema}
     Return only the SQL query, ensuring:
     - Starts with SELECT
-    - Uses INNER JOINs
+    - Uses INNER JOINs or LEFT JOINs
     - Includes WHERE i.total > 0 for invoices
     - Groups by unique IDs
+    - Optimized for performance
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -333,7 +362,7 @@ def get_sql_chain(domain: str):
             "matched_entities": json.dumps(matched_entities),
             "current_sg_date": inputs["current_sg_date"],
             "current_sg_datetime": inputs["current_sg_datetime"],
-            "chat_summary": " ".join([msg.content for msg in inputs["chat_history"][-3:]]),
+            "chat_summary": " ".join([msg.content for msg in inputs["chat_history"][-5:]]),
             "question": inputs["question"],
             "domain_prompt": domain_prompts.get(domain, "General queries")
         }
@@ -348,7 +377,7 @@ def get_sql_chain(domain: str):
     )
 
 # Handle multi-domain queries
-def orchestrate_query(query: str, chat_history: list, current_sg_date: str, current_sg_datetime: str):
+def orchestrate_query(query: str, chat_history: List, current_sg_date: str, current_sg_datetime: str) -> Tuple[str, Optional[List]]:
     domain = classify_query(query)
     domains = [domain] if isinstance(domain, str) else domain
 
@@ -363,11 +392,16 @@ def orchestrate_query(query: str, chat_history: list, current_sg_date: str, curr
         query = raw_query.split(";")[0] + ";"
         query = query.replace("```sql", "").replace("```", "").strip()
         if validate_query(query):
+            cache_key = f"{domain}_{query}"
+            if cache_key in st.session_state.query_cache:
+                return {"domain": domain, "data": st.session_state.query_cache[cache_key], "query": query}
             data = fetch_data_from_api("execute_query", {"query": query})
-            return {"domain": domain, "data": data, "query": query} if data else None
+            if data:
+                st.session_state.query_cache[cache_key] = data
+                return {"domain": domain, "data": data, "query": query}
         return None
 
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         results = list(filter(None, executor.map(run_agent, domains)))
 
     if not results:
@@ -383,6 +417,7 @@ def orchestrate_query(query: str, chat_history: list, current_sg_date: str, curr
     - Use markdown: **bold**, - lists.
     - Note if total_discount = 0.
     - Caution if total_categories ≥ total_products.
+    - Keep response concise, under 200 words.
     """
     prompt = ChatPromptTemplate.from_template(aggregator_template)
     chain = prompt | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"]) | StrOutputParser()
@@ -393,7 +428,7 @@ def orchestrate_query(query: str, chat_history: list, current_sg_date: str, curr
     return natural_response, results[-1]["data"] if results else None
 
 # Generate AI response
-def get_response(user_query: str, chat_history: list):
+def get_response(user_query: str, chat_history: List) -> Tuple[str, Optional[List]]:
     time_keywords = [
         "current time", "what time is it", "date and time",
         "today's date", "now", "time today", "date today"
@@ -402,7 +437,8 @@ def get_response(user_query: str, chat_history: list):
         "sales", "invoice", "details", "product", "category", "stock", "revenue",
         "order", "employee", "payment", "quantity", "price", "total", "subtotal",
         "discount", "due", "paid", "inventory", "log", "detail", "list", "show",
-        "provide", "get", "fetch", "retrieve", "overview", "profit", "cost", "margin", "cashier", "login"
+        "provide", "get", "fetch", "retrieve", "overview", "profit", "cost", "margin",
+        "cashier", "login", "void", "discount_log", "action_request", "admin_action"
     ]
     conversational_keywords = [
         "only", "not", "why", "how come", "that’s", "correct", "wrong", "explain"
@@ -411,14 +447,14 @@ def get_response(user_query: str, chat_history: list):
     # Handle conversational queries
     if any(kw in user_query.lower() for kw in conversational_keywords) and not any(kw in user_query.lower() for kw in data_keywords):
         if "only 9 not 10" in user_query.lower():
-            return "The database contains only 9 products with sales data, so I listed all available products. Would you like me to fetch something else?", None
-        return "Can you clarify or provide a specific data request about the store?", None
+            return "The database contains only 9 products with sales data. Would you like me to fetch something else?", None
+        return "Please provide a specific data request about the store.", None
 
     # Handle time queries
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        return f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')}.", None
+        return f"Current time and date: {current_time.strftime('%Y-%m-%d %H:%M:%S')}.", None
 
     singapore_tz = pytz.timezone('Asia/Singapore')
     now_sg = datetime.datetime.now(singapore_tz)
@@ -426,13 +462,18 @@ def get_response(user_query: str, chat_history: list):
     current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
     schema = """
-    - categories: category_id (PK), category_name, created_at
-    - employees: employee_id (PK), first_name, last_name, role, email, password_hash, created_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type, quantity, log_date, notes
-    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
+    - categories: category_id (PK), category_name, created_at, updated_at
+    - employees: employee_id (PK), first_name, last_name, role (Owner, Admin, Cashier), email, password_hash, created_at, updated_at, last_password_change
+    - inventory_logs: log_id (PK), product_id (FK to products), change_type (Sale, Restock, Adjustment), quantity, log_date, notes, created_at, updated_at
+    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash, Card, Check), created_at, updated_at
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
     - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
+    - discount_logs: discount_id (PK), invoice_id (FK to invoices, nullable), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
+    - void_logs: void_id (PK), invoice_id (FK to invoices, nullable), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
+    - action_requests: request_id (PK), admin_id (FK to employees), action_type (EDIT, DELETE, UPDATE, INSERT), table_name, record_id, status (PENDING, APPROVED, DENIED), approver_id (FK to employees), created_at, updated_at
+    - admin_action_logs: log_id (PK), admin_id (FK to employees), action_type (EDIT, DELETE, UPDATE, INSERT), table_name, record_id, request_id (FK to action_requests), created_at
+    - sync_log: id (PK), table_name, record_id, action (INSERT, UPDATE, DELETE), timestamp, synced
     """
 
     # Check for multi-domain or complex query
@@ -454,7 +495,7 @@ def get_response(user_query: str, chat_history: list):
             match = re.search(r'top\s+(\d+)', user_query.lower())
             limit = int(match.group(1)) if match else 5
 
-        # Fallback queries for sidebar questions
+        # Fallback queries for sidebar and additional questions
         if not query:
             query_lower = user_query.lower()
             if "best-selling products of all time" in query_lower:
@@ -827,7 +868,7 @@ def get_response(user_query: str, chat_history: list):
                 step_desc = "Get most recent inventory adjustments"
             elif "profit margins for all products" in query_lower:
                 query = """
-                SELECT p.product_name, ((p.sale_price - p.purchase_price) / p.sale_price * 100) as profit_margin
+                SELECT p.product_name, ((p.sale_price - p.purchase_price) / NULLIF(p.sale_price, 0) * 100) as profit_margin
                 FROM products p
                 ORDER BY profit_margin DESC;
                 """
@@ -890,6 +931,51 @@ def get_response(user_query: str, chat_history: list):
                 WHERE p.stock <= (p.reorder_level * 1.1) AND p.stock > p.reorder_level;
                 """
                 step_desc = "Get products within 10% of reorder level"
+            elif "discount logs this month" in query_lower:
+                query = """
+                SELECT dl.discount_id, dl.created_at, dl.details, e.first_name, e.last_name
+                FROM discount_logs dl
+                INNER JOIN employees e ON dl.cashier_id = e.employee_id
+                WHERE YEAR(dl.created_at) = YEAR(CURDATE()) AND MONTH(dl.created_at) = MONTH(CURDATE())
+                ORDER BY dl.created_at DESC;
+                """
+                step_desc = "Get discount logs for this month"
+            elif "voided transactions this week" in query_lower:
+                query = """
+                SELECT vl.void_id, vl.created_at, vl.details, e.first_name, e.last_name
+                FROM void_logs vl
+                INNER JOIN employees e ON vl.cashier_id = e.employee_id
+                WHERE vl.created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+                ORDER BY vl.created_at DESC;
+                """
+                step_desc = "Get voided transactions this week"
+            elif "pending action requests" in query_lower:
+                query = """
+                SELECT ar.request_id, ar.action_type, ar.table_name, ar.status, e.first_name, e.last_name
+                FROM action_requests ar
+                INNER JOIN employees e ON ar.admin_id = e.employee_id
+                WHERE ar.status = 'PENDING'
+                ORDER BY ar.created_at DESC;
+                """
+                step_desc = "Get pending action requests"
+            elif "admin actions this month" in query_lower:
+                query = """
+                SELECT aal.log_id, aal.action_type, aal.table_name, aal.created_at, e.first_name, e.last_name
+                FROM admin_action_logs aal
+                INNER JOIN employees e ON aal.admin_id = e.employee_id
+                WHERE YEAR(aal.created_at) = YEAR(CURDATE()) AND MONTH(aal.created_at) = MONTH(CURDATE())
+                ORDER BY aal.created_at DESC;
+                """
+                step_desc = "Get admin actions this month"
+            elif "unsynced changes" in query_lower:
+                query = """
+                SELECT sl.id, sl.table_name, sl.record_id, sl.action, sl.timestamp
+                FROM sync_log sl
+                WHERE sl.synced = FALSE
+                ORDER BY sl.timestamp DESC
+                LIMIT 10;
+                """
+                step_desc = "Get unsynced changes"
             elif "invoice" in query_lower:
                 date_match = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},\s+\d{4}', query_lower)
                 date_str = current_sg_date
@@ -902,7 +988,7 @@ def get_response(user_query: str, chat_history: list):
                 elif "today" in query_lower:
                     date_str = current_sg_date
                 query = f"""
-                SELECT i.invoice_id, i.order_date, i.total, id.quantity, p.product_name
+                SELECT i.invoice_id, i.order_date, i.total, id.quantity, p.product_name, i.payment_type
                 FROM invoices i
                 INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id
                 INNER JOIN products p ON id.product_id = p.product_id
@@ -942,7 +1028,7 @@ def get_response(user_query: str, chat_history: list):
             return f"Invalid query generated for step: {step_desc}.", None
 
         # Clear cache for dynamic queries
-        if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview", "profit", "login"]):
+        if any(kw in user_query.lower() for kw in ["best-selling", "sales", "revenue", "inventory", "overview", "profit", "login", "discount", "void", "action", "sync"]):
             fetch_data_from_api.clear()
 
         data = fetch_data_from_api("execute_query", {"query": query})
@@ -977,17 +1063,19 @@ def get_response(user_query: str, chat_history: list):
     return natural_response, all_data[-1]["data"] if all_data else None
 
 # Handle user queries
-def handle_query(query: str):
+def handle_query(query: str) -> None:
     if not query:
         return
+    query_id = str(uuid.uuid4())
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
     with st.spinner("Analyzing your query..."):
         try:
             natural_response, data = get_response(query, st.session_state.chat_history)
+            logger.info(f"Query {query_id} processed successfully")
         except Exception as e:
-            logger.error(f"Query handling error: {str(e)}")
+            logger.error(f"Query {query_id} handling error: {str(e)}")
             natural_response = f"An error occurred: {str(e)}"
             data = None
     st.session_state.chat_history.append(AIMessage(content=natural_response))
@@ -1010,28 +1098,31 @@ def handle_query(query: str):
             if chart_type:
                 with st.spinner("Generating chart..."):
                     st.markdown(f"### {chart_type.capitalize()} Chart")
-                    fig, ax = plt.subplots()
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    sns.set_style("whitegrid")
                     if chart_type == 'bar':
-                        df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                        sns.barplot(data=df, x=columns[0], y=columns[1], ax=ax, palette="viridis")
                         ax.set_title(f"{columns[1].replace(' (₱)', '').replace(' (%)', '')} by {columns[0]}")
                         ax.set_xlabel(columns[0])
                         ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "quantity", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)').replace(' (%)', ' (%)'))
+                        plt.xticks(rotation=45, ha='right')
                     elif chart_type == 'line':
-                        df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                        sns.lineplot(data=df, x=columns[0], y=columns[1], ax=ax, marker='o', color='b')
                         ax.set_title(f"{columns[1].replace(' (₱)', '').replace(' (%)', '')} Over Time")
                         ax.set_xlabel("Date")
                         ax.set_ylabel("Units" if columns[1].lower() in ["total_sold", "quantity", "transaction_count", "login_count", "total_products", "total_categories", "total_invoices"] else columns[1].replace(' (₱)', ' (Pesos)').replace(' (%)', ' (%)'))
+                        plt.xticks(rotation=45)
                     elif chart_type == 'pie':
-                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%', colors=sns.color_palette("pastel"))
                         ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '').replace(' (%)', '')}")
                     plt.tight_layout()
                     st.pyplot(fig)
-                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+                    st.download_button("Download Data", df.to_csv(index=False), f"data_{query_id}.csv")
             if len(df) > 0 or len(df.columns) > 1:
-                st.table(df)
+                st.dataframe(df, use_container_width=True)
 
 # Display chat history
-def display_chat_history():
+def display_chat_history() -> None:
     for message in st.session_state.chat_history:
         if isinstance(message, AIMessage):
             with st.chat_message("AI", avatar="dist/img/ai.png"):
@@ -1041,14 +1132,15 @@ def display_chat_history():
                 st.markdown(message.content)
 
 # Clear chat history
-def clear_chat():
+def clear_chat() -> None:
     st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+        AIMessage(content="Hello! I'm your AcaSquad AI assistant. Ask me anything about your store.")
     ]
+    st.session_state.query_cache.clear()
     st.success("Chat history cleared. Starting a new conversation!")
 
 # Determine chart type
-def determine_chart_type(query, df):
+def determine_chart_type(query: str, df: pd.DataFrame) -> Tuple[Optional[str], Optional[Tuple[str, str]]]:
     if df.empty or len(df.columns) < 2:
         return None, None
     columns = df.columns.tolist()
@@ -1082,17 +1174,21 @@ def main():
                         st.rerun()
     else:
         if st.session_state.user["role"] in ["Owner", "Admin"]:
-            st.title("Chat with our AcaSquad AI")
+            st.title("AcaSquad AI: School Store Insights")
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
-                st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
-                if st.button("Logout"):
-                    st.session_state.authenticated = False
-                    st.session_state.user = None
-                    st.rerun()
-                if st.button("Clear Chat"):
-                    clear_chat()
-                    st.rerun()
+                st.markdown(f"**Logged in as:** {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Logout"):
+                        st.session_state.authenticated = False
+                        st.session_state.user = None
+                        st.rerun()
+                with col2:
+                    if st.button("Clear Chat"):
+                        clear_chat()
+                        st.rerun()
+                st.markdown("---")
                 with st.expander("📈 Sales Performance"):
                     sales_queries = [
                         "What are the best-selling products of all time?",
@@ -1108,7 +1204,7 @@ def main():
                         "What is the revenue breakdown by product category?"
                     ]
                     for q in sales_queries:
-                        if st.button(q, key=f"sales_{q}"):
+                        if st.button(q, key=f"sales_{q.replace(' ', '_')}"):
                             handle_query(q)
                 with st.expander("📦 Inventory Management"):
                     inventory_queries = [
@@ -1119,10 +1215,12 @@ def main():
                         "What is the value of inventory by category?",
                         "How many products do we have in total?",
                         "What are the product categories we have?",
-                        "List all products added in the last 30 days."
+                        "List all products added in the last 30 days.",
+                        "Which products should we reorder soon?",
+                        "Which products are within 10% of their reorder level?"
                     ]
                     for q in inventory_queries:
-                        if st.button(q, key=f"inv_{q}"):
+                        if st.button(q, key=f"inv_{q.replace(' ', '_')}"):
                             handle_query(q)
                 with st.expander("👥 Employee Performance"):
                     employee_queries = [
@@ -1134,7 +1232,7 @@ def main():
                         "How many times has each employee logged in this month?"
                     ]
                     for q in employee_queries:
-                        if st.button(q, key=f"emp_{q}"):
+                        if st.button(q, key=f"emp_{q.replace(' ', '_')}"):
                             handle_query(q)
                 with st.expander("💰 Financial Insights"):
                     financial_queries = [
@@ -1149,7 +1247,7 @@ def main():
                         "Which invoices had the highest discounts this month?"
                     ]
                     for q in financial_queries:
-                        if st.button(q, key=f"fin_{q}"):
+                        if st.button(q, key=f"fin_{q.replace(' ', '_')}"):
                             handle_query(q)
                 with st.expander("🏪 Store Operations"):
                     ops_queries = [
@@ -1159,10 +1257,10 @@ def main():
                         "What is the average time between login and first transaction for employees?",
                         "How many transactions were completed in the last hour?",
                         "Show me this week’s inventory changes for all products.",
-                        "What are the most recent inventory adjustments?"
+                        "What are the most recent inventory adjustments."
                     ]
                     for q in ops_queries:
-                        if st.button(q, key=f"ops_{q}"):
+                        if st.button(q, key=f"ops_{q.replace(' ', '_')}"):
                             handle_query(q)
                 with st.expander("🔍 Miscellaneous Insights"):
                     misc_queries = [
@@ -1171,18 +1269,21 @@ def main():
                         "What is the sales history for all products this year?",
                         "Which product category has the highest sales this year?",
                         "What is the average price of products in each category?",
-                        "Which products should we reorder soon?",
-                        "How many products are within 10% of their reorder level?"
+                        "Show me the discount logs for this month.",
+                        "List all voided transactions this week.",
+                        "What are the pending action requests?",
+                        "Show me the admin actions for this month.",
+                        "List the unsynced changes in the database."
                     ]
                     for q in misc_queries:
-                        if st.button(q, key=f"misc_{q}"):
+                        if st.button(q, key=f"misc_{q.replace(' ', '_')}"):
                             handle_query(q)
             display_chat_history()
-            user_query = st.chat_input("Type a message...")
+            user_query = st.chat_input("Ask about sales, inventory, employees, financials, or operations...")
             if user_query:
                 handle_query(user_query)
         else:
-            st.error("Sorry, you can't access this. Please contact the Admin.")
+            st.error("Access restricted. Please contact an Admin.")
             if st.button("Logout"):
                 st.session_state.authenticated = False
                 st.session_state.user = None
@@ -1196,6 +1297,7 @@ hide_streamlit_style = """
 <style>
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
+header {visibility: hidden;}
 </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
