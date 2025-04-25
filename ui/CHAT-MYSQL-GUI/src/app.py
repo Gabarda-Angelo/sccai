@@ -108,7 +108,7 @@ def handle_query(query: str):
                         df.plot(kind='scatter', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} vs {columns[0]}")
                         ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace ' (₱)', ' (Pesos)'))
+                        ax.set_ylabel(columns[1].replace ' (₱)', ' (Pesos)')
                     st.pyplot(fig)
                     st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
