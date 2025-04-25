@@ -397,7 +397,7 @@ def main():
                         st.session_state.authenticated = True
                         st.rerun()
     else:
-        if st.session_state.user["
+        if st.session_state.user["role"] in ["Owner", "Admin"]:
 
 role"] in ["Owner", "Admin"]:
             st.title("Chat with our AcaSquad AI")
