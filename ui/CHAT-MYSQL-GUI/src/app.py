@@ -399,7 +399,7 @@ def main():
     else:
         if st.session_state.user["role"] in ["Owner", "Admin"]:
 
-role"] in ["Owner", "Admin"]:
+
             st.title("Chat with our AcaSquad AI")
 
             # Sidebar setup
