@@ -1,357 +1,387 @@
-import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import logging
-from datetime import datetime
-from langchain_groq import ChatGroq
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from sentence_transformers import SentenceTransformer
-from faiss import IndexFlatL2
-import numpy as np
-from functools import lru_cache
-import asyncio
 import json
-import requests
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
+import logging
+import os
 import re
-from retry import retry
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
-# Initialize logging
-logging.basicConfig(level=logging.INFO, filename='app.log', format='%(asctime)s - %(levelname)s - %(message)s')
+import pandas as pd
+import plotly.express as px
+import requests
+import sqlparse
+import streamlit as st
+from dotenv import load_dotenv
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import Runnable
+from langchain_groq import ChatGroq
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize vector store for RAG
-@lru_cache(maxsize=1)
-def initialize_vector_store():
+# Load environment variables
+load_dotenv()
+
+# Streamlit page configuration
+st.set_page_config(page_title="SCC School Store Chatbot", page_icon="🏬", layout="wide")
+
+# Initialize session state
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "user_authenticated" not in st.session_state:
+    st.session_state.user_authenticated = False
+if "cache" not in st.session_state:
+    st.session_state.cache = {}
+
+# Database schema (simplified for brevity; assumes ltmptpysnd_school_store_db.sql)
+SCHEMA = """
+Tables:
+- invoices (invoice_id, order_date, total, employee_id)
+- invoice_details (invoice_id, product_id, quantity, total_price)
+- products (product_id, product_name, category_id, stock, sale_price, purchase_price, reorder_level)
+- categories (category_id, category_name)
+- employees (employee_id, employee_name, role)
+- void_logs (void_id, invoice_id, void_date)
+- discount_logs (discount_id, invoice_id, discount_amount)
+- admin_action_logs (log_id, admin_id, action, action_date)
+"""
+
+# Initialize embeddings and vector store
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+documents = [SCHEMA] + [
+    "sales data: invoices, invoice_details",
+    "inventory: products, stock, reorder_level",
+    "financials: invoices.total, discount_logs.discount_amount",
+    "employees: employees.employee_name, employees.role"
+]
+vectorstore = FAISS.from_texts(documents, embeddings)
+
+@st.cache_resource
+def get_vectorstore():
+    return vectorstore
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def fetch_data_from_api(action: str, params: dict = None) -> Optional[Dict]:
+    """Fetch data from the database API."""
     try:
-        # Fetch product and category names via API
-        response = fetch_data_from_api(
-            {"query": "SELECT product_name FROM products UNION SELECT category_name FROM categories"}
+        headers = {"Authorization": f"Bearer {os.getenv('API_TOKEN')}"}
+        response = requests.post(
+            os.getenv("API_URL"),
+            json={"action": action, "params": params or {}},
+            headers=headers,
+            timeout=10
         )
-        if not response or 'data' not in response:
-            logger.error("Failed to fetch items for vector store")
-            return None
-        items = [row['product_name'] for row in response['data']]
-
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        embeddings = model.encode(items)
-        dimension = embeddings.shape[1]
-        index = IndexFlatL2(dimension)
-        index.add(embeddings)
-        logger.info("Vector store initialized")
-        return model, index, items
-    except Exception as e:
-        logger.error(f"Vector store initialization failed: {e}")
-        return None
-
-# Query classifier
-@st.cache_resource
-def init_query_classifier():
-    try:
-        queries = [
-            ("What are the top selling products?", "sales"),
-            ("Show inventory levels", "inventory"),
-            ("Who are the best employees?", "employee"),
-            ("What is the profit margin?", "financial"),
-            ("How many transactions today?", "operations"),
-            ("What time is it?", "conversational")
-        ]
-        X, y = zip(*queries)
-        vectorizer = TfidfVectorizer()
-        X_vectorized = vectorizer.fit_transform(X)
-        classifier = MultinomialNB()
-        classifier.fit(X_vectorized, y)
-        logger.info("Query classifier initialized")
-        return vectorizer, classifier
-    except Exception as e:
-        logger.error(f"Query classifier initialization failed: {e}")
-        return None, None
-
-# SQL query validation
-def validate_sql_query(query):
-    query = query.lower().strip()
-    if not query.startswith("select"):
-        logger.warning(f"Invalid SQL query: {query}")
-        return False
-    forbidden_keywords = ["insert", "update", "delete", "drop", "alter", "truncate"]
-    if any(keyword in query for keyword in forbidden_keywords):
-        logger.warning(f"SQL query contains forbidden keywords: {query}")
-        return False
-    valid_tables = [
-        "categories", "employees", "inventory_logs", "invoices", "invoice_details",
-        "products", "user_logins", "discount_logs", "void_logs", "admin_logs",
-        "sync_log", "action_requests", "admin_action_logs"
-    ]
-    tables_in_query = re.findall(r'\bfrom\s+([a-z_]+)\b', query)
-    for table in tables_in_query:
-        if table not in valid_tables:
-            logger.warning(f"Query references invalid table: {table}")
-            return False
-    return True
-
-# Initialize LLMs
-@st.cache_resource
-def init_llms():
-    try:
-        llm1 = ChatGroq(model_name="llama3-70b-8192", api_key=st.secrets["GROQ_API_KEY"])
-        llm2 = ChatGroq(model_name="gemma2-9b-it", api_key=st.secrets["GROQ_API_KEY"])
-        llm3 = ChatGroq(model_name="mixtral-8x7b-32768", api_key=st.secrets["GROQ_API_KEY"])
-        logger.info("LLMs initialized")
-        return llm1, llm2, llm3
-    except Exception as e:
-        logger.error(f"LLM initialization failed: {e}")
-        return None, None, None
-
-# SQL chain for domain-specific queries
-def get_sql_chain(llm, domain):
-    schema = """
-    Tables:
-    - categories (category_id, category_name, created_at)
-    - employees (employee_id, employee_name, role, hire_date, email, created_at)
-    - inventory_logs (log_id, product_id, quantity_change, log_date, reason)
-    - invoices (invoice_id, employee_id, invoice_date, total_amount)
-    - invoice_details (invoice_id, product_id, quantity, unit_price)
-    - products (product_id, product_name, category_id, unit_price, stock_quantity, created_at)
-    - user_logins (login_id, employee_id, login_time, logout_time)
-    - discount_logs (discount_id, invoice_id, discount_amount, discount_date)
-    - void_logs (void_id, invoice_id, void_date, reason)
-    - admin_logs (log_id, employee_id, action, action_date)
-    - action_requests (request_id, employee_id, request_type, request_details, status, request_date)
-    - admin_action_logs (action_id, employee_id, request_id, action_type, action_details, action_date)
-    - sync_log (sync_id, sync_date, status, details)
-    """
-    prompt_template = PromptTemplate(
-        input_variables=["query", "schema"],
-        template=f"""
-        You are a SQL expert for a school store database. Given a user query and the database schema, generate a valid SELECT SQL query for the {domain} domain. Ensure the query is safe, accurate, and uses proper joins. Return only the SQL query, no explanations.
-
-        Schema:
-        {{schema}}
-
-        Query:
-        {{query}}
-        """
-    )
-    return LLMChain(llm=llm, prompt=prompt_template)
-
-# Aggregate SQL queries from multiple LLMs
-def aggregate_sql_queries(queries):
-    valid_queries = [q for q in queries if validate_sql_query(q)]
-    if not valid_queries:
-        logger.warning("No valid SQL queries generated")
-        return None
-    return max(valid_queries, key=lambda q: len(re.findall(r'\bjoin\b', q.lower())))
-
-# Multi-hop query planning
-async def plan_multi_hop_query(query, domain, llms):
-    try:
-        steps = []
-        current_query = query
-        for i in range(3):  # Max 3 hops
-            sql_chains = [get_sql_chain(llm, domain) for llm in llms]
-            query_tasks = [chain.run({"query": current_query, "schema": "...schema..."}) for chain in sql_chains]
-            queries = await asyncio.gather(*query_tasks)
-            sql_query = aggregate_sql_queries(queries)
-            if not sql_query:
-                break
-            steps.append(sql_query)
-            if "group by" in sql_query.lower() or "order by" in sql_query.lower():
-                break
-            current_query = f"Summarize the results of: {sql_query}"
-        return steps
-    except Exception as e:
-        logger.error(f"Multi-hop query planning failed: {e}")
-        return []
-
-# Execute SQL query via API
-@st.cache_data(ttl=300)
-def execute_sql_query(_query):
-    try:
-        if st.secrets["DEBUG_SQL"] == "true":
-            logger.info(f"Executing SQL query: {_query}")
-        response = fetch_data_from_api({"query": _query})
-        if not response or 'data' not in response:
-            logger.error(f"API query failed: {response}")
-            return None
-        data = response['data']
-        if not data:
-            return pd.DataFrame()
-        df = pd.DataFrame(data)
-        logger.info(f"SQL query executed successfully: {_query}")
-        return df
-    except Exception as e:
-        logger.error(f"SQL execution failed: {e}")
-        return None
-
-# Generate visualization
-def generate_visualization(df, query):
-    try:
-        if df.empty:
-            return None
-        chart_type = "table"
-        if len(df.columns) >= 2:
-            cat_cols = df.select_dtypes(include=['object', 'category']).columns
-            num_cols = df.select_dtypes(include=['int64', 'float64']).columns
-            if len(cat_cols) >= 1 and len(num_cols) >= 1:
-                chart_type = "bar"
-            elif len(num_cols) >= 2:
-                chart_type = "scatter"
-            elif len(cat_cols) >= 2:
-                chart_type = "heatmap"
-        plt.figure(figsize=(10, 6))
-        if chart_type == "bar":
-            sns.barplot(x=df[num_cols[0]], y=df[cat_cols[0]], palette="viridis")
-            plt.title(f"Bar Chart for {query}")
-        elif chart_type == "scatter":
-            sns.scatterplot(x=df[num_cols[0]], y=df[num_cols[1]], palette="viridis")
-            plt.title(f"Scatter Plot for {query}")
-        elif chart_type == "heatmap":
-            pivot = df.pivot_table(index=cat_cols[0], columns=cat_cols[1], aggfunc='size', fill_value=0)
-            sns.heatmap(pivot, cmap="viridis", annot=True)
-            plt.title(f"Heatmap for {query}")
-        plt.tight_layout()
-        st.pyplot(plt)
-        logger.info(f"Visualization generated: {chart_type}")
-    except Exception as e:
-        logger.error(f"Visualization failed: {e}")
-        return None
-
-# Fetch data from API with retry
-@retry(tries=3, delay=1, backoff=2)
-def fetch_data_from_api(params):
-    try:
-        headers = {"Authorization": f"Bearer {st.secrets['API_KEY']}"}
-        response = requests.post(st.secrets["API_URL"], json=params, headers=headers, timeout=15)
         response.raise_for_status()
-        if st.secrets["DEBUG_API"] == "true":
-            logger.info(f"API response: {response.text}")
         return response.json()
     except requests.RequestException as e:
-        logger.error(f"API call failed: {e}")
+        logger.error(f"API request failed: {str(e)}")
         return None
 
-# Main Streamlit app
-def main():
-    st.set_page_config(page_title="AcaSquad AI", layout="wide")
-    st.title("AcaSquad AI - School Store Insights")
+def validate_query(query: str) -> bool:
+    """Validate SQL query syntax and schema compliance."""
+    try:
+        # Check for SELECT statement
+        parsed = sqlparse.parse(query)[0]
+        if parsed.get_type() != "SELECT":
+            logger.warning("Query is not a SELECT statement")
+            st.error("Only SELECT queries are allowed.")
+            return False
+        
+        # Check for forbidden keywords
+        forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER"]
+        if any(keyword in query.upper() for keyword in forbidden):
+            logger.warning("Forbidden keyword detected")
+            st.error("Query contains forbidden operations.")
+            return False
+        
+        # Validate table and column references
+        tables = re.findall(r'\bFROM\s+([a-zA-Z_]+)\b|\bJOIN\s+([a-zA-Z_]+)\b', query, re.IGNORECASE)
+        tables = [t for sublist in tables for t in sublist if t]
+        valid_tables = ["invoices", "invoice_details", "products", "categories", "employees", "void_logs", "discount_logs", "admin_action_logs"]
+        for table in tables:
+            if table.lower() not in valid_tables:
+                logger.warning(f"Invalid table: {table}")
+                st.error(f"Table '{table}' is not valid.")
+                return False
+        
+        return True
+    except Exception as e:
+        logger.error(f"Query validation failed: {str(e)}")
+        st.error(f"Invalid query: {str(e)}")
+        return False
 
-    if st.secrets["DEBUG_MODE"] == "true":
-        st.sidebar.write("Debug Mode: Enabled")
+def validate_results(data: List[Dict], query: str) -> bool:
+    """Validate query results for consistency."""
+    if not data:
+        logger.warning("No data returned")
+        return False
+    if "revenue" in query.lower() or "total" in query.lower():
+        return all(float(item.get("revenue", item.get("total", 0))) >= 0 for item in data)
+    if "quantity" in query.lower():
+        return all(int(item.get("quantity", 0)) >= 0 for item in data)
+    return True
 
-    # Authentication
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-        st.session_state.role = None
-    if not st.session_state.authenticated:
-        username = st.text_input("Username")
+def fuzzy_match_text(text: str) -> List[Dict]:
+    """Perform fuzzy matching with RAG."""
+    try:
+        vectorstore = get_vectorstore()
+        results = vectorstore.similarity_search(text, k=3)
+        entities = []
+        for result in results:
+            if "tables:" in result.page_content.lower():
+                entities.append({"type": "schema", "value": result.page_content})
+            elif "sales" in result.page_content.lower():
+                entities.append({"type": "domain", "value": "sales"})
+            elif "inventory" in result.page_content.lower():
+                entities.append({"type": "domain", "value": "inventory"})
+        return entities
+    except Exception as e:
+        logger.error(f"Fuzzy match failed: {str(e)}")
+        return []
+
+def expand_entities(matched_entities: List[Dict]) -> List[Dict]:
+    """Expand matched entities based on schema relationships."""
+    expanded = []
+    for entity in matched_entities:
+        if entity["type"] == "domain" and entity["value"] == "sales":
+            expanded.append({"table": "invoices", "columns": ["total", "order_date"]})
+            expanded.append({"table": "invoice_details", "columns": ["quantity", "total_price"]})
+        elif entity["type"] == "domain" and entity["value"] == "inventory":
+            expanded.append({"table": "products", "columns": ["product_name", "stock", "reorder_level"]})
+    return expanded
+
+def classify_query(query: str) -> str:
+    """Classify query into a domain."""
+    matched_entities = fuzzy_match_text(query)
+    domains = [e["value"] for e in matched_entities if e["type"] == "domain"]
+    
+    if "sales" in domains or any(word in query.lower() for word in ["revenue", "sold", "invoices"]):
+        return "sales"
+    elif "inventory" in domains or any(word in query.lower() for word in ["stock", "products", "reorder"]):
+        return "inventory"
+    elif any(word in query.lower() for word in ["profit", "discount", "financial"]):
+        return "financials"
+    elif any(word in query.lower() for word in ["employee", "cashier", "admin"]):
+        return "employees"
+    return "misc"
+
+def get_sql_chain(domain: str) -> Runnable:
+    """Create a LangChain pipeline for SQL generation."""
+    prompt_template = """
+    You are a SQL expert for a school store database. Generate a SELECT query for the following user question based on the domain: {domain}.
+    
+    User Question: {query}
+    Database Schema: {schema}
+    
+    Ensure the query:
+    - Uses proper JOINs for related tables.
+    - Filters out voided transactions (void_logs).
+    - Includes discounts from discount_logs where applicable.
+    - Handles date filters (e.g., today, this month) using CURDATE().
+    - Returns results in a user-friendly format (e.g., meaningful column aliases).
+    
+    Output only the SQL query as a string.
+    """
+    prompt = ChatPromptTemplate.from_template(prompt_template)
+    model = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+    return prompt | model | StrOutputParser()
+
+def plan_multi_hop_query(query: str, schema: str) -> List[Dict[str, str]]:
+    """Plan a multi-hop query with ensemble planning."""
+    planners = [
+        ChatGroq(model=model, temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+        for model in ["llama3-70b-8192", "gemma2-9b-it", "mixtral-8x7b-32768"]
+    ]
+    prompt_template = """
+    You are a SQL query planner. Break down the following complex query into sequential SELECT query steps.
+    
+    User Question: {query}
+    Database Schema: {schema}
+    
+    Output a JSON array of steps, each with:
+    - description: Brief description of the step.
+    - sql: SELECT query for the step (use placeholders like (previous_result) for intermediate results).
+    
+    Ensure steps are executable and handle voided transactions and discounts.
+    """
+    prompt = ChatPromptTemplate.from_template(prompt_template)
+    plans = []
+    
+    for planner in planners:
+        chain = prompt | planner | StrOutputParser()
+        try:
+            plan = json.loads(chain.invoke({"query": query, "schema": schema}))
+            plans.append(plan)
+        except Exception as e:
+            logger.error(f"Planner failed: {str(e)}")
+    
+    # Select the best plan (simplified: take the first valid plan with most steps)
+    valid_plans = [plan for plan in plans if plan and all("sql" in step and "description" in step for step in plan)]
+    if not valid_plans:
+        logger.error("No valid plans generated")
+        return []
+    return max(valid_plans, key=len)
+
+def execute_multi_hop_query(steps: List[Dict[str, str]]) -> Optional[List[Dict]]:
+    """Execute multi-hop query steps in parallel where possible."""
+    results = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for step in steps:
+            sql = step["sql"]
+            if "(previous_result)" in sql and results:
+                sql = sql.replace("(previous_result)", json.dumps(results[-1]))
+            if not validate_query(sql):
+                logger.error(f"Invalid step query: {sql}")
+                return None
+            data = fetch_data_from_api("execute_query", {"query": sql})
+            if not data or not validate_results(data.get("result", []), sql):
+                logger.error(f"Step execution failed: {sql}")
+                return None
+            results.append(data["result"])
+    return results[-1] if results else None
+
+def determine_chart_type(data: List[Dict]) -> Tuple[str, Tuple[str, str]]:
+    """Determine appropriate chart type and columns."""
+    if not data or not isinstance(data, list) or not data[0]:
+        return "table", ("", "")
+    
+    keys = data[0].keys()
+    numeric_cols = [k for k in keys if isinstance(data[0][k], (int, float))]
+    categorical_cols = [k for k in keys if isinstance(data[0][k], str)]
+    
+    if len(numeric_cols) >= 1 and len(categorical_cols) >= 1:
+        return "bar", (categorical_cols[0], numeric_cols[0])
+    elif len(numeric_cols) >= 2:
+        return "scatter", (numeric_cols[0], numeric_cols[1])
+    return "table", ("", "")
+
+def plot_data(df: pd.DataFrame, chart_type: str, columns: Tuple[str, str]) -> None:
+    """Plot data using Plotly."""
+    if chart_type == "bar":
+        fig = px.bar(df, x=columns[0], y=columns[1], title=f"{columns[1]} by {columns[0]}")
+        st.plotly_chart(fig)
+    elif chart_type == "scatter":
+        fig = px.scatter(df, x=columns[0], y=columns[1], title=f"{columns[1]} vs {columns[0]}")
+        st.plotly_chart(fig)
+    elif chart_type == "pie" and len(df) <= 10:
+        fig = px.pie(df, names=columns[0], values=columns[1], title=f"Distribution of {columns[1]}")
+        st.plotly_chart(fig)
+
+def get_response(query: str, chat_history: List) -> Tuple[str, Optional[List]]:
+    """Process user query and return response with data."""
+    # Cache check
+    cache_key = f"{query}_{datetime.now().strftime('%Y%m%d')}"
+    if cache_key in st.session_state.cache:
+        return st.session_state.cache[cache_key]
+    
+    domain = classify_query(query)
+    matched_entities = fuzzy_match_text(query)
+    expanded_entities = expand_entities(matched_entities)
+    
+    # Handle complex queries
+    if len(expanded_entities) > 1 or " by " in query.lower() or " and " in query.lower():
+        steps = plan_multi_hop_query(query, SCHEMA)
+        if steps:
+            data = execute_multi_hop_query(steps)
+            if data:
+                response = f"**Results for '{query}' (Complex Query)**:\n\n"
+                response += f"**Summary**: {len(data)} records found.\n"
+                st.session_state.cache[cache_key] = (response, data)
+                return response, data
+    
+    # Handle simple queries
+    chain = get_sql_chain(domain)
+    try:
+        sql_query = chain.invoke({"query": query, "schema": SCHEMA, "domain": domain})
+        if not validate_query(sql_query):
+            return "Invalid query generated.", None
+        
+        data = fetch_data_from_api("execute_query", {"query": sql_query})
+        if not data or "result" not in data:
+            logger.error(f"API returned no data for query: {sql_query}")
+            return "No data found. Try rephrasing your question.", None
+        
+        results = data["result"]
+        if not validate_results(results, query):
+            logger.warning(f"Invalid results for query: {sql_query}")
+            return "Results seem incorrect. Please try a different question.", None
+        
+        # Structure response
+        response = f"**Results for '{query}'**:\n\n"
+        response += f"**Summary**: {len(results)} records found.\n"
+        if domain == "sales":
+            total = sum(float(r.get("total", r.get("revenue", 0))) for r in results)
+            response += f"**Total**: ₱{total:.2f}\n"
+        elif domain == "inventory":
+            low_stock = sum(1 for r in results if r.get("stock", 0) < r.get("reorder_level", 0))
+            response += f"**Low Stock Items**: {low_stock}\n"
+        
+        # Cache response
+        st.session_state.cache[cache_key] = (response, results)
+        return response, results
+    except Exception as e:
+        logger.error(f"Error processing query: {str(e)}")
+        return f"Error: {str(e)}. Please try again.", None
+
+def authenticate_user(email: str, password: str) -> bool:
+    """Authenticate user via API."""
+    try:
+        response = fetch_data_from_api("authenticate", {"email": email, "password": password})
+        return response and response.get("status") == "success"
+    except Exception as e:
+        logger.error(f"Authentication failed: {str(e)}")
+        return False
+
+# Streamlit UI
+st.title("🏬 SCC School Store Chatbot")
+st.markdown("Ask questions about sales, inventory, financials, or employees!")
+
+# Authentication
+if not st.session_state.user_authenticated:
+    with st.form("login_form"):
+        email = st.text_input("Email")
         password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            auth_data = fetch_data_from_api({"action": "auth", "username": username, "password": password})
-            if auth_data and auth_data.get("status") == "success":
-                st.session_state.authenticated = True
-                st.session_state.role = auth_data.get("role")
+        submit = st.form_submit_button("Login")
+        if submit:
+            if authenticate_user(email, password):
+                st.session_state.user_authenticated = True
                 st.success("Logged in successfully!")
+                st.rerun()
             else:
-                st.error("Invalid credentials")
-        return
-
-    # Only Owners and Admins can access
-    if st.session_state.role not in ["Owner", "Admin"]:
-        st.error("Access denied. Please log in as Owner or Admin.")
-        return
-
-    # Sidebar with predefined queries
-    st.sidebar.header("Quick Insights")
-    predefined_queries = {
-        "Top 5 Products by Sales": "SELECT p.product_name, SUM(id.quantity) as total_sold FROM products p JOIN invoice_details id ON p.product_id = id.product_id GROUP BY p.product_id ORDER BY total_sold DESC LIMIT 5",
-        "Revenue This Month": "SELECT SUM(total_amount) as revenue FROM invoices WHERE MONTH(invoice_date) = MONTH(CURRENT_DATE()) AND YEAR(invoice_date) = YEAR(CURRENT_DATE())",
-        "Low Stock Products": "SELECT product_name, stock_quantity FROM products WHERE stock_quantity < 10"
-    }
-    selected_query = st.sidebar.selectbox("Select a predefined query", list(predefined_queries.keys()))
-    if st.sidebar.button("Run Predefined Query"):
-        st.session_state.user_query = selected_query
-
-    # Main query input
-    user_query = st.text_input("Ask a question about the store:", value=st.session_state.get("user_query", ""))
-    if st.button("Submit Query") or user_query != st.session_state.get("user_query", ""):
-        st.session_state.user_query = user_query
-        if not user_query:
-            st.warning("Please enter a query.")
-            return
-
-        # Initialize components
-        vectorizer, classifier = init_query_classifier()
-        model, index, items = initialize_vector_store()
-        llms = init_llms()
-
-        # Classify query
-        if vectorizer and classifier:
-            query_vector = vectorizer.transform([user_query])
-            domain = classifier.predict(query_vector)[0]
-        else:
-            domain = "misc"
-
-        # Handle conversational queries
-        if domain == "conversational":
-            if "time" in user_query.lower():
-                st.write(f"Current time (SGT): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            else:
-                st.write("This is a conversational query. Please ask a data-related question.")
-            return
-
-        # Fuzzy matching for products/categories
-        if model and index:
-            query_embedding = model.encode([user_query])[0]
-            _, indices = index.search(np.array([query_embedding]), k=1)
-            matched_item = items[indices[0][0]]
-            user_query = user_query.replace(matched_item, f"'{matched_item}'")
-
-        # Handle predefined query
-        if user_query in predefined_queries:
-            sql_query = predefined_queries[user_query]
-        else:
-            # Generate SQL query
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            sql_queries = loop.run_until_complete(plan_multi_hop_query(user_query, domain, llms))
-            sql_query = sql_queries[-1] if sql_queries else None
-
-        if not sql_query or not validate_sql_query(sql_query):
-            st.error("Could not generate a valid SQL query. Please try rephrasing your question.")
-            return
-
-        # Execute query
-        df = execute_sql_query(sql_query)
-        if df is None or df.empty:
-            st.warning("No data found for your query.")
-            return
-
-        # Generate response
-        response_prompt = PromptTemplate(
-            input_variables=["query", "data"],
-            template="""
-            Summarize the results for the query: {query}
-            Data: {data}
-            Keep the response concise (<200 words), use markdown, and include units (₱ for money, % for percentages).
-            """
-        )
-        response_chain = LLMChain(llm=llms[0], prompt=response_prompt)
-        response = response_chain.run({"query": user_query, "data": df.to_string()})
-        st.markdown(response)
-
-        # Display results
-        st.subheader("Results")
-        st.dataframe(df)
-
-        # Generate visualization
-        generate_visualization(df, user_query)
-
-        # Download option
-        csv = df.to_csv(index=False)
-        st.download_button("Download Results as CSV", csv, "results.csv", "text/csv")
-
-if __name__ == "__main__":
-    main()
+                st.error("Invalid credentials.")
+else:
+    # Chat interface
+    user_input = st.text_input("Ask a question about the store:", key="user_input")
+    if user_input:
+        response, data = get_response(user_input, st.session_state.chat_history)
+        st.session_state.chat_history.append({"user": user_input, "bot": response, "data": data})
+        
+        # Display chat history
+        for chat in st.session_state.chat_history:
+            with st.chat_message("user"):
+                st.write(chat["user"])
+            with st.chat_message("assistant"):
+                st.markdown(chat["bot"])
+                if chat["data"]:
+                    df = pd.DataFrame(chat["data"])
+                    chart_type, columns = determine_chart_type(chat["data"])
+                    if chart_type != "table" and columns[0] and columns[1]:
+                        plot_data(df, chart_type, columns)
+                    st.dataframe(df, use_container_width=True)
+        
+        # Feedback mechanism
+        feedback = st.radio("Was this response helpful?", ["Yes", "No"], key=f"feedback_{uuid.uuid4()}")
+        if feedback == "No":
+            st.text_area("Please provide feedback:", key=f"feedback_text_{uuid.uuid4()}")
+        
+    # Logout
+    if st.button("Logout"):
+        st.session_state.user_authenticated = False
+        st.session_state.chat_history = []
+        st.rerun()
