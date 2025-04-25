@@ -12,6 +12,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import re
+import uuid
 
 # Set page configuration
 st.set_page_config(
@@ -37,8 +39,15 @@ if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user = None
     st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store, from simple lookups to complex analytics.")
     ]
+    st.session_state.query_history = []
+
+# Sanitize user input
+def sanitize_input(query):
+    # Remove potentially dangerous characters and limit length
+    query = re.sub(r'[<>{};]', '', query)
+    return query[:500]  # Limit to 500 characters
 
 # Authenticate user
 def authenticate(email, password):
@@ -46,7 +55,8 @@ def authenticate(email, password):
         response = requests.post(
             st.secrets["API_URL"],
             params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
-            json={"email": email, "password": password}
+            json={"email": email, "password": password},
+            timeout=10
         )
         data = response.json() if response.text else {}
         if response.status_code == 200 and data.get("status") == "success":
@@ -61,25 +71,36 @@ def authenticate(email, password):
     return False
 
 # Handle user queries
-def handle_query(query: str):
-    query = query.strip()
+def handle_query(query: str, complexity: str = "simple"):
+    query = sanitize_input(query.strip())
     if not query:
         st.warning("Please enter a valid query.")
         return
     st.session_state.chat_history.append(HumanMessage(content=query))
+    st.session_state.query_history.append(query)
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
     with st.spinner("Analyzing your query..."):
         try:
-            natural_response, data = get_response(query, st.session_state.chat_history)
+            natural_response, data = get_response(query, st.session_state.chat_history, complexity)
+            # Log complex queries
+            if complexity == "advanced" and st.session_state.user["role"] in ["Owner", "Admin"]:
+                log_query(query)
         except Exception as e:
-            natural_response = f"An error occurred: {str(e)}"
+            natural_response = f"An error occurred: {str(e)}. Try rephrasing your question or simplifying it."
             data = None
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            # Handle large datasets
+            if len(df) > 1000:
+                st.warning("Results are large. Showing summary and top 100 rows.")
+                st.write(f"Total rows: {len(df)}")
+                df_summary = df.describe().to_dict()
+                st.write("Summary Statistics:", df_summary)
+                df = df.head(100)
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -109,10 +130,31 @@ def handle_query(query: str):
                         ax.set_title(f"{columns[1]} vs {columns[0]}")
                         ax.set_xlabel(columns[0])
                         ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                    elif chart_type == 'stacked_bar':
+                        df.pivot_table(index=columns[0], columns=columns[2], values=columns[1], aggfunc='sum').plot(kind='bar', stacked=True, ax=ax)
+                        ax.set_title(f"{columns[1]} by {columns[0]} and {columns[2]}")
+                        ax.set_xlabel(columns[0])
+                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     st.pyplot(fig)
                     st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
+
+# Log complex queries
+def log_query(query):
+    try:
+        requests.post(
+            st.secrets["API_URL"],
+            params={"action": "log_query", "key": st.secrets["API_KEY"]},
+            json={
+                "admin_id": st.session_state.user["employee_id"],
+                "details": json.dumps({"query": query, "timestamp": datetime.datetime.now().isoformat()}),
+                "action_type": "INSERT"
+            },
+            timeout=5
+        )
+    except Exception:
+        pass  # Silent fail to avoid disrupting user experience
 
 # Display chat history
 def display_chat_history():
@@ -127,12 +169,12 @@ def display_chat_history():
 # Clear chat history
 def clear_chat():
     st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store, from simple lookups to complex analytics.")
     ]
     st.success("Chat history cleared. Starting a new conversation!")
 
 # Fetch data from API
-@st.cache_data(ttl=60)  # Reduced TTL for fresher data
+@st.cache_data(ttl=60)
 def fetch_data_from_api(action: str, params: dict = None) -> dict:
     try:
         payload = {"action": action, "key": st.secrets["API_KEY"]}
@@ -161,17 +203,21 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
 
 # Validate SQL queries
 def validate_query(query):
-    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "COUNT", "SUM"]
+    allowed_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT", "COUNT", "SUM", "AVG", "MIN", "MAX", "WITH", "HAVING"]
     query_upper = query.upper()
-    if not query_upper.startswith("SELECT"):
+    if not query_upper.startswith("SELECT") and not query_upper.startswith("WITH"):
         return False
-    forbidden = ["DELETE", "UPDATE", "INSERT", "DROP", "TRUNCATE"]
+    forbidden = ["DELETE", "UPDATE", "INSERT", "DROP", "TRUNCATE", "ALTER", "CREATE"]
     if any(kw in query_upper for kw in forbidden):
+        return False
+    # Limit complexity (e.g., max 5 joins)
+    join_count = len(re.findall(r'\bJOIN\b', query_upper))
+    if join_count > 5:
         return False
     return True
 
 # Define SQL chain
-def get_sql_chain():
+def get_sql_chain(complexity: str):
     schema = """
     Database Schema:
     - admin_logs: adminlogs_id (PK), action_type (INSERT/UPDATE/DELETE), admin_id (FK to employees), approved_by_owner (FK to employees), details (JSON), created_at
@@ -187,7 +233,7 @@ def get_sql_chain():
     - void_logs: void_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
     """
     template = """
-    You are an AI assistant for the SCC School Store Database.
+    You are an expert SQL assistant for the SCC School Store Database.
     Generate an accurate SQL query based on the schema to answer the user's question.
 
     **Database Schema:**
@@ -198,16 +244,25 @@ def get_sql_chain():
 
     **Conversation Summary:** {chat_summary}
 
+    **Query Complexity:** {complexity}
+
     **Instructions:**
     - Use 'today' as {current_sg_date} for WHERE clauses (e.g., WHERE order_date = '{current_sg_date}').
-    - Use explicit JOIN syntax with table aliases.
+    - Use explicit JOIN syntax with table aliases (e.g., p for products, i for invoices).
     - Leverage indexes (e.g., idx_invoices_date, idx_products_name).
-    - Use aggregate functions (COUNT, SUM) for summarization.
-    - Order results if implied by the question.
+    - Use aggregate functions (COUNT, SUM, AVG) for summarization.
+    - Support complex queries with subqueries, CTEs, or window functions if needed for advanced analytics.
+    - Order results by relevance (e.g., date DESC for recent data).
     - Avoid non-existent tables/columns.
-    - Return only the SQL query.
+    - Limit results to 1000 rows unless specified.
+    - For complex queries, prioritize performance (e.g., use indexed columns, avoid excessive joins).
+    - Examples:
+      - Simple: "What is the stock of SCC SHIRT?" → SELECT stock FROM products WHERE product_name = 'SCC SHIRT';
+      - Complex: "What is the profit margin trend for Uniforms over 6 months?" → WITH monthly_profit AS (SELECT DATE_TRUNC('month', i.order_date) AS month, AVG(p.sale_price - p.purchase_price) / p.purchase_price * 100 AS margin FROM invoices i JOIN invoice_details id ON i.invoice_id = id.invoice_id JOIN products p ON id.product_id = p.product_id JOIN categories c ON p.category_id = c.category_id WHERE c.category_name = 'Uniforms' AND i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 6 MONTH) GROUP BY month) SELECT month, margin FROM monthly_profit ORDER BY month;
 
     **User Question:** {question}
+
+    Return ONLY the SQL query.
     """
     prompt = ChatPromptTemplate.from_template(template)
     models = [
@@ -229,12 +284,14 @@ def get_sql_chain():
 
     **Original Question:** {question}
     **Schema:** {schema}
+    **Complexity:** {complexity}
 
     Return ONLY the SQL query. Ensure:
-    1. Starts with SELECT
+    1. Starts with SELECT or WITH
     2. Uses explicit JOINs with aliases
     3. No comments or markdown
     4. Valid per schema
+    5. Optimized for performance (e.g., use indexes, limit joins)
     """
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
     return (
@@ -242,7 +299,8 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-3:]])
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-5:]]),
+            complexity=lambda x: x["complexity"]
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -255,9 +313,9 @@ def get_sql_chain():
     )
 
 # Generate AI response
-def get_response(user_query: str, chat_history: list):
+def get_response(user_query: str, chat_history: list, complexity: str):
     time_keywords = ["current time", "what time is it", "date and time", "today's date", "now"]
-    data_keywords = ["sales", "invoice", "product", "category", "stock", "revenue", "order", "employee", "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory", "void"]
+    data_keywords = ["sales", "invoice", "product", "category", "stock", "revenue", "order", "employee", "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory", "void", "profit", "margin", "trend"]
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
@@ -265,35 +323,63 @@ def get_response(user_query: str, chat_history: list):
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-DD')
-        current_sg_datetime = now_sg.strftime('%Y-%m-DD %H:%M:%S')
-        sql_chain = get_sql_chain()
+        current_sg_date = now_sg.strftime('%Y-%m-%d')
+        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+        sql_chain = get_sql_chain(complexity)
         raw_query = sql_chain.invoke({
             "question": user_query,
             "chat_history": chat_history,
             "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
+            "current_sg_datetime": current_sg_datetime,
+            "complexity": complexity
         })
         query = raw_query.split(";")[0] + ";"
         query = query.replace("```sql", "").replace("```", "").strip()
         query = "\n".join([line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))])
         if not validate_query(query):
-            return "Invalid database query. Please try again.", None
+            # Attempt to rephrase query
+            rephrase_template = """
+            Rephrase the following query to make it clearer and compatible with SQL SELECT queries:
+            **Original Query:** {query}
+            Return the rephrased query as plain text.
+            """
+            rephrase_chain = (
+                ChatPromptTemplate.from_template(rephrase_template)
+                | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+                | StrOutputParser()
+            )
+            rephrased_query = rephrase_chain.invoke({"query": user_query})
+            st.warning(f"Invalid query. Trying rephrased query: {rephrased_query}")
+            raw_query = sql_chain.invoke({
+                "question": rephrased_query,
+                "chat_history": chat_history,
+                "current_sg_date": current_sg_date,
+                "current_sg_datetime": current_sg_datetime,
+                "complexity": complexity
+            })
+            query = raw_query.split(";")[0] + ";"
+            query = query.replace("```sql", "").replace("```", "").strip()
+            query = "\n".join([line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))])
+            if not validate_query(query):
+                return "Unable to generate a valid database query. Please rephrase your question.", None
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
-            return "No data retrieved. Try rephrasing your question.", None
+            return "No data retrieved. Try rephrasing your question or expanding the time frame.", None
         response_template = """
         Generate a natural language response based on:
         - **Question:** {question}
         - **Results:** {response}
         - **History:** {chat_history}
+        - **Complexity:** {complexity}
 
         **Guidelines:**
         1. If empty results, suggest: "No data found. Try a broader time frame or different product."
-        2. Highlight insights (e.g., highest/lowest values).
-        3. Use markdown: **bold** for emphasis, - for lists.
+        2. Highlight insights (e.g., highest/lowest values, trends, comparisons).
+        3. Use markdown: **bold** for emphasis, - for lists, ``` for code.
         4. Use ₱ for monetary values.
-        5. Keep concise (<200 words).
+        5. For complex queries, include statistical insights (e.g., averages, growth rates).
+        6. Keep concise (<300 words for simple, <500 for complex).
+        7. If results are large, summarize key points.
         """
         chain = (
             RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
@@ -303,7 +389,9 @@ def get_response(user_query: str, chat_history: list):
         )
         natural_response = chain.invoke({
             "question": user_query,
+            "response": json.dumps(data, indent=2),
             "chat_history": chat_history,
+            "complexity": complexity
         })
         return natural_response, data
 
@@ -316,15 +404,19 @@ def determine_chart_type(query, df):
     date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
+    # Prioritize monetary columns for financial queries
+    monetary_columns = [col for col in numerical_columns if any(kw in col.lower() for kw in ["total", "subtotal", "price", "paid", "due", "discount"])]
     if date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
+        return "line", (date_columns[0], monetary_columns[0] if monetary_columns else numerical_columns[0])
+    elif categorical_columns and numerical_columns and len(categorical_columns) >= 2:
         unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and "percentage" in query_lower:
-            return "pie", (categorical_columns[0], numerical_columns[0])
+        if unique_categories <= 10 and "breakdown" in query_lower:
+            return "stacked_bar", (categorical_columns[0], monetary_columns[0] if monetary_columns else numerical_columns[0], categorical_columns[1])
+        elif unique_categories <= 6 and "percentage" in query_lower:
+            return "pie", (categorical_columns[0], monetary_columns[0] if monetary_columns else numerical_columns[0])
         else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
-    elif numerical_columns and len(numerical_columns) >= 2 and "stock" in query_lower:
+            return "bar", (categorical_columns[0], monetary_columns[0] if monetary_columns else numerical_columns[0])
+    elif numerical_columns and len(numerical_columns) >= 2 and any(kw in query_lower for kw in ["stock", "price", "margin"]):
         return "scatter", (numerical_columns[0], numerical_columns[1])
     return None, None
 
@@ -358,6 +450,11 @@ def main():
                     st.cache_data.clear()
                     st.success("Data cache cleared. Fetching fresh data...")
                     st.rerun()
+                complexity = st.radio("Query Complexity", ["Simple", "Advanced"], help="Simple: Basic lookups (e.g., stock levels). Advanced: Analytics (e.g., trends, margins).")
+                with st.expander("Recent Queries"):
+                    selected_query = st.selectbox("Select a recent query to reuse:", [""] + st.session_state.query_history[-10:])
+                    if selected_query:
+                        handle_query(selected_query, complexity.lower())
                 with st.expander("📈 Sales Performance", expanded=True):
                     sales_queries = [
                         "What are the best-selling products from the first invoice to today?",
@@ -374,7 +471,7 @@ def main():
                     ]
                     for q in sales_queries:
                         if st.button(q, key=f"sales_{q}"):
-                            handle_query(q)
+                            handle_query(q, complexity.lower())
                 with st.expander("📦 Inventory Management"):
                     inventory_queries = [
                         "Which products are out of stock?",
@@ -388,7 +485,7 @@ def main():
                     ]
                     for q in inventory_queries:
                         if st.button(q, key=f"inv_{q}"):
-                            handle_query(q)
+                            handle_query(q, complexity.lower())
                 with st.expander("👥 Employee Performance"):
                     employee_queries = [
                         "Who is the top-performing employee this month?",
@@ -400,7 +497,7 @@ def main():
                     ]
                     for q in employee_queries:
                         if st.button(q, key=f"emp_{q}"):
-                            handle_query(q)
+                            handle_query(q, complexity.lower())
                 with st.expander("💰 Financial Insights"):
                     financial_queries = [
                         "Give me the sales invoices details for today.",
@@ -415,7 +512,7 @@ def main():
                     ]
                     for q in financial_queries:
                         if st.button(q, key=f"fin_{q}"):
-                            handle_query(q)
+                            handle_query(q, complexity.lower())
                 with st.expander("🎟️ Discounts and Voids"):
                     discount_void_queries = [
                         "What discounts were applied this week?",
@@ -426,7 +523,7 @@ def main():
                     ]
                     for q in discount_void_queries:
                         if st.button(q, key=f"dv_{q}"):
-                            handle_query(q)
+                            handle_query(q, complexity.lower())
                 with st.expander("🏪 Store Operations"):
                     ops_queries = [
                         "What is the busiest hour of the day for sales?",
@@ -439,24 +536,25 @@ def main():
                     ]
                     for q in ops_queries:
                         if st.button(q, key=f"ops_{q}"):
-                            handle_query(q)
-                with st.expander("🔍 Miscellaneous Insights"):
-                    misc_queries = [
-                        "What is the profit margin for SCC SHIRT?",
+                            handle_query(q, complexity.lower())
+                with st.expander("🔍 Advanced Analytics"):
+                    analytics_queries = [
+                        "What is the profit margin for SCC SHIRT over the last 3 months?",
                         "How many units of SCC Booklet were sold this month?",
                         "What is the sales history for SCC SHIRT?",
-                        "Which product category has the highest sales this year?",
+                        "Which product category has the highest profit margin this year?",
                         "What is the average price of products in each category?",
                         "Which products should we reorder soon?",
-                        "How many products are within 10% of their reorder level?"
+                        "What is the revenue trend by category over the last 6 months?",
+                        "Which employees have the highest sales growth rate?"
                     ]
-                    for q in misc_queries:
-                        if st.button(q, key=f"misc_{q}"):
-                            handle_query(q)
+                    for q in analytics_queries:
+                        if st.button(q, key=f"analytics_{q}"):
+                            handle_query(q, complexity.lower())
             display_chat_history()
-            user_query = st.chat_input("Type a message...")
+            user_query = st.chat_input("Type a message (e.g., 'What is the profit margin trend for Uniforms?')...")
             if user_query:
-                handle_query(user_query)
+                handle_query(user_query, complexity.lower())
         else:
             st.error("Access denied. Please contact the Admin.")
             if st.button("Logout"):
