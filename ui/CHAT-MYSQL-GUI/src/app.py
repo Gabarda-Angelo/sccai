@@ -1,3 +1,4 @@
+
 import json
 import logging
 import os
@@ -39,7 +40,7 @@ if "user_authenticated" not in st.session_state:
 if "cache" not in st.session_state:
     st.session_state.cache = {}
 
-# Database schema (simplified for brevity; assumes ltmptpysnd_school_store_db.sql)
+# Database schema (simplified; assumes ltmptpysnd_school_store_db.sql)
 SCHEMA = """
 Tables:
 - invoices (invoice_id, order_date, total, employee_id)
@@ -259,19 +260,25 @@ def determine_chart_type(data: List[Dict]) -> Tuple[str, Tuple[str, str]]:
         return "bar", (categorical_cols[0], numeric_cols[0])
     elif len(numeric_cols) >= 2:
         return "scatter", (numeric_cols[0], numeric_cols[1])
+    elif len(categorical_cols) >= 1 and len(numeric_cols) >= 1 and len(data) <= 10:
+        return "pie", (categorical_cols[0], numeric_cols[0])
     return "table", ("", "")
 
 def plot_data(df: pd.DataFrame, chart_type: str, columns: Tuple[str, str]) -> None:
     """Plot data using Plotly."""
-    if chart_type == "bar":
-        fig = px.bar(df, x=columns[0], y=columns[1], title=f"{columns[1]} by {columns[0]}")
-        st.plotly_chart(fig)
-    elif chart_type == "scatter":
-        fig = px.scatter(df, x=columns[0], y=columns[1], title=f"{columns[1]} vs {columns[0]}")
-        st.plotly_chart(fig)
-    elif chart_type == "pie" and len(df) <= 10:
-        fig = px.pie(df, names=columns[0], values=columns[1], title=f"Distribution of {columns[1]}")
-        st.plotly_chart(fig)
+    try:
+        if chart_type == "bar":
+            fig = px.bar(df, x=columns[0], y=columns[1], title=f"{columns[1]} by {columns[0]}")
+            st.plotly_chart(fig)
+        elif chart_type == "scatter":
+            fig = px.scatter(df, x=columns[0], y=columns[1], title=f"{columns[1]} vs {columns[0]}")
+            st.plotly_chart(fig)
+        elif chart_type == "pie":
+            fig = px.pie(df, names=columns[0], values=columns[1], title=f"Distribution of {columns[1]}")
+            st.plotly_chart(fig)
+    except Exception as e:
+        logger.error(f"Plotting failed: {str(e)}")
+        st.error("Unable to generate chart. Displaying table instead.")
 
 def get_response(query: str, chat_history: List) -> Tuple[str, Optional[List]]:
     """Process user query and return response with data."""
@@ -321,6 +328,9 @@ def get_response(query: str, chat_history: List) -> Tuple[str, Optional[List]]:
         elif domain == "inventory":
             low_stock = sum(1 for r in results if r.get("stock", 0) < r.get("reorder_level", 0))
             response += f"**Low Stock Items**: {low_stock}\n"
+        elif domain == "financials":
+            discounts = sum(float(r.get("discount_amount", 0)) for r in results)
+            response += f"**Total Discounts**: ₱{discounts:.2f}\n"
         
         # Cache response
         st.session_state.cache[cache_key] = (response, results)
@@ -337,6 +347,19 @@ def authenticate_user(email: str, password: str) -> bool:
     except Exception as e:
         logger.error(f"Authentication failed: {str(e)}")
         return False
+
+def log_feedback(query: str, feedback: str, comment: str = "") -> None:
+    """Log user feedback to admin_action_logs."""
+    try:
+        action = {
+            "admin_id": "chatbot_user",
+            "action": f"Feedback: {feedback} for query '{query}'",
+            "comment": comment,
+            "action_date": datetime.now().isoformat()
+        }
+        fetch_data_from_api("log_action", {"action": action})
+    except Exception as e:
+        logger.error(f"Failed to log feedback: {str(e)}")
 
 # Streamlit UI
 st.title("🏬 SCC School Store Chatbot")
@@ -378,10 +401,20 @@ else:
         # Feedback mechanism
         feedback = st.radio("Was this response helpful?", ["Yes", "No"], key=f"feedback_{uuid.uuid4()}")
         if feedback == "No":
-            st.text_area("Please provide feedback:", key=f"feedback_text_{uuid.uuid4()}")
+            comment = st.text_area("Please provide feedback:", key=f"feedback_text_{uuid.uuid4()}")
+            if comment:
+                log_feedback(user_input, feedback, comment)
+                st.success("Thank you for your feedback!")
+        elif feedback == "Yes":
+            log_feedback(user_input, feedback)
         
     # Logout
     if st.button("Logout"):
         st.session_state.user_authenticated = False
         st.session_state.chat_history = []
+        st.session_state.cache = {}
         st.rerun()
+
+# Footer
+st.markdown("---")
+st.markdown("Powered by xAI Grok 3 | © 2025 SCC School Store")
