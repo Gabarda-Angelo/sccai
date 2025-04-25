@@ -12,6 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import uuid
 
 # Set page configuration (must be the first Streamlit command)
 st.set_page_config(
@@ -108,7 +109,7 @@ def handle_query(query: str):
                         df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
                         ax.set_title(f"{columns[1]} Over Time")
                         ax.set_xlabel("Date")
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        ax.set_ylabel(columns[1].replace ' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
@@ -188,13 +189,17 @@ def get_sql_chain():
     """Create a chain to generate SQL queries based on user input."""
     schema = """
     Database Schema:
-    - categories: category_id (PK), category_name, created_at
-    - employees: employee_id (PK), first_name, last_name, role, email, password_hash, created_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type, quantity, log_date, notes
-    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type, created_at
-    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
-    - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
+    - admin_logs: adminlogs_id (PK), action_type (ENUM('INSERT','UPDATE','DELETE')), admin_id (FK to employees), approved_by_owner (FK to employees), details (JSON), created_at
+    - categories: category_id (PK), category_name (UNIQUE), created_at, updated_at
+    - discount_logs: discount_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
+    - employees: employee_id (PK), first_name, last_name, role (ENUM('Owner','Admin','Cashier')), email (UNIQUE), password_hash, created_at, updated_at, last_password_change
+    - inventory_logs: log_id (PK), product_id (FK to products), change_type (ENUM('Sale','Restock','Adjustment')), quantity, log_date, notes, created_at, updated_at
+    - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (ENUM('Cash','Card','Check')), created_at, updated_at
+    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
+    - products: product_id (PK), barcode (UNIQUE), product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+    - sync_log: id (PK), table_name, record_id, action (ENUM('INSERT','UPDATE','DELETE')), timestamp, synced
+    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address, created_at, updated_at
+    - void_logs: void_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
     """
 
     template = """
@@ -226,7 +231,7 @@ def get_sql_chain():
     prompt = ChatPromptTemplate.from_template(template)
     models = [
         "llama3-8b-8192",
-        "llama-3.3-70b-versatile",  # Updated model replacing mixtral-8x7b-32768
+        "llama-3.3-70b-versatile",
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
@@ -247,7 +252,7 @@ def get_sql_chain():
     Synthesize the best SQL query from these proposals:
     {proposals}
 
-    **Original Question:** {question}
+    🙂**Original Question:** {question}
     **Schema:** {schema}
 
     Return ONLY the final SQL query without any explanations or formatting.
@@ -321,8 +326,7 @@ def get_response(user_query: str, chat_history: list):
 
         data = fetch_data_from_api("execute_query", {"query": query})
         if data is None:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None 
-        
+            return "Couldn't retrieve data. Please try again or rephrase your question.", None
 
         response_template = """
         Generate a natural language response based on:
@@ -393,7 +397,9 @@ def main():
                         st.session_state.authenticated = True
                         st.rerun()
     else:
-        if st.session_state.user["role"] in ["Owner", "Admin"]:
+        if st.session_state.user["
+
+role"] in ["Owner", "Admin"]:
             st.title("Chat with our AcaSquad AI")
 
             # Sidebar setup
