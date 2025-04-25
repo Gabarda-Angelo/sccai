@@ -3,15 +3,11 @@ import json
 import logging
 import os
 import re
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-import plotly.express as px
 import requests
-import sqlparse
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -20,7 +16,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
 from langchain_groq import ChatGroq
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,7 +35,7 @@ if "user_authenticated" not in st.session_state:
 if "cache" not in st.session_state:
     st.session_state.cache = {}
 
-# Database schema (simplified; assumes ltmptpysnd_school_store_db.sql)
+# Database schema (assumed from ltmptpysnd_school_store_db.sql)
 SCHEMA = """
 Tables:
 - invoices (invoice_id, order_date, total, employee_id)
@@ -54,7 +49,7 @@ Tables:
 """
 
 # Initialize embeddings and vector store
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")  # Original embedding model
 documents = [SCHEMA] + [
     "sales data: invoices, invoice_details",
     "inventory: products, stock, reorder_level",
@@ -67,7 +62,6 @@ vectorstore = FAISS.from_texts(documents, embeddings)
 def get_vectorstore():
     return vectorstore
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def fetch_data_from_api(action: str, params: dict = None) -> Optional[Dict]:
     """Fetch data from the database API."""
     try:
@@ -85,23 +79,23 @@ def fetch_data_from_api(action: str, params: dict = None) -> Optional[Dict]:
         return None
 
 def validate_query(query: str) -> bool:
-    """Validate SQL query syntax and schema compliance."""
+    """Validate SQL query for safety and correctness."""
     try:
         # Check for SELECT statement
-        parsed = sqlparse.parse(query)[0]
-        if parsed.get_type() != "SELECT":
+        query_upper = query.upper()
+        if not query_upper.strip().startswith("SELECT"):
             logger.warning("Query is not a SELECT statement")
             st.error("Only SELECT queries are allowed.")
             return False
         
         # Check for forbidden keywords
         forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER"]
-        if any(keyword in query.upper() for keyword in forbidden):
+        if any(keyword in query_upper for keyword in forbidden):
             logger.warning("Forbidden keyword detected")
             st.error("Query contains forbidden operations.")
             return False
         
-        # Validate table and column references
+        # Validate table references
         tables = re.findall(r'\bFROM\s+([a-zA-Z_]+)\b|\bJOIN\s+([a-zA-Z_]+)\b', query, re.IGNORECASE)
         tables = [t for sublist in tables for t in sublist if t]
         valid_tables = ["invoices", "invoice_details", "products", "categories", "employees", "void_logs", "discount_logs", "admin_action_logs"]
@@ -182,10 +176,11 @@ def get_sql_chain(domain: str) -> Runnable:
     
     Ensure the query:
     - Uses proper JOINs for related tables.
-    - Filters out voided transactions (void_logs).
+    - Filters out voided transactions using void_logs (e.g., LEFT JOIN void_logs ON invoices.invoice_id = void_logs.invoice_id WHERE void_logs.void_id IS NULL).
     - Includes discounts from discount_logs where applicable.
     - Handles date filters (e.g., today, this month) using CURDATE().
     - Returns results in a user-friendly format (e.g., meaningful column aliases).
+    - Avoids aggregation errors (e.g., GROUP BY all non-aggregated columns).
     
     Output only the SQL query as a string.
     """
@@ -194,11 +189,7 @@ def get_sql_chain(domain: str) -> Runnable:
     return prompt | model | StrOutputParser()
 
 def plan_multi_hop_query(query: str, schema: str) -> List[Dict[str, str]]:
-    """Plan a multi-hop query with ensemble planning."""
-    planners = [
-        ChatGroq(model=model, temperature=0, api_key=st.secrets["GROQ_API_KEY"])
-        for model in ["llama3-70b-8192", "gemma2-9b-it", "mixtral-8x7b-32768"]
-    ]
+    """Plan a multi-hop query for complex questions."""
     prompt_template = """
     You are a SQL query planner. Break down the following complex query into sequential SELECT query steps.
     
@@ -209,42 +200,41 @@ def plan_multi_hop_query(query: str, schema: str) -> List[Dict[str, str]]:
     - description: Brief description of the step.
     - sql: SELECT query for the step (use placeholders like (previous_result) for intermediate results).
     
-    Ensure steps are executable and handle voided transactions and discounts.
+    Ensure steps:
+    - Are executable and produce intermediate results.
+    - Filter out voided transactions (void_logs).
+    - Include discounts (discount_logs) where relevant.
+    - Handle complex aggregations (e.g., profit margins, subqueries).
     """
     prompt = ChatPromptTemplate.from_template(prompt_template)
-    plans = []
+    model = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+    chain = prompt | model | StrOutputParser()
     
-    for planner in planners:
-        chain = prompt | planner | StrOutputParser()
-        try:
-            plan = json.loads(chain.invoke({"query": query, "schema": schema}))
-            plans.append(plan)
-        except Exception as e:
-            logger.error(f"Planner failed: {str(e)}")
-    
-    # Select the best plan (simplified: take the first valid plan with most steps)
-    valid_plans = [plan for plan in plans if plan and all("sql" in step and "description" in step for step in plan)]
-    if not valid_plans:
-        logger.error("No valid plans generated")
+    try:
+        plan = json.loads(chain.invoke({"query": query, "schema": schema}))
+        if not isinstance(plan, list) or not all("sql" in step and "description" in step for step in plan):
+            logger.error("Invalid multi-hop plan")
+            return []
+        return plan
+    except Exception as e:
+        logger.error(f"Multi-hop planning failed: {str(e)}")
         return []
-    return max(valid_plans, key=len)
 
 def execute_multi_hop_query(steps: List[Dict[str, str]]) -> Optional[List[Dict]]:
-    """Execute multi-hop query steps in parallel where possible."""
+    """Execute multi-hop query steps."""
     results = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        for step in steps:
-            sql = step["sql"]
-            if "(previous_result)" in sql and results:
-                sql = sql.replace("(previous_result)", json.dumps(results[-1]))
-            if not validate_query(sql):
-                logger.error(f"Invalid step query: {sql}")
-                return None
-            data = fetch_data_from_api("execute_query", {"query": sql})
-            if not data or not validate_results(data.get("result", []), sql):
-                logger.error(f"Step execution failed: {sql}")
-                return None
-            results.append(data["result"])
+    for step in steps:
+        sql = step["sql"]
+        if "(previous_result)" in sql and results:
+            sql = sql.replace("(previous_result)", json.dumps(results[-1]))
+        if not validate_query(sql):
+            logger.error(f"Invalid step query: {sql}")
+            return None
+        data = fetch_data_from_api("execute_query", {"query": sql})
+        if not data or not validate_results(data.get("result", []), sql):
+            logger.error(f"Step execution failed: {sql}")
+            return None
+        results.append(data["result"])
     return results[-1] if results else None
 
 def determine_chart_type(data: List[Dict]) -> Tuple[str, Tuple[str, str]]:
@@ -258,27 +248,7 @@ def determine_chart_type(data: List[Dict]) -> Tuple[str, Tuple[str, str]]:
     
     if len(numeric_cols) >= 1 and len(categorical_cols) >= 1:
         return "bar", (categorical_cols[0], numeric_cols[0])
-    elif len(numeric_cols) >= 2:
-        return "scatter", (numeric_cols[0], numeric_cols[1])
-    elif len(categorical_cols) >= 1 and len(numeric_cols) >= 1 and len(data) <= 10:
-        return "pie", (categorical_cols[0], numeric_cols[0])
     return "table", ("", "")
-
-def plot_data(df: pd.DataFrame, chart_type: str, columns: Tuple[str, str]) -> None:
-    """Plot data using Plotly."""
-    try:
-        if chart_type == "bar":
-            fig = px.bar(df, x=columns[0], y=columns[1], title=f"{columns[1]} by {columns[0]}")
-            st.plotly_chart(fig)
-        elif chart_type == "scatter":
-            fig = px.scatter(df, x=columns[0], y=columns[1], title=f"{columns[1]} vs {columns[0]}")
-            st.plotly_chart(fig)
-        elif chart_type == "pie":
-            fig = px.pie(df, names=columns[0], values=columns[1], title=f"Distribution of {columns[1]}")
-            st.plotly_chart(fig)
-    except Exception as e:
-        logger.error(f"Plotting failed: {str(e)}")
-        st.error("Unable to generate chart. Displaying table instead.")
 
 def get_response(query: str, chat_history: List) -> Tuple[str, Optional[List]]:
     """Process user query and return response with data."""
@@ -297,8 +267,8 @@ def get_response(query: str, chat_history: List) -> Tuple[str, Optional[List]]:
         if steps:
             data = execute_multi_hop_query(steps)
             if data:
-                response = f"**Results for '{query}' (Complex Query)**:\n\n"
-                response += f"**Summary**: {len(data)} records found.\n"
+                response = f"Results for '{query}' (Complex Query):\n\n"
+                response += f"Found {len(data)} records.\n"
                 st.session_state.cache[cache_key] = (response, data)
                 return response, data
     
@@ -320,19 +290,15 @@ def get_response(query: str, chat_history: List) -> Tuple[str, Optional[List]]:
             return "Results seem incorrect. Please try a different question.", None
         
         # Structure response
-        response = f"**Results for '{query}'**:\n\n"
-        response += f"**Summary**: {len(results)} records found.\n"
+        response = f"Results for '{query}':\n\n"
+        response += f"Found {len(results)} records.\n"
         if domain == "sales":
             total = sum(float(r.get("total", r.get("revenue", 0))) for r in results)
-            response += f"**Total**: ₱{total:.2f}\n"
+            response += f"Total: ₱{total:.2f}\n"
         elif domain == "inventory":
             low_stock = sum(1 for r in results if r.get("stock", 0) < r.get("reorder_level", 0))
-            response += f"**Low Stock Items**: {low_stock}\n"
-        elif domain == "financials":
-            discounts = sum(float(r.get("discount_amount", 0)) for r in results)
-            response += f"**Total Discounts**: ₱{discounts:.2f}\n"
+            response += f"Low Stock Items: {low_stock}\n"
         
-        # Cache response
         st.session_state.cache[cache_key] = (response, results)
         return response, results
     except Exception as e:
@@ -348,21 +314,8 @@ def authenticate_user(email: str, password: str) -> bool:
         logger.error(f"Authentication failed: {str(e)}")
         return False
 
-def log_feedback(query: str, feedback: str, comment: str = "") -> None:
-    """Log user feedback to admin_action_logs."""
-    try:
-        action = {
-            "admin_id": "chatbot_user",
-            "action": f"Feedback: {feedback} for query '{query}'",
-            "comment": comment,
-            "action_date": datetime.now().isoformat()
-        }
-        fetch_data_from_api("log_action", {"action": action})
-    except Exception as e:
-        logger.error(f"Failed to log feedback: {str(e)}")
-
 # Streamlit UI
-st.title("🏬 SCC School Store Chatbot")
+st.title("SCC School Store Chatbot")
 st.markdown("Ask questions about sales, inventory, financials, or employees!")
 
 # Authentication
@@ -390,31 +343,17 @@ else:
             with st.chat_message("user"):
                 st.write(chat["user"])
             with st.chat_message("assistant"):
-                st.markdown(chat["bot"])
+                st.write(chat["bot"])
                 if chat["data"]:
                     df = pd.DataFrame(chat["data"])
                     chart_type, columns = determine_chart_type(chat["data"])
-                    if chart_type != "table" and columns[0] and columns[1]:
-                        plot_data(df, chart_type, columns)
+                    if chart_type == "bar" and columns[0] and columns[1]:
+                        st.bar_chart(df.set_index(columns[0])[columns[1]])
                     st.dataframe(df, use_container_width=True)
-        
-        # Feedback mechanism
-        feedback = st.radio("Was this response helpful?", ["Yes", "No"], key=f"feedback_{uuid.uuid4()}")
-        if feedback == "No":
-            comment = st.text_area("Please provide feedback:", key=f"feedback_text_{uuid.uuid4()}")
-            if comment:
-                log_feedback(user_input, feedback, comment)
-                st.success("Thank you for your feedback!")
-        elif feedback == "Yes":
-            log_feedback(user_input, feedback)
-        
+    
     # Logout
     if st.button("Logout"):
         st.session_state.user_authenticated = False
         st.session_state.chat_history = []
         st.session_state.cache = {}
         st.rerun()
-
-# Footer
-st.markdown("---")
-st.markdown("Powered by xAI Grok 3 | © 2025 SCC School Store")
