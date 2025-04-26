@@ -283,8 +283,22 @@ def get_response(user_query: str, chat_history: list):
             "current_sg_datetime": current_sg_datetime
         })
 
-        query = raw_query.split(";")[0] + ";"
-        query = query.replace("```sql", "").replace("```", "").strip()
+        # Extract only the SQL query, removing any preamble
+        query_lines = raw_query.split("\n")
+        sql_query = ""
+        for line in query_lines:
+            line = line.strip()
+            if line.upper().startswith("SELECT"):
+                sql_query = line
+                # Capture the rest of the query until a semicolon or end
+                for next_line in query_lines[query_lines.index(line):]:
+                    sql_query += "\n" + next_line
+                    if ";" in next_line:
+                        break
+                break
+        query = sql_query.replace("```sql", "").replace("```", "").strip()
+        if not query.endswith(";"):
+            query += ";"
         query = "\n".join(
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
