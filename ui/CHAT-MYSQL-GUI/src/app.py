@@ -77,10 +77,11 @@ def handle_query(query: str):
                 st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
+                st.write(f"**Raw Data**: {debug_info['raw_data']}")
         except Exception as e:
-            natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
+            natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question or check the database connection."
             data = None
-            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A"}
+            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A", "raw_data": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -150,14 +151,14 @@ def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "
         )
         status_code = response.status_code
         if not response.text.strip():
-            return None, "Empty response from API", status_code
+            return None, "Empty response from API", status_code, None
         data = response.json()
         if data.get("status") == "success":
-            return data["data"], "Success", status_code
+            return data["data"], "Success", status_code, data
         else:
-            return None, data.get("error", "Unknown error"), status_code
+            return None, data.get("error", "Unknown error"), status_code, data
     except requests.RequestException as e:
-        return None, str(e), "N/A"
+        return None, str(e), "N/A", None
 
 # Validate SQL query
 def validate_query(query):
@@ -174,31 +175,43 @@ def validate_query(query):
 
 # Format response
 def format_response(question: str, data: list) -> str:
-    if not data:
+    if not data or not isinstance(data, list) or len(data) == 0:
         if "profit" in question.lower():
             return "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames. Would you like more details or to check specific products?"
-        return "Sorry, I couldn't retrieve the data. Please try again. Would you like more details or to check specific products?"
+        return "Sorry, I couldn't retrieve the data. Please try again or check the database connection. Would you like more details or to check specific products?"
 
     question_lower = question.lower()
-    if "best selling products" in question_lower:
-        response = "Top-selling products in your store:\n\n"
-        for row in data[:3]:
-            response += f"- **{row['product_name']}** with **{row['total_quantity']}** units sold\n"
-        response += f"**{data[0]['product_name']}** takes the top spot, followed by **{data[1]['product_name']}**."
-    elif "total revenue" in question_lower:
-        revenue = data[0]['total_revenue']
-        response = f"Total Revenue: **₱{revenue:,.2f}**\n\nThis reflects all sales after discounts, indicating strong performance."
-    elif "total base cost" in question_lower:
-        cost = data[0]['base_cost']
-        response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
-    elif "total profit" in question_lower:
-        profit = data[0]['total_profit']
-        response = f"Total Profit: **₱{profit:,.2f}**\n\nThis is your revenue minus base costs, showing financial health."
-    elif "profit margin" in question_lower:
-        margin = data[0]['profit_margin']
-        response = f"Profit Margin: **{margin:.2f}%**\n\nThis shows the percentage of revenue retained as profit."
-    else:
-        response = json.dumps(data, indent=2)
+    try:
+        # Convert string values to numeric where applicable
+        result = data[0]
+        for key in ['total_revenue', 'base_cost', 'total_profit', 'profit_margin']:
+            if key in result and isinstance(result[key], str):
+                try:
+                    result[key] = float(result[key].replace(',', ''))
+                except (ValueError, AttributeError):
+                    result[key] = 0.0
+
+        if "best selling products" in question_lower:
+            response = "Top-selling products in your store:\n\n"
+            for row in data[:3]:
+                response += f"- **{row['product_name']}** with **{row['total_quantity']}** units sold\n"
+            response += f"**{data[0]['product_name']}** takes the top spot, followed by **{data[1]['product_name']}**."
+        elif "total revenue" in question_lower:
+            revenue = result.get('total_revenue', 0.0)
+            response = f"Total Revenue: **₱{revenue:,.2f}**\n\nThis reflects all sales after discounts, indicating strong performance."
+        elif "total base cost" in question_lower:
+            cost = result.get('base_cost', 0.0)
+            response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
+        elif "total profit" in question_lower:
+            profit = result.get('total_profit', 0.0)
+            response = f"Total Profit: **₱{profit:,.2f}**\n\nThis is your revenue minus base costs, showing financial health."
+        elif "profit margin" in question_lower:
+            margin = result.get('profit_margin', 0.0)
+            response = f"Profit Margin: **{margin:.2f}%**\n\nThis shows the percentage of revenue retained as profit."
+        else:
+            response = json.dumps(data, indent=2)
+    except (KeyError, TypeError, ValueError) as e:
+        response = f"Error formatting response: {str(e)}. Please check the database or try rephrasing the query."
     
     response += "\n\nWould you like more details or to check specific products?"
     return response
@@ -302,7 +315,7 @@ def get_response(user_query: str, chat_history: list):
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
         "profit", "margin"
     ]
-    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": ""}
+    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": "", "raw_data": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
@@ -352,11 +365,12 @@ def get_response(user_query: str, chat_history: list):
             debug_info["api_response"] = str(e)
             return f"Invalid SQL query: {str(e)}. Please rephrase your question.", None, debug_info
 
-        data, api_response, status_code = fetch_data_from_api("execute_query", {"query": query})
+        data, api_response, status_code, raw_data = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
+        debug_info["raw_data"] = json.dumps(raw_data, indent=2) if raw_data else "No data returned"
         if data is None:
-            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or adjusting your query.", None, debug_info
+            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or checking the database connection.", None, debug_info
 
         natural_response = format_response(user_query, data)
         return natural_response, data, debug_info
@@ -374,7 +388,7 @@ def determine_chart_type(query, df):
         return "line", (date_columns[0], numerical_columns[0])
     elif categorical_columns and numerical_columns:
         unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and "percentage" in query_lower:
+        if unique_categories <= 6 and "percentage" in question_lower:
             return "pie", (categorical_columns[0], numerical_columns[0])
         else:
             return "bar", (categorical_columns[0], numerical_columns[0])
