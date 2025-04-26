@@ -176,16 +176,10 @@ def validate_query(query):
 def get_sql_chain():
     schema = """
     Database Schema:
-    - categories: category_id (PK), category_name, created_at, updated_at
-    - employees: employee_id (PK), first_name, last_name, role (Owner/Admin/Cashier), email, password_hash, created_at, updated_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type (Sale/Restock/Adjustment), quantity, log_date, notes, created_at, updated_at
     - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash/Card/Check), created_at, updated_at
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address, created_at, updated_at
-    - discount_logs: discount_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email, details (JSON), created_at
-    - void_logs: void_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email, details (JSON), created_at
-    - admin_logs: adminlogs_id (PK), action_type (INSERT/UPDATE/DELETE), admin_id (FK to employees), approved_by_owner (FK to employees), details (JSON), created_at
+    ...
     """
 
     template = """
@@ -201,15 +195,10 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - Handle date ranges with BETWEEN (e.g., '2025-01-01' to '2025-04-30').
-    - Use JSON_EXTRACT for JSON fields (e.g., JSON_EXTRACT(details, '$.amount_discounted')).
-    - Use aggregations (SUM, COUNT, AVG) for totals and rankings.
-    - Join tables explicitly with aliases (e.g., invoices i JOIN employees e ON i.employee_id = e.employee_id).
-    - For profit calculations:
-      - Profit = SUM(id.total_price - (id.quantity * COALESCE(p.purchase_price, 0)))
-      - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
-      - Include all invoices unless a specific time frame is requested.
-    - Margin = (Profit / SUM(id.total_price)) * 100
+    - For revenue, use SUM(i.total) from invoices to account for discounts.
+    - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
+    - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
+    - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
     - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
