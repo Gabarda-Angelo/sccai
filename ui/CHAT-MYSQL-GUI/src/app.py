@@ -73,13 +73,14 @@ def handle_query(query: str):
             natural_response, data, debug_info = get_response(query, st.session_state.chat_history)
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
-                st.write(f"**Generated SQL Query**: {debug_info['query']}")
+                st.write(f"**Raw Query**: {debug_info['raw_query']}")
+                st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
         except Exception as e:
             natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
             data = None
-            debug_info = {"query": "N/A", "api_response": str(e), "status_code": "N/A"}
+            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -164,8 +165,12 @@ def validate_query(query):
         "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
         "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS"
     ]
-    query_upper = query.upper()
-    return query_upper.startswith("SELECT") and any(kw in query_upper for kw in allowed_keywords)
+    query_upper = query.upper().strip()
+    if not query_upper.startswith("SELECT"):
+        raise ValueError("Query must start with SELECT")
+    if not any(kw in query_upper for kw in allowed_keywords[1:]):  # Exclude SELECT from keyword check
+        raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
+    return True
 
 # Define SQL chain
 def get_sql_chain():
@@ -264,7 +269,7 @@ def get_response(user_query: str, chat_history: list):
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
         "profit", "margin"
     ]
-    debug_info = {"query": "", "api_response": "", "status_code": ""}
+    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
@@ -282,34 +287,42 @@ def get_response(user_query: str, chat_history: list):
             "current_sg_date": current_sg_date,
             "current_sg_datetime": current_sg_datetime
         })
+        debug_info["raw_query"] = raw_query
 
-        # Extract only the SQL query, removing any preamble
+        # Extract SQL query
         query_lines = raw_query.split("\n")
         sql_query = ""
+        in_sql_block = False
         for line in query_lines:
             line = line.strip()
             if line.upper().startswith("SELECT"):
+                in_sql_block = True
                 sql_query = line
-                # Capture the rest of the query until a semicolon or end
-                for next_line in query_lines[query_lines.index(line):]:
-                    sql_query += "\n" + next_line
-                    if ";" in next_line:
-                        break
-                break
+            elif in_sql_block:
+                sql_query += "\n" + line
+                if ";" in line:
+                    break
         query = sql_query.replace("```sql", "").replace("```", "").strip()
+        if not query:
+            raise ValueError("No valid SQL query extracted from response")
         if not query.endswith(";"):
             query += ";"
         query = "\n".join(
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
-        debug_info["query"] = query
+        debug_info["cleaned_query"] = query
 
-        # Debug: Show query before validation
+        # Debug: Show queries
         if st.session_state.debug_mode:
-            st.write(f"Query before validation: {query}")
+            st.write(f"Raw query: {raw_query}")
+            st.write(f"Cleaned query: {query}")
 
-        if not validate_query(query):
-            return "Invalid SQL query generated. Please rephrase your question.", None, debug_info
+        # Validate query
+        try:
+            validate_query(query)
+        except ValueError as e:
+            debug_info["api_response"] = str(e)
+            return f"Invalid SQL query: {str(e)}. Please rephrase your question.", None, debug_info
 
         data, api_response, status_code = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
