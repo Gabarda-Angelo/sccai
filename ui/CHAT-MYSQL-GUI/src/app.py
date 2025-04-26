@@ -76,11 +76,10 @@ def handle_query(query: str):
                 st.write(f"**Generated SQL Query**: {debug_info['query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
-                st.write(f"**API Raw Response**: {debug_info['raw_response']}")
         except Exception as e:
             natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
             data = None
-            debug_info = {"query": "N/A", "api_response": str(e), "status_code": "N/A", "raw_response": "N/A"}
+            debug_info = {"query": "N/A", "api_response": str(e), "status_code": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -111,11 +110,6 @@ def handle_query(query: str):
                     elif chart_type == 'pie':
                         ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                         ax.set_title(f"Distribution of {columns[1]}")
-                    elif chart_type == 'stacked_bar':
-                        df.pivot_table(index=columns[0], columns=columns[2], values=columns[1]).plot(kind='bar', stacked=True, ax=ax)
-                        ax.set_title(f"{columns[1]} by {columns[0]} and {columns[2]}")
-                        ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     st.pyplot(fig)
                     st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
@@ -154,23 +148,21 @@ def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "
             timeout=15
         )
         status_code = response.status_code
-        raw_response = response.text
         if not response.text.strip():
-            return None, "Empty response", status_code, raw_response
+            return None, "Empty response from API", status_code
         data = response.json()
         if data.get("status") == "success":
-            return data["data"], "Success", status_code, raw_response
+            return data["data"], "Success", status_code
         else:
-            return None, data.get("error", "Unknown error"), status_code, raw_response
+            return None, data.get("error", "Unknown error"), status_code
     except requests.RequestException as e:
-        return None, str(e), "N/A", str(e)
+        return None, str(e), "N/A"
 
 # Validate SQL query
 def validate_query(query):
     allowed_keywords = [
         "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
-        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "CAST", "CASE", "AND", "OR",
-        "BETWEEN", "LIKE", "IN", "NOT", "DISTINCT", "AS", "LEFT", "RIGHT", "INNER"
+        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS"
     ]
     query_upper = query.upper()
     return query_upper.startswith("SELECT") and any(kw in query_upper for kw in allowed_keywords)
@@ -181,18 +173,18 @@ def get_sql_chain():
     Database Schema:
     - categories: category_id (PK), category_name, created_at, updated_at
     - employees: employee_id (PK), first_name, last_name, role (Owner/Admin/Cashier), email, password_hash, created_at, updated_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type (Sale/Restock/Adjustment), quantity, log_date, notes
+    - inventory_logs: log_id (PK), product_id (FK to products), change_type (Sale/Restock/Adjustment), quantity, log_date, notes, created_at, updated_at
     - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash/Card/Check), created_at, updated_at
-    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price
+    - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address
+    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address, created_at, updated_at
     - discount_logs: discount_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email, details (JSON), created_at
     - void_logs: void_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email, details (JSON), created_at
     - admin_logs: adminlogs_id (PK), action_type (INSERT/UPDATE/DELETE), admin_id (FK to employees), approved_by_owner (FK to employees), details (JSON), created_at
     """
 
     template = """
-    You are an AI assistant for the SCC School Store Database, generating SQL queries for MariaDB 10.6.21 to answer user questions.
+    You are an AI assistant for the SCC School Store Database, generating SQL queries for MariaDB 10.6.21.
 
     **Database Schema:**
     {schema}
@@ -204,18 +196,15 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - Handle date ranges with BETWEEN (e.g., '2025-01-03' to '2025-04-30').
-    - Use JSON_EXTRACT for JSON fields (e.g., JSON_EXTRACT(details, '$.amount_discounted') AS amount_discounted).
+    - Handle date ranges with BETWEEN (e.g., '2025-01-01' to '2025-04-30').
+    - Use JSON_EXTRACT for JSON fields (e.g., JSON_EXTRACT(details, '$.amount_discounted')).
     - Use aggregations (SUM, COUNT, AVG) for totals and rankings.
-    - Use CASE for conditional logic (e.g., profit = total_price - (quantity * purchase_price)).
     - Join tables explicitly with aliases (e.g., invoices i JOIN employees e ON i.employee_id = e.employee_id).
-    - Filter by role (e.g., role='Owner') for employee queries.
     - For profit/margin:
       - Profit = SUM(id.total_price - (id.quantity * p.purchase_price))
       - Margin = (Profit / SUM(id.total_price)) * 100
-    - Resolve product names to product_id (e.g., 'SCC SHIRT' to product_id=7).
-    - Ensure queries are valid for MariaDB 10.6.21, using LEFT JOIN where appropriate.
-    - Return only the SQL query, no explanations or markdown.
+    - Ensure queries are valid for MariaDB 10.6.21.
+    - Return only the SQL query, no explanations.
 
     **User Question:** {question}
     """
@@ -247,7 +236,6 @@ def get_sql_chain():
     2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for JSON fields
     4. Valid for MariaDB 10.6.21
-    5. No comments or markdown
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -274,9 +262,9 @@ def get_response(user_query: str, chat_history: list):
     data_keywords = [
         "sales", "invoice", "product", "category", "stock", "revenue", "order", "employee",
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
-        "cashier", "admin", "void", "profit", "margin", "best-selling", "transaction", "owner"
+        "profit", "margin"
     ]
-    debug_info = {"query": "", "api_response": "", "status_code": "", "raw_response": ""}
+    debug_info = {"query": "", "api_response": "", "status_code": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
@@ -303,22 +291,13 @@ def get_response(user_query: str, chat_history: list):
         debug_info["query"] = query
 
         if not validate_query(query):
-            return "Invalid SQL query generated. Please rephrase your question or try a different query.", None, debug_info
+            return "Invalid SQL query generated. Please rephrase your question.", None, debug_info
 
-        # Try API call, retry once on failure
-        data, api_response, status_code, raw_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
+        data, api_response, status_code = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
-        debug_info["raw_response"] = raw_response
         if data is None:
-            # Retry once
-            fetch_data_from_api.clear()  # Clear cache
-            data, api_response, status_code, raw_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
-            debug_info["api_response"] = api_response
-            debug_info["status_code"] = status_code
-            debug_info["raw_response"] = raw_response
-            if data is None:
-                return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or checking the date range.", None, debug_info
+            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or adjusting your query.", None, debug_info
 
         response_template = """
         Generate a natural language response based on:
@@ -327,13 +306,12 @@ def get_response(user_query: str, chat_history: list):
         - **History:** {chat_history}
 
         **Guidelines:**
-        - If empty results, say: "No data found for this query. Try a broader time frame, different date, or check if the item exists."
-        - Highlight insights (e.g., highest values, trends) with **bold**.
+        - If empty results, say: "No data found for this query. Try a broader time frame or different parameters."
+        - Highlight insights with **bold**.
         - Use - for lists, ₱ for money.
         - Parse JSON fields (e.g., amount_discounted) into readable format.
-        - Summarize multi-table results (e.g., cashier and invoice relationships).
-        - Keep concise (<250 words).
-        - Suggest follow-up: "Would you like more details on [related topic]?"
+        - Keep concise (<200 words).
+        - Suggest follow-up: "Would you like more details?"
         """
 
         chain = (
@@ -365,10 +343,8 @@ def determine_chart_type(query, df):
         return "line", (date_columns[0], numerical_columns[0])
     elif categorical_columns and numerical_columns:
         unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and any(kw in query_lower for kw in ["percentage", "distribution"]):
+        if unique_categories <= 6 and "percentage" in query_lower:
             return "pie", (categorical_columns[0], numerical_columns[0])
-        elif "category" in query_lower and len(categorical_columns) > 1:
-            return "stacked_bar", (categorical_columns[0], numerical_columns[0], categorical_columns[1])
         else:
             return "bar", (categorical_columns[0], numerical_columns[0])
     return None, None
@@ -400,62 +376,41 @@ def main():
                 if st.button("Clear Chat"):
                     clear_chat()
                     st.rerun()
-                # Sidebar queries (representative subset)
-                with st.expander("📈 Sales Invoices", expanded=True):
+                with st.expander("📈 Sales Performance", expanded=True):
                     queries = [
-                        "What are the sales invoice details for today?",
-                        "What products were sold in invoice 1000283?",
-                        "How many invoices were issued on April 25, 2025?",
-                        "What are the sales invoices details on April 25, 2025?"
+                        "What are the best-selling products this month?",
+                        "What is the total revenue for today?",
+                        "What is the daily sales trend for this month?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"sales_{q}"):
                             handle_query(q)
-                with st.expander("👥 Staff Activity"):
+                with st.expander("📦 Inventory Management"):
                     queries = [
-                        "Who is the cashier at this moment?",
-                        "Who was the cashier for invoice 1000284?",
-                        "Which admin approved admin_logs id 73?",
-                        "Which owner approved a product update on April 25, 2025?"
+                        "Which products are below the reorder level?",
+                        "What is the current stock level for SCC SHIRT?",
+                        "What are the most recent inventory adjustments?"
                     ]
                     for q in queries:
-                        if st.button(q, key=f"staff_{q}"):
+                        if st.button(q, key=f"inv_{q}"):
                             handle_query(q)
-                with st.expander("💰 Discounts & Voids"):
+                with st.expander("👥 Employee Performance"):
                     queries = [
-                        "What discounts were applied on April 25, 2025?",
-                        "Who was the cashier for discount_id 12?",
-                        "What void actions occurred on April 25, 2025?"
+                        "Who is currently logged in?",
+                        "What are the total sales by each employee this week?",
+                        "Who has the highest number of transactions today?"
                     ]
                     for q in queries:
-                        if st.button(q, key=f"disc_{q}"):
+                        if st.button(q, key=f"emp_{q}"):
                             handle_query(q)
-                with st.expander("📦 Best-Selling Products"):
+                with st.expander("💰 Financial Insights"):
                     queries = [
-                        "What are the best-selling products on April 25, 2025?",
-                        "Top 5 best-selling products in April 2025 for Stationery?",
-                        "Which product had the highest sales from January 3, 2025, to April 30, 2025?"
-                    ]
-                    for q in queries:
-                        if st.button(q, key=f"prod_{q}"):
-                            handle_query(q)
-                with st.expander("📊 Financial Metrics"):
-                    queries = [
-                        "What is the total sales revenue from January 3, 2025, to April 30, 2025?",
-                        "What is the profit margin for SCC SHIRT from January 1, 2025, to April 30, 2025?",
-                        "What is the total due amount from January 3, 2025, to April 30, 2025?"
+                        "What is the total amount due from unpaid invoices?",
+                        "What is the total discount given this month?",
+                        "What is the profit margin for SCC SHIRT this year?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{q}"):
-                            handle_query(q)
-                with st.expander("🔍 Trends & Inventory"):
-                    queries = [
-                        "What are the daily sales trends from January 3, 2025, to April 30, 2025?",
-                        "Which products were restocked on April 25, 2025?",
-                        "Which products are below the reorder level today?"
-                    ]
-                    for q in queries:
-                        if st.button(q, key=f"trend_{q}"):
                             handle_query(q)
             display_chat_history()
             user_query = st.chat_input("Type a message...")
