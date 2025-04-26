@@ -82,7 +82,7 @@ def handle_query(query: str):
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
                 if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin"]):
- `
+
 
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
