@@ -41,7 +41,7 @@ if "chat_history" not in st.session_state:
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
 if "debug_mode" not in st.session_state:
-    st.session_state.debug_mode = False
+    st.session_state.debug_mode = True  # Enabled by default per DEBUG_MODE = "true"
 
 # Authentication function
 def authenticate(email, password):
@@ -290,6 +290,10 @@ def get_response(user_query: str, chat_history: list):
         )
         debug_info["query"] = query
 
+        # Debug: Show query before validation
+        if st.session_state.debug_mode:
+            st.write(f"Query before validation: {query}")
+
         if not validate_query(query):
             return "Invalid SQL query generated. Please rephrase your question.", None, debug_info
 
@@ -368,7 +372,7 @@ def main():
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
-                st.checkbox("Debug Mode", key="debug_mode")
+                st.checkbox("Debug Mode", key="debug_mode", value=True)  # Default to True
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
