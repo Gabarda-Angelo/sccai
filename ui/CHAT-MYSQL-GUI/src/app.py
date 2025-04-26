@@ -75,10 +75,12 @@ def handle_query(query: str):
                 st.markdown("### Debug Info")
                 st.write(f"**Generated SQL Query**: {debug_info['query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
+                st.write(f"**API Status Code**: {debug_info['status_code']}")
+                st.write(f"**API Raw Response**: {debug_info['raw_response']}")
         except Exception as e:
             natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
             data = None
-            debug_info = {"query": "N/A", "api_response": str(e)}
+            debug_info = {"query": "N/A", "api_response": str(e), "status_code": "N/A", "raw_response": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -138,7 +140,7 @@ def clear_chat():
 
 # Fetch data from API
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "") -> dict:
+def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "") -> tuple:
     try:
         payload = {"action": action, "key": st.secrets["API_KEY"]}
         if params:
@@ -151,31 +153,27 @@ def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "
             params=payload,
             timeout=15
         )
+        status_code = response.status_code
+        raw_response = response.text
         if not response.text.strip():
-            st.error("Received empty response from API")
-            return None, "Empty response"
+            return None, "Empty response", status_code, raw_response
         data = response.json()
         if data.get("status") == "success":
-            return data["data"], "Success"
+            return data["data"], "Success", status_code, raw_response
         else:
-            st.error(f"API Error: {data.get('error', 'Unknown error')}")
-            return None, data.get("error", "Unknown error")
+            return None, data.get("error", "Unknown error"), status_code, raw_response
     except requests.RequestException as e:
-        st.error(f"Connection error: {str(e)}")
-        return None, str(e)
+        return None, str(e), "N/A", str(e)
 
 # Validate SQL query
 def validate_query(query):
     allowed_keywords = [
         "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
         "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "CAST", "CASE", "AND", "OR",
-        "BETWEEN", "LIKE", "IN", "NOT", "DISTINCT", "AS"
+        "BETWEEN", "LIKE", "IN", "NOT", "DISTINCT", "AS", "LEFT", "RIGHT", "INNER"
     ]
     query_upper = query.upper()
-    if not query_upper.startswith("SELECT"):
-        return False
-    # Allow complex queries with subqueries
-    return "SELECT" in query_upper and any(kw in query_upper for kw in allowed_keywords)
+    return query_upper.startswith("SELECT") and any(kw in query_upper for kw in allowed_keywords)
 
 # Define SQL chain
 def get_sql_chain():
@@ -194,7 +192,7 @@ def get_sql_chain():
     """
 
     template = """
-    You are an AI assistant for the SCC School Store Database, generating SQL queries to answer user questions.
+    You are an AI assistant for the SCC School Store Database, generating SQL queries for MariaDB 10.6.21 to answer user questions.
 
     **Database Schema:**
     {schema}
@@ -206,17 +204,17 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - Handle date ranges (e.g., 'from January 3, 2025, to April 30, 2025') with BETWEEN or >=/<=.
-    - Use JSON_EXTRACT for 'details' in discount_logs, void_logs, admin_logs (e.g., JSON_EXTRACT(details, '$.amount_discounted')).
-    - Use aggregations (SUM, COUNT, AVG) for totals, rankings, and averages.
+    - Handle date ranges with BETWEEN (e.g., '2025-01-03' to '2025-04-30').
+    - Use JSON_EXTRACT for JSON fields (e.g., JSON_EXTRACT(details, '$.amount_discounted') AS amount_discounted).
+    - Use aggregations (SUM, COUNT, AVG) for totals and rankings.
     - Use CASE for conditional logic (e.g., profit = total_price - (quantity * purchase_price)).
     - Join tables explicitly with aliases (e.g., invoices i JOIN employees e ON i.employee_id = e.employee_id).
-    - Filter by role (e.g., role='Cashier') for employee queries.
+    - Filter by role (e.g., role='Owner') for employee queries.
     - For profit/margin:
       - Profit = SUM(id.total_price - (id.quantity * p.purchase_price))
       - Margin = (Profit / SUM(id.total_price)) * 100
-    - Resolve product names to product_id (e.g., 'SCC SHIRT' to product_id).
-    - Ensure queries start with SELECT and are valid SQL.
+    - Resolve product names to product_id (e.g., 'SCC SHIRT' to product_id=7).
+    - Ensure queries are valid for MariaDB 10.6.21, using LEFT JOIN where appropriate.
     - Return only the SQL query, no explanations or markdown.
 
     **User Question:** {question}
@@ -247,9 +245,9 @@ def get_sql_chain():
     Return ONLY the final SQL query. Ensure:
     1. Starts with SELECT
     2. Uses explicit JOIN syntax with aliases
-    3. Handles JSON_EXTRACT for details columns
-    4. No comments or markdown
-    5. Valid SQL syntax
+    3. Handles JSON_EXTRACT for JSON fields
+    4. Valid for MariaDB 10.6.21
+    5. No comments or markdown
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -278,7 +276,7 @@ def get_response(user_query: str, chat_history: list):
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
         "cashier", "admin", "void", "profit", "margin", "best-selling", "transaction", "owner"
     ]
-    debug_info = {"query": "", "api_response": ""}
+    debug_info = {"query": "", "api_response": "", "status_code": "", "raw_response": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
@@ -308,15 +306,19 @@ def get_response(user_query: str, chat_history: list):
             return "Invalid SQL query generated. Please rephrase your question or try a different query.", None, debug_info
 
         # Try API call, retry once on failure
-        data, api_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
+        data, api_response, status_code, raw_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
         debug_info["api_response"] = api_response
+        debug_info["status_code"] = status_code
+        debug_info["raw_response"] = raw_response
         if data is None:
             # Retry once
             fetch_data_from_api.clear()  # Clear cache
-            data, api_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
+            data, api_response, status_code, raw_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
             debug_info["api_response"] = api_response
+            debug_info["status_code"] = status_code
+            debug_info["raw_response"] = raw_response
             if data is None:
-                return f"Couldn't retrieve data. API error: {api_response}. Try rephrasing or checking the date range.", None, debug_info
+                return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or checking the date range.", None, debug_info
 
         response_template = """
         Generate a natural language response based on:
@@ -403,7 +405,8 @@ def main():
                     queries = [
                         "What are the sales invoice details for today?",
                         "What products were sold in invoice 1000283?",
-                        "How many invoices were issued on April 25, 2025?"
+                        "How many invoices were issued on April 25, 2025?",
+                        "What are the sales invoices details on April 25, 2025?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"sales_{q}"):
