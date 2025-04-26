@@ -205,9 +205,12 @@ def get_sql_chain():
     - Use JSON_EXTRACT for JSON fields (e.g., JSON_EXTRACT(details, '$.amount_discounted')).
     - Use aggregations (SUM, COUNT, AVG) for totals and rankings.
     - Join tables explicitly with aliases (e.g., invoices i JOIN employees e ON i.employee_id = e.employee_id).
-    - For profit/margin:
-      - Profit = SUM(id.total_price - (id.quantity * p.purchase_price))
-      - Margin = (Profit / SUM(id.total_price)) * 100
+    - For profit calculations:
+      - Profit = SUM(id.total_price - (id.quantity * COALESCE(p.purchase_price, 0)))
+      - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
+      - Include all invoices unless a specific time frame is requested.
+    - Margin = (Profit / SUM(id.total_price)) * 100
+    - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
 
@@ -240,7 +243,8 @@ def get_sql_chain():
     1. Starts with SELECT
     2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for JSON fields
-    4. Valid for MariaDB 10.6.21
+    4. Uses COALESCE for purchase_price in profit calculations
+    5. Valid for MariaDB 10.6.21
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -337,12 +341,12 @@ def get_response(user_query: str, chat_history: list):
         - **History:** {chat_history}
 
         **Guidelines:**
-        - If empty results, say: "No data found for this query. Try a broader time frame or different parameters."
+        - If empty results, check if the query involves profit and suggest: "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames."
         - Highlight insights with **bold**.
         - Use - for lists, ₱ for money.
         - Parse JSON fields (e.g., amount_discounted) into readable format.
         - Keep concise (<200 words).
-        - Suggest follow-up: "Would you like more details?"
+        - Suggest follow-up: "Would you like more details or to check specific products?"
         """
 
         chain = (
@@ -363,7 +367,7 @@ def get_response(user_query: str, chat_history: list):
 
 # Determine chart type
 def determine_chart_type(query, df):
-    if df.empty or len(df.columns) < 2:
+    if df.empty or len(df.columns) < 2 or len(df) < 2:  # Skip charts for single records
         return None, None
     columns = df.columns.tolist()
     query_lower = query.lower()
