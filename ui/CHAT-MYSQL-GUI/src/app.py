@@ -172,6 +172,37 @@ def validate_query(query):
         raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
     return True
 
+# Format response
+def format_response(question: str, data: list) -> str:
+    if not data:
+        if "profit" in question.lower():
+            return "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames. Would you like more details or to check specific products?"
+        return "Sorry, I couldn't retrieve the data. Please try again. Would you like more details or to check specific products?"
+
+    question_lower = question.lower()
+    if "best selling products" in question_lower:
+        response = "Top-selling products in your store:\n\n"
+        for row in data[:3]:
+            response += f"- **{row['product_name']}** with **{row['total_quantity']}** units sold\n"
+        response += f"**{data[0]['product_name']}** takes the top spot, followed by **{data[1]['product_name']}**."
+    elif "total revenue" in question_lower:
+        revenue = data[0]['total_revenue']
+        response = f"Total Revenue: **₱{revenue:,.2f}**\n\nThis reflects all sales after discounts, indicating strong performance."
+    elif "total base cost" in question_lower:
+        cost = data[0]['base_cost']
+        response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
+    elif "total profit" in question_lower:
+        profit = data[0]['total_profit']
+        response = f"Total Profit: **₱{profit:,.2f}**\n\nThis is your revenue minus base costs, showing financial health."
+    elif "profit margin" in question_lower:
+        margin = data[0]['profit_margin']
+        response = f"Profit Margin: **{margin:.2f}%**\n\nThis shows the percentage of revenue retained as profit."
+    else:
+        response = json.dumps(data, indent=2)
+    
+    response += "\n\nWould you like more details or to check specific products?"
+    return response
+
 # Define SQL chain
 def get_sql_chain():
     schema = """
@@ -179,7 +210,14 @@ def get_sql_chain():
     - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash/Card/Check), created_at, updated_at
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    ...
+    - categories: category_id (PK), category_name, created_at, updated_at
+    - employees: employee_id (PK), first_name, last_name, role (Owner/Admin/Cashier), email, password_hash, created_at, updated_at, last_password_change
+    - admin_logs: adminlogs_id (PK), action_type (INSERT/UPDATE/DELETE), admin_id (FK to employees), approved_by_owner (FK to employees), details (JSON), created_at
+    - discount_logs: discount_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
+    - inventory_logs: log_id (PK), product_id (FK to products), change_type (Sale/Restock/Adjustment), quantity, log_date, notes, created_at, updated_at
+    - sync_log: id (PK), table_name, record_id, action (INSERT/UPDATE/DELETE), timestamp, synced
+    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address, created_at, updated_at
+    - void_logs: void_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
     """
 
     template = """
@@ -198,6 +236,8 @@ def get_sql_chain():
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
     - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
+    - For profit margin, use ROUND((SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) / SUM(i.total)) * 100, 2) from invoices i JOIN invoice_details id JOIN products p.
+    - For best-selling products, use SUM(id.quantity) from invoice_details id JOIN products p, grouped by product_id.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
     - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
     - Ensure queries are valid for MariaDB 10.6.21.
@@ -232,7 +272,7 @@ def get_sql_chain():
     1. Starts with SELECT
     2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for JSON fields
-    4. Uses COALESCE for purchase_price in profit calculations
+    4. Uses COALESCE for purchase_price in cost/profit calculations
     5. Valid for MariaDB 10.6.21
     """
 
@@ -305,11 +345,6 @@ def get_response(user_query: str, chat_history: list):
         )
         debug_info["cleaned_query"] = query
 
-        # Debug: Show queries
-        if st.session_state.debug_mode:
-            st.write(f"Raw query: {raw_query}")
-            st.write(f"Cleaned query: {query}")
-
         # Validate query
         try:
             validate_query(query)
@@ -323,35 +358,7 @@ def get_response(user_query: str, chat_history: list):
         if data is None:
             return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or adjusting your query.", None, debug_info
 
-        response_template = """
-        Generate a natural language response based on:
-        - **Question:** {question}
-        - **Results:** {response}
-        - **History:** {chat_history}
-
-        **Guidelines:**
-        - If empty results, check if the query involves profit and suggest: "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames."
-        - Highlight insights with **bold**.
-        - Use - for lists, ₱ for money.
-        - Parse JSON fields (e.g., amount_discounted) into readable format.
-        - Keep concise (<200 words).
-        - Suggest follow-up: "Would you like more details or to check specific products?"
-        """
-
-        chain = (
-            RunnablePassthrough.assign(
-                response=lambda _: json.dumps(data, indent=2)
-            )
-            | ChatPromptTemplate.from_template(response_template)
-            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
-            | StrOutputParser()
-        )
-
-        natural_response = chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-        })
-
+        natural_response = format_response(user_query, data)
         return natural_response, data, debug_info
 
 # Determine chart type
