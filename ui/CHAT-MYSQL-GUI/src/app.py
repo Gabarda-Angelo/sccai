@@ -78,10 +78,12 @@ def handle_query(query: str):
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
                 st.write(f"**Raw Data**: {debug_info['raw_data']}")
+                if debug_info.get('missing_products') is not None:
+                    st.write(f"**Missing Products in Invoice Details**: {debug_info['missing_products']}")
         except Exception as e:
             natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question or check the database connection."
             data = None
-            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A", "raw_data": "N/A"}
+            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A", "raw_data": "N/A", "missing_products": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -151,14 +153,14 @@ def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "
         )
         status_code = response.status_code
         if not response.text.strip():
-            return None, "Empty response from API", status_code, None
+            return None, "Empty response from API", status_code, None, None
         data = response.json()
         if data.get("status") == "success":
-            return data["data"], "Success", status_code, data
+            return data["data"], "Success", status_code, data, None
         else:
-            return None, data.get("error", "Unknown error"), status_code, data
+            return None, data.get("error", "Unknown error"), status_code, data, None
     except requests.RequestException as e:
-        return None, str(e), "N/A", None
+        return None, str(e), "N/A", None, None
 
 # Validate SQL query
 def validate_query(query):
@@ -174,12 +176,12 @@ def validate_query(query):
     return True
 
 # Format response
-def format_response(question: str, data: list) -> str:
+def format_response(question: str, data: list, missing_products: int = None) -> str:
     if not data or not isinstance(data, list) or len(data) == 0:
         if "profit" in question.lower() or "base cost" in question.lower():
-            return ("No data found. This may be due to missing purchase price information or no sales records. "
-                    "Please check the products table for valid purchase_price values. "
-                    "Would you like to see products with missing purchase prices?")
+            return ("No data found. This may be due to missing purchase price information or invalid product IDs in invoice_details. "
+                    "Please check the products table for valid purchase_price values or invoice_details for unmatched product_ids. "
+                    "Would you like to see products with missing purchase prices or invalid invoice_details?")
         return "Sorry, I couldn't retrieve the data. Please try again or check the database connection. Would you like more details or to check specific products?"
 
     question_lower = question.lower()
@@ -198,11 +200,21 @@ def format_response(question: str, data: list) -> str:
                 elif not isinstance(result[key], (int, float)):
                     result[key] = 0.0
 
+        # Calculate profit and margin if not provided
+        revenue = result.get('total_revenue', 0.0)
+        cost = result.get('base_cost', 0.0)
+        if 'total_profit' not in result or result['total_profit'] == 0.0:
+            result['total_profit'] = revenue - cost
+        if 'profit_margin' not in result or result['profit_margin'] == 0.0:
+            result['profit_margin'] = (result['total_profit'] / revenue * 100) if revenue > 0 else 0.0
+
         warning = ""
+        if missing_products and missing_products > 0:
+            warning += f"\n\n⚠️ Warning: {missing_products} invoice_details records have product_ids not found in products table, which may affect cost and profit calculations."
         if ("base cost" in question_lower or "profit" in question_lower) and result.get('base_cost', 0.0) == 0.0:
-            warning = "\n\n⚠️ Warning: Base cost is 0. This may indicate missing purchase_price data in the products table."
+            warning += "\n\n⚠️ Warning: Base cost is 0. This may indicate missing purchase_price data or unmatched product_ids in invoice_details."
         if "profit" in question_lower and result.get('total_profit', 0.0) == 0.0:
-            warning = "\n\n⚠️ Warning: Profit is 0. This may indicate missing purchase_price data or no sales records."
+            warning += "\n\n⚠️ Warning: Profit is 0. This may indicate missing purchase_price data or no valid sales records."
 
         if "best selling products" in question_lower:
             response = "Top-selling products in your store:\n\n"
@@ -223,6 +235,7 @@ def format_response(question: str, data: list) -> str:
         elif "profit margin" in question_lower:
             margin = result.get('profit_margin', 0.0)
             response = f"Profit Margin: **{margin:.2f}%**\n\nThis shows the percentage of revenue retained as profit."
+            response += warning
         else:
             response = json.dumps(data, indent=2)
     except (KeyError, TypeError, ValueError) as e:
@@ -261,14 +274,16 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - For revenue, use SUM(i.total) from invoices to account for discounts.
-    - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
-    - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
-    - For profit margin, use ROUND((SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) / SUM(i.total)) * 100, 2) from invoices i JOIN invoice_details id JOIN products p.
+    - For revenue, use SUM(i.total) from invoices where total > 0.
+    - For base cost, use COALESCE(SUM(id.quantity * p.purchase_price), 0) from invoice_details id LEFT JOIN products p to handle missing products.
+    - For profit, use SUM(i.total - COALESCE(id.quantity * p.purchase_price, 0)) from invoices i LEFT JOIN invoice_details id LEFT JOIN products p where i.total > 0.
+    - For profit margin, use ROUND((SUM(i.total - COALESCE(id.quantity * p.purchase_price, 0)) / SUM(i.total)) * 100, 2) from invoices i LEFT JOIN invoice_details id LEFT JOIN products p where i.total > 0.
     - For best-selling products, use SUM(id.quantity) from invoice_details id JOIN products p, grouped by product_id.
     - If asked about missing purchase prices, use SELECT product_id, product_name FROM products WHERE purchase_price IS NULL OR purchase_price = 0.
+    - If asked about invalid invoice_details, use SELECT id.product_id FROM invoice_details id LEFT JOIN products p ON id.product_id = p.product_id WHERE p.product_id IS NULL.
+    - Use LEFT JOIN for cost/profit calculations to include all invoice_details records, even with missing products.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
-    - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
+    - If the query asks for 'all time' or 'total', do NOT add a date filter unless specified (e.g., 'this month').
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
 
@@ -299,7 +314,7 @@ def get_sql_chain():
 
     Return ONLY the final SQL query. Ensure:
     1. Starts with SELECT
-    2. Uses explicit JOIN syntax with aliases
+    2. Uses explicit JOIN syntax with aliases (prefer LEFT JOIN for cost/profit)
     3. Handles JSON_EXTRACT for JSON fields
     4. Uses COALESCE for purchase_price in cost/profit calculations
     5. Valid for MariaDB 10.6.21
@@ -331,7 +346,7 @@ def get_response(user_query: str, chat_history: list):
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
         "profit", "margin"
     ]
-    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": "", "raw_data": ""}
+    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": "", "raw_data": "", "missing_products": None}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
@@ -339,8 +354,8 @@ def get_response(user_query: str, chat_history: list):
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-%d')
-        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+        current_sg_date = now_sg.strftime('%Y-%m-DD')
+        current_sg_datetime = now_sg.strftime('%Y-%m-DD %H:%M:%S')
 
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
@@ -381,14 +396,28 @@ def get_response(user_query: str, chat_history: list):
             debug_info["api_response"] = str(e)
             return f"Invalid SQL query: {str(e)}. Please rephrase your question.", None, debug_info
 
-        data, api_response, status_code, raw_data = fetch_data_from_api("execute_query", {"query": query})
+        # Check for missing products if query involves cost or profit
+        missing_products = None
+        if any(keyword in user_query.lower() for keyword in ["base cost", "profit", "margin"]):
+            missing_query = """
+            SELECT COUNT(*) AS missing_products
+            FROM invoice_details id
+            LEFT JOIN products p ON id.product_id = p.product_id
+            WHERE p.product_id IS NULL;
+            """
+            missing_data, _, _, _, _ = fetch_data_from_api("execute_query", {"query": missing_query})
+            if missing_data and isinstance(missing_data, list) and len(missing_data) > 0:
+                missing_products = missing_data[0].get('missing_products', 0)
+            debug_info["missing_products"] = missing_products
+
+        data, api_response, status_code, raw_data, _ = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
         debug_info["raw_data"] = json.dumps(raw_data, indent=2) if raw_data else "No data returned"
         if data is None:
             return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or checking the database connection.", None, debug_info
 
-        natural_response = format_response(user_query, data)
+        natural_response = format_response(user_query, data, missing_products)
         return natural_response, data, debug_info
 
 # Determine chart type
@@ -404,7 +433,7 @@ def determine_chart_type(query, df):
         return "line", (date_columns[0], numerical_columns[0])
     elif categorical_columns and numerical_columns:
         unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and "percentage" in question_lower:
+        if unique_categories <= 6 and "percentage" in query_lower:
             return "pie", (categorical_columns[0], numerical_columns[0])
         else:
             return "bar", (categorical_columns[0], numerical_columns[0])
