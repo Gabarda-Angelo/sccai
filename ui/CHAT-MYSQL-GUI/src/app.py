@@ -40,6 +40,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
+if "debug_mode" not in st.session_state:
+    st.session_state.debug_mode = False
 
 # Authentication function
 def authenticate(email, password):
@@ -68,10 +70,15 @@ def handle_query(query: str):
         st.markdown(query)
     with st.spinner("Analyzing your query..."):
         try:
-            natural_response, data = get_response(query, st.session_state.chat_history)
+            natural_response, data, debug_info = get_response(query, st.session_state.chat_history)
+            if st.session_state.debug_mode:
+                st.markdown("### Debug Info")
+                st.write(f"**Generated SQL Query**: {debug_info['query']}")
+                st.write(f"**API Response**: {debug_info['api_response']}")
         except Exception as e:
-            natural_response = f"An error occurred: {str(e)}"
+            natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
             data = None
+            debug_info = {"query": "N/A", "api_response": str(e)}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -81,9 +88,7 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin"]):
-
-
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
@@ -132,8 +137,8 @@ def clear_chat():
     st.success("Chat history cleared. Starting a new conversation!")
 
 # Fetch data from API
-@st.cache_data(ttl=300)
-def fetch_data_from_api(action: str, params: dict = None) -> dict:
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "") -> dict:
     try:
         payload = {"action": action, "key": st.secrets["API_KEY"]}
         if params:
@@ -148,27 +153,29 @@ def fetch_data_from_api(action: str, params: dict = None) -> dict:
         )
         if not response.text.strip():
             st.error("Received empty response from API")
-            return None
+            return None, "Empty response"
         data = response.json()
         if data.get("status") == "success":
-            return data["data"]
+            return data["data"], "Success"
         else:
             st.error(f"API Error: {data.get('error', 'Unknown error')}")
-            return None
+            return None, data.get("error", "Unknown error")
     except requests.RequestException as e:
         st.error(f"Connection error: {str(e)}")
-        return None
+        return None, str(e)
 
 # Validate SQL query
 def validate_query(query):
     allowed_keywords = [
         "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
-        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "CAST", "CASE", "AND", "OR"
+        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "CAST", "CASE", "AND", "OR",
+        "BETWEEN", "LIKE", "IN", "NOT", "DISTINCT", "AS"
     ]
     query_upper = query.upper()
     if not query_upper.startswith("SELECT"):
         return False
-    return all(any(kw in query_upper for kw in allowed_keywords) for line in query_upper.split("\n") if line.strip())
+    # Allow complex queries with subqueries
+    return "SELECT" in query_upper and any(kw in query_upper for kw in allowed_keywords)
 
 # Define SQL chain
 def get_sql_chain():
@@ -200,16 +207,17 @@ def get_sql_chain():
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
     - Handle date ranges (e.g., 'from January 3, 2025, to April 30, 2025') with BETWEEN or >=/<=.
-    - Use JSON_EXTRACT for 'details' columns in discount_logs, void_logs, admin_logs.
-    - Support aggregations (SUM, COUNT, AVG) for totals, averages, and rankings.
-    - Use CASE statements for conditional logic (e.g., profit calculations).
+    - Use JSON_EXTRACT for 'details' in discount_logs, void_logs, admin_logs (e.g., JSON_EXTRACT(details, '$.amount_discounted')).
+    - Use aggregations (SUM, COUNT, AVG) for totals, rankings, and averages.
+    - Use CASE for conditional logic (e.g., profit = total_price - (quantity * purchase_price)).
     - Join tables explicitly with aliases (e.g., invoices i JOIN employees e ON i.employee_id = e.employee_id).
-    - Handle role-based queries (e.g., role='Cashier') for employee-related questions.
-    - For profit/margin, calculate as:
+    - Filter by role (e.g., role='Cashier') for employee queries.
+    - For profit/margin:
       - Profit = SUM(id.total_price - (id.quantity * p.purchase_price))
       - Margin = (Profit / SUM(id.total_price)) * 100
-    - Resolve product names to product_id by matching product_name.
-    - Return only the SQL query, no explanations.
+    - Resolve product names to product_id (e.g., 'SCC SHIRT' to product_id).
+    - Ensure queries start with SELECT and are valid SQL.
+    - Return only the SQL query, no explanations or markdown.
 
     **User Question:** {question}
     """
@@ -241,6 +249,7 @@ def get_sql_chain():
     2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for details columns
     4. No comments or markdown
+    5. Valid SQL syntax
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -249,7 +258,7 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-5:]])  # Last 5 messages
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-5:]])
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -267,12 +276,13 @@ def get_response(user_query: str, chat_history: list):
     data_keywords = [
         "sales", "invoice", "product", "category", "stock", "revenue", "order", "employee",
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
-        "cashier", "admin", "void", "profit", "margin", "best-selling", "transaction"
+        "cashier", "admin", "void", "profit", "margin", "best-selling", "transaction", "owner"
     ]
+    debug_info = {"query": "", "api_response": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
-        return f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')} in Singapore.", None
+        return f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')} in Singapore.", None, debug_info
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
@@ -292,13 +302,21 @@ def get_response(user_query: str, chat_history: list):
         query = "\n".join(
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
+        debug_info["query"] = query
 
         if not validate_query(query):
-            return "Failed to generate a valid database query. Please try again.", None
+            return "Invalid SQL query generated. Please rephrase your question or try a different query.", None, debug_info
 
-        data = fetch_data_from_api("execute_query", {"query": query})
+        # Try API call, retry once on failure
+        data, api_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
+        debug_info["api_response"] = api_response
         if data is None:
-            return "Couldn't retrieve data. Please try again or rephrase your question.", None
+            # Retry once
+            fetch_data_from_api.clear()  # Clear cache
+            data, api_response = fetch_data_from_api("execute_query", {"query": query}, _cache_buster=str(datetime.datetime.now()))
+            debug_info["api_response"] = api_response
+            if data is None:
+                return f"Couldn't retrieve data. API error: {api_response}. Try rephrasing or checking the date range.", None, debug_info
 
         response_template = """
         Generate a natural language response based on:
@@ -307,13 +325,13 @@ def get_response(user_query: str, chat_history: list):
         - **History:** {chat_history}
 
         **Guidelines:**
-        - If empty results, say: "No data found. Try a broader time frame or different item."
+        - If empty results, say: "No data found for this query. Try a broader time frame, different date, or check if the item exists."
         - Highlight insights (e.g., highest values, trends) with **bold**.
         - Use - for lists, ₱ for money.
-        - Handle JSON fields (convert to readable format).
-        - For multi-table results, summarize relationships (e.g., cashier and invoice).
+        - Parse JSON fields (e.g., amount_discounted) into readable format.
+        - Summarize multi-table results (e.g., cashier and invoice relationships).
         - Keep concise (<250 words).
-        - Suggest follow-up questions if relevant.
+        - Suggest follow-up: "Would you like more details on [related topic]?"
         """
 
         chain = (
@@ -330,7 +348,7 @@ def get_response(user_query: str, chat_history: list):
             "chat_history": chat_history,
         })
 
-        return natural_response, data
+        return natural_response, data, debug_info
 
 # Determine chart type
 def determine_chart_type(query, df):
@@ -372,6 +390,7 @@ def main():
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
+                st.checkbox("Debug Mode", key="debug_mode")
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
@@ -393,7 +412,8 @@ def main():
                     queries = [
                         "Who is the cashier at this moment?",
                         "Who was the cashier for invoice 1000284?",
-                        "Which admin approved admin_logs id 73?"
+                        "Which admin approved admin_logs id 73?",
+                        "Which owner approved a product update on April 25, 2025?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"staff_{q}"):
