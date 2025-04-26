@@ -176,8 +176,10 @@ def validate_query(query):
 # Format response
 def format_response(question: str, data: list) -> str:
     if not data or not isinstance(data, list) or len(data) == 0:
-        if "profit" in question.lower():
-            return "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames. Would you like more details or to check specific products?"
+        if "profit" in question.lower() or "base cost" in question.lower():
+            return ("No data found. This may be due to missing purchase price information or no sales records. "
+                    "Please check the products table for valid purchase_price values. "
+                    "Would you like to see products with missing purchase prices?")
         return "Sorry, I couldn't retrieve the data. Please try again or check the database connection. Would you like more details or to check specific products?"
 
     question_lower = question.lower()
@@ -185,11 +187,22 @@ def format_response(question: str, data: list) -> str:
         # Convert string values to numeric where applicable
         result = data[0]
         for key in ['total_revenue', 'base_cost', 'total_profit', 'profit_margin']:
-            if key in result and isinstance(result[key], str):
-                try:
-                    result[key] = float(result[key].replace(',', ''))
-                except (ValueError, AttributeError):
+            if key in result:
+                if result[key] is None:
                     result[key] = 0.0
+                elif isinstance(result[key], str):
+                    try:
+                        result[key] = float(result[key].replace(',', ''))
+                    except (ValueError, AttributeError):
+                        result[key] = 0.0
+                elif not isinstance(result[key], (int, float)):
+                    result[key] = 0.0
+
+        warning = ""
+        if ("base cost" in question_lower or "profit" in question_lower) and result.get('base_cost', 0.0) == 0.0:
+            warning = "\n\n⚠️ Warning: Base cost is 0. This may indicate missing purchase_price data in the products table."
+        if "profit" in question_lower and result.get('total_profit', 0.0) == 0.0:
+            warning = "\n\n⚠️ Warning: Profit is 0. This may indicate missing purchase_price data or no sales records."
 
         if "best selling products" in question_lower:
             response = "Top-selling products in your store:\n\n"
@@ -202,9 +215,11 @@ def format_response(question: str, data: list) -> str:
         elif "total base cost" in question_lower:
             cost = result.get('base_cost', 0.0)
             response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
+            response += warning
         elif "total profit" in question_lower:
             profit = result.get('total_profit', 0.0)
             response = f"Total Profit: **₱{profit:,.2f}**\n\nThis is your revenue minus base costs, showing financial health."
+            response += warning
         elif "profit margin" in question_lower:
             margin = result.get('profit_margin', 0.0)
             response = f"Profit Margin: **{margin:.2f}%**\n\nThis shows the percentage of revenue retained as profit."
@@ -251,6 +266,7 @@ def get_sql_chain():
     - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
     - For profit margin, use ROUND((SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) / SUM(i.total)) * 100, 2) from invoices i JOIN invoice_details id JOIN products p.
     - For best-selling products, use SUM(id.quantity) from invoice_details id JOIN products p, grouped by product_id.
+    - If asked about missing purchase prices, use SELECT product_id, product_name FROM products WHERE purchase_price IS NULL OR purchase_price = 0.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
     - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
     - Ensure queries are valid for MariaDB 10.6.21.
