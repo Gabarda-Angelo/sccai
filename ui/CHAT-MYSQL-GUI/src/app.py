@@ -394,48 +394,83 @@ def get_response(user_query: str, chat_history: list):
         current_sg_date = now_sg.strftime('%Y-%m-%d')
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
-        sql_chain = get_sql_chain()
-        raw_query = sql_chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
-        })
-        debug_info["raw_query"] = raw_query
+        # Default to all-time financial query unless date is specified
+        query_lower = user_query.lower()
+        if any(keyword in query_lower for keyword in ["revenue", "base cost", "profit", "margin", "invoices", "average sales"]):
+            sql_query = """
+            WITH invoice_stats AS (
+                SELECT 
+                    COUNT(invoice_id) AS total_invoices,
+                    ROUND(AVG(total), 2) AS average_sales_value,
+                    SUM(total) AS total_revenue
+                FROM invoices
+                WHERE total > 0
+            ),
+            cost_stats AS (
+                SELECT 
+                    COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+                FROM invoice_details id
+                LEFT JOIN products p ON id.product_id = p.product_id
+            )
+            SELECT 
+                i_stats.total_invoices,
+                i_stats.average_sales_value,
+                i_stats.total_revenue,
+                c_stats.base_cost,
+                (i_stats.total_revenue - c_stats.base_cost) AS total_profit,
+                ROUND(((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue * 100), 1) AS profit_margin
+            FROM invoice_stats i_stats
+            CROSS JOIN cost_stats c_stats;
+            """
+            # Add date filter if specified (e.g., "this month")
+            if "this month" in query_lower:
+                sql_query = sql_query.replace(
+                    "WHERE total > 0",
+                    f"WHERE total > 0 AND order_date LIKE '{current_sg_date[:7]}%'"
+                )
+        else:
+            sql_chain = get_sql_chain()
+            raw_query = sql_chain.invoke({
+                "question": user_query,
+                "chat_history": chat_history,
+                "current_sg_date": current_sg_date,
+                "current_sg_datetime": current_sg_datetime
+            })
+            debug_info["raw_query"] = raw_query
+            query_lines = raw_query.split("\n")
+            sql_query = ""
+            in_sql_block = False
+            for line in query_lines:
+                line = line.strip()
+                if line.upper().startswith("SELECT") or line.upper().startswith("WITH"):
+                    in_sql_block = True
+                    sql_query = line
+                elif in_sql_block:
+                    sql_query += "\n" + line
+                    if ";" in line:
+                        break
+            sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+            if not sql_query:
+                raise ValueError("No valid SQL query extracted from response")
+            if not sql_query.endswith(";"):
+                sql_query += ";"
+            sql_query = "\n".join(
+                [line for line in sql_query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
+            )
+            debug_info["cleaned_query"] = sql_query
 
-        # Extract SQL query
-        query_lines = raw_query.split("\n")
-        sql_query = ""
-        in_sql_block = False
-        for line in query_lines:
-            line = line.strip()
-            if line.upper().startswith("SELECT") or line.upper().startswith("WITH"):
-                in_sql_block = True
-                sql_query = line
-            elif in_sql_block:
-                sql_query += "\n" + line
-                if ";" in line:
-                    break
-        query = sql_query.replace("```sql", "").replace("```", "").strip()
-        if not query:
-            raise ValueError("No valid SQL query extracted from response")
-        if not query.endswith(";"):
-            query += ";"
-        query = "\n".join(
-            [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
-        )
-        debug_info["cleaned_query"] = query
+        debug_info["cleaned_query"] = sql_query
 
         # Validate query
         try:
-            validate_query(query)
+            validate_query(sql_query)
         except ValueError as e:
             debug_info["api_response"] = str(e)
             return f"Invalid SQL query: {str(e)}. Please rephrase your question.", None, debug_info
 
-        # Check for missing products if query involves cost or profit
+        # Check for missing products
         missing_products = None
-        if any(keyword in user_query.lower() for keyword in ["base cost", "profit", "margin"]):
+        if any(keyword in query_lower for keyword in ["base cost", "profit", "margin"]):
             missing_query = """
             SELECT COUNT(*) AS missing_products
             FROM invoice_details id
@@ -447,7 +482,7 @@ def get_response(user_query: str, chat_history: list):
                 missing_products = missing_data[0].get('missing_products', 0)
             debug_info["missing_products"] = missing_products
 
-        data, api_response, status_code, raw_data, _ = fetch_data_from_api("execute_query", {"query": query})
+        data, api_response, status_code, raw_data, _ = fetch_data_from_api("execute_query", {"query": sql_query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
         debug_info["raw_data"] = json.dumps(raw_data, indent=2) if raw_data else "No data returned"
@@ -456,7 +491,6 @@ def get_response(user_query: str, chat_history: list):
 
         natural_response = format_response(user_query, data, missing_products)
         return natural_response, data, debug_info
-
 # Determine chart type
 def determine_chart_type(query, df):
     if df.empty or len(df.columns) < 2 or len(df) < 2:  # Skip charts for single records
