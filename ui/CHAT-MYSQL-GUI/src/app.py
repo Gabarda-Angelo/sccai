@@ -12,6 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import time
 
 # Set page configuration
 st.set_page_config(
@@ -93,7 +94,7 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted"]):
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted", "average_sales_value"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
@@ -136,37 +137,43 @@ def clear_chat():
     ]
     st.success("Chat history cleared. Starting a new conversation!")
 
-# Fetch data from API
+# Fetch data from API with retry
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "") -> tuple:
-    try:
-        payload = {"action": action, "key": st.secrets["API_KEY"]}
-        if params:
-            if "query" in params:
-                st.session_state.last_query = params["query"]
-                params["query"] = quote(params["query"])
-            payload.update(params)
-        response = requests.get(
-            st.secrets["API_URL"],
-            params=payload,
-            timeout=15
-        )
-        status_code = response.status_code
-        if not response.text.strip():
-            return None, "Empty response from API", status_code, None, None
-        data = response.json()
-        if data.get("status") == "success":
-            return data["data"], "Success", status_code, data, None
-        else:
-            return None, data.get("error", "Unknown error"), status_code, data, None
-    except requests.RequestException as e:
-        return None, str(e), "N/A", None, None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            payload = {"action": action, "key": st.secrets["API_KEY"]}
+            if params:
+                if "query" in params:
+                    st.session_state.last_query = params["query"]
+                    params["query"] = quote(params["query"])
+                payload.update(params)
+            response = requests.get(
+                st.secrets["API_URL"],
+                params=payload,
+                timeout=15
+            )
+            status_code = response.status_code
+            if not response.text.strip():
+                return None, "Empty response from API", status_code, None, None
+            data = response.json()
+            if data.get("status") == "success":
+                return data["data"], "Success", status_code, data, None
+            else:
+                return None, data.get("error", "Unknown error"), status_code, data, None
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                time.sleep(1)  # Wait before retrying
+                continue
+            return None, str(e), "N/A", None, None
+    return None, "Max retries exceeded", "N/A", None, None
 
 # Validate SQL query
 def validate_query(query):
     allowed_keywords = [
         "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
-        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS"
+        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS", "WITH"
     ]
     query_upper = query.upper().strip()
     if not query_upper.startswith("SELECT"):
@@ -178,7 +185,7 @@ def validate_query(query):
 # Format response
 def format_response(question: str, data: list, missing_products: int = None) -> str:
     if not data or not isinstance(data, list) or len(data) == 0:
-        if "profit" in question.lower() or "base cost" in question.lower():
+        if any(keyword in question.lower() for keyword in ["profit", "base cost", "margin"]):
             return ("No data found. This may be due to missing purchase price information or invalid product IDs in invoice_details. "
                     "Please check the products table for valid purchase_price values or invoice_details for unmatched product_ids. "
                     "Would you like to see products with missing purchase prices or invalid invoice_details?")
@@ -186,32 +193,24 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
 
     question_lower = question.lower()
     try:
-        # Convert string values to numeric where applicable
         result = data[0]
-        for key in ['total_revenue', 'base_cost', 'total_profit', 'profit_margin']:
-            if key in result:
+        # Convert string values to numeric where applicable
+        for key in result:
+            if key in ['total_revenue', 'base_cost', 'total_profit', 'profit_margin', 'average_sales_value', 'total_invoices']:
                 if result[key] is None:
-                    result[key] = 0.0
+                    result[key] = 0.0 if key != 'total_invoices' else 0
                 elif isinstance(result[key], str):
                     try:
-                        result[key] = float(result[key].replace(',', ''))
+                        result[key] = float(result[key].replace(',', '')) if key != 'total_invoices' else int(result[key])
                     except (ValueError, AttributeError):
-                        result[key] = 0.0
+                        result[key] = 0.0 if key != 'total_invoices' else 0
                 elif not isinstance(result[key], (int, float)):
-                    result[key] = 0.0
-
-        # Calculate profit and margin if not provided
-        revenue = result.get('total_revenue', 0.0)
-        cost = result.get('base_cost', 0.0)
-        if 'total_profit' not in result or result['total_profit'] == 0.0:
-            result['total_profit'] = revenue - cost
-        if 'profit_margin' not in result or result['profit_margin'] == 0.0:
-            result['profit_margin'] = (result['total_profit'] / revenue * 100) if revenue > 0 else 0.0
+                    result[key] = 0.0 if key != 'total_invoices' else 0
 
         warning = ""
         if missing_products and missing_products > 0:
             warning += f"\n\n⚠️ Warning: {missing_products} invoice_details records have product_ids not found in products table, which may affect cost and profit calculations."
-        if ("base cost" in question_lower or "profit" in question_lower) and result.get('base_cost', 0.0) == 0.0:
+        if any(keyword in question_lower for keyword in ["base cost", "profit"]) and result.get('base_cost', 0.0) == 0.0:
             warning += "\n\n⚠️ Warning: Base cost is 0. This may indicate missing purchase_price data or unmatched product_ids in invoice_details."
         if "profit" in question_lower and result.get('total_profit', 0.0) == 0.0:
             warning += "\n\n⚠️ Warning: Profit is 0. This may indicate missing purchase_price data or no valid sales records."
@@ -229,13 +228,24 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
             response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
             response += warning
         elif "total profit" in question_lower:
-            profit = result.get('total_profit', 0.0)
+            revenue = result.get('total_revenue', 0.0)
+            cost = result.get('base_cost', 0.0)
+            profit = revenue - cost
             response = f"Total Profit: **₱{profit:,.2f}**\n\nThis is your revenue minus base costs, showing financial health."
             response += warning
         elif "profit margin" in question_lower:
-            margin = result.get('profit_margin', 0.0)
+            revenue = result.get('total_revenue', 0.0)
+            cost = result.get('base_cost', 0.0)
+            profit = revenue - cost
+            margin = (profit / revenue * 100) if revenue > 0 else 0.0
             response = f"Profit Margin: **{margin:.2f}%**\n\nThis shows the percentage of revenue retained as profit."
             response += warning
+        elif "average sales value" in question_lower:
+            avg_sales = result.get('average_sales_value', 0.0)
+            response = f"Average Sales Value: **₱{avg_sales:,.2f}**\n\nThis is the average value of each invoice, reflecting typical transaction size."
+        elif any(keyword in question_lower for keyword in ["total invoices", "how many invoice"]):
+            invoices = result.get('total_invoices', 0)
+            response = f"Total Invoices: **{invoices}**\n\nThis is the total number of invoices processed by the store."
         else:
             response = json.dumps(data, indent=2)
     except (KeyError, TypeError, ValueError) as e:
@@ -276,14 +286,38 @@ def get_sql_chain():
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
     - For revenue, use SUM(i.total) from invoices where total > 0.
     - For base cost, use COALESCE(SUM(id.quantity * p.purchase_price), 0) from invoice_details id LEFT JOIN products p to handle missing products.
-    - For profit, use SUM(i.total - COALESCE(id.quantity * p.purchase_price, 0)) from invoices i LEFT JOIN invoice_details id LEFT JOIN products p where i.total > 0.
-    - For profit margin, use ROUND((SUM(i.total - COALESCE(id.quantity * p.purchase_price, 0)) / SUM(i.total)) * 100, 2) from invoices i LEFT JOIN invoice_details id LEFT JOIN products p where i.total > 0.
+    - For profit, compute in Python (revenue - base_cost) to align with PHP logic.
+    - For profit margin, compute in Python ((revenue - base_cost) / revenue * 100) to align with PHP logic.
+    - For average sales value, use ROUND(AVG(i.total), 2) from invoices where total > 0.
+    - For total invoices, use COUNT(*) from invoices.
     - For best-selling products, use SUM(id.quantity) from invoice_details id JOIN products p, grouped by product_id.
     - If asked about missing purchase prices, use SELECT product_id, product_name FROM products WHERE purchase_price IS NULL OR purchase_price = 0.
     - If asked about invalid invoice_details, use SELECT id.product_id FROM invoice_details id LEFT JOIN products p ON id.product_id = p.product_id WHERE p.product_id IS NULL.
-    - Use LEFT JOIN for cost/profit calculations to include all invoice_details records, even with missing products.
+    - Use LEFT JOIN for cost calculations to include all invoice_details records, even with missing products.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
     - If the query asks for 'all time' or 'total', do NOT add a date filter unless specified (e.g., 'this month').
+    - For financial metrics (revenue, base cost, average sales), use a CTE structure like:
+      WITH invoice_stats AS (
+        SELECT 
+          COUNT(invoice_id) AS total_invoices,
+          ROUND(AVG(total), 2) AS average_sales_value,
+          SUM(total) AS total_revenue
+        FROM invoices
+        WHERE total > 0
+      ),
+      cost_stats AS (
+        SELECT 
+          COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+        FROM invoice_details id
+        LEFT JOIN products p ON id.product_id = p.product_id
+      )
+      SELECT 
+        i_stats.total_invoices,
+        i_stats.average_sales_value,
+        i_stats.total_revenue,
+        c_stats.base_cost
+      FROM invoice_stats i_stats
+      CROSS JOIN cost_stats c_stats;
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
 
@@ -316,7 +350,7 @@ def get_sql_chain():
     1. Starts with SELECT
     2. Uses explicit JOIN syntax with aliases (prefer LEFT JOIN for cost/profit)
     3. Handles JSON_EXTRACT for JSON fields
-    4. Uses COALESCE for purchase_price in cost/profit calculations
+    4. Uses COALESCE for purchase_price in cost calculations
     5. Valid for MariaDB 10.6.21
     """
 
@@ -354,8 +388,8 @@ def get_response(user_query: str, chat_history: list):
     else:
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-DD')
-        current_sg_datetime = now_sg.strftime('%Y-%m-DD %H:%M:%S')
+        current_sg_date = now_sg.strftime('%Y-%m-%d')
+        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
@@ -372,7 +406,7 @@ def get_response(user_query: str, chat_history: list):
         in_sql_block = False
         for line in query_lines:
             line = line.strip()
-            if line.upper().startswith("SELECT"):
+            if line.upper().startswith("SELECT") or line.upper().startswith("WITH"):
                 in_sql_block = True
                 sql_query = line
             elif in_sql_block:
