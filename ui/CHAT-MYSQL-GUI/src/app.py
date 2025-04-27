@@ -186,10 +186,10 @@ def validate_query(query):
 def format_response(question: str, data: list, missing_products: int = None) -> str:
     if not data or not isinstance(data, list) or len(data) == 0:
         if any(keyword in question.lower() for keyword in ["profit", "base cost", "margin"]):
-            return ("No data found. This may be due to missing purchase price information or invalid product IDs in invoice_details. "
-                    "Please check the products table for valid purchase_price values or invoice_details for unmatched product_ids. "
-                    "Would you like to see products with missing purchase prices or invalid invoice_details?")
-        return "Sorry, I couldn't retrieve the data. Please try again or check the database connection. Would you like more details or to check specific products?"
+            return ("No data found. This may be due to missing purchase price information. "
+                    "Please check the products table for valid purchase_price values. "
+                    "Would you like to see products with missing purchase prices?")
+        return "Sorry, I couldn't retrieve the data. Please try again or check the database connection."
 
     question_lower = question.lower()
     try:
@@ -201,8 +201,11 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
                     result[key] = 0.0 if key != 'total_invoices' else 0
                 elif isinstance(result[key], str):
                     try:
-                        result[key] = float(result[key].replace(',', '')) if key != 'total_invoices' else int(result[key])
-                    except (ValueError, AttributeError):
+                        # Remove commas and convert to float/int
+                        cleaned_value = result[key].replace(',', '').strip()
+                        result[key] = float(cleaned_value) if key != 'total_invoices' else int(cleaned_value)
+                    except (ValueError, AttributeError) as e:
+                        st.write(f"Debug: Failed to convert {key} = '{result[key]}' to numeric: {str(e)}")
                         result[key] = 0.0 if key != 'total_invoices' else 0
                 elif not isinstance(result[key], (int, float)):
                     result[key] = 0.0 if key != 'total_invoices' else 0
@@ -211,7 +214,7 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
         if missing_products and missing_products > 0:
             warning += f"\n\n⚠️ Warning: {missing_products} invoice_details records have product_ids not found in products table, which may affect cost and profit calculations."
         if any(keyword in question_lower for keyword in ["base cost", "profit"]) and result.get('base_cost', 0.0) == 0.0:
-            warning += "\n\n⚠️ Warning: Base cost is 0. This may indicate missing purchase_price data or unmatched product_ids in invoice_details."
+            warning += "\n\n⚠️ Warning: Base cost is 0. This may indicate missing purchase_price data."
         if "profit" in question_lower and result.get('total_profit', 0.0) == 0.0:
             warning += "\n\n⚠️ Warning: Profit is 0. This may indicate missing purchase_price data or no valid sales records."
 
@@ -238,7 +241,7 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
             cost = result.get('base_cost', 0.0)
             profit = revenue - cost
             margin = (profit / revenue * 100) if revenue > 0 else 0.0
-            response = f"Profit Margin: **{margin:.2f}%**\n\nThis shows the percentage of revenue retained as profit."
+            response = f"Profit Margin: **{margin:.1f}%**\n\nThis shows the percentage of revenue retained as profit."
             response += warning
         elif "average sales value" in question_lower:
             avg_sales = result.get('average_sales_value', 0.0)
@@ -253,7 +256,6 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
     
     response += "\n\nWould you like more details or to check specific products?"
     return response
-
 # Define SQL chain
 def get_sql_chain():
     schema = """
