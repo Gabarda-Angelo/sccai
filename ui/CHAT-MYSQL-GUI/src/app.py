@@ -287,18 +287,18 @@ def get_sql_chain():
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
     - For revenue, use SUM(i.total) from invoices where total > 0.
-    - For base cost, use COALESCE(SUM(id.quantity * p.purchase_price), 0) from invoice_details id LEFT JOIN products p to handle missing products.
-    - For profit, compute in Python (revenue - base_cost) to align with PHP logic.
-    - For profit margin, compute in Python ((revenue - base_cost) / revenue * 100) to align with PHP logic.
+    - For base cost, use COALESCE(SUM(id.quantity * p.purchase_price), 0) from invoice_details id LEFT JOIN products p.
+    - For profit, use (total_revenue - base_cost) in the SQL query or compute in Python.
+    - For profit margin, use ROUND(((total_revenue - base_cost) / total_revenue * 100), 1) in the SQL query.
     - For average sales value, use ROUND(AVG(i.total), 2) from invoices where total > 0.
     - For total invoices, use COUNT(*) from invoices.
     - For best-selling products, use SUM(id.quantity) from invoice_details id JOIN products p, grouped by product_id.
     - If asked about missing purchase prices, use SELECT product_id, product_name FROM products WHERE purchase_price IS NULL OR purchase_price = 0.
     - If asked about invalid invoice_details, use SELECT id.product_id FROM invoice_details id LEFT JOIN products p ON id.product_id = p.product_id WHERE p.product_id IS NULL.
-    - Use LEFT JOIN for cost calculations to include all invoice_details records, even with missing products.
+    - Use LEFT JOIN for cost calculations to include all invoice_details records.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
-    - If the query asks for 'all time' or 'total', do NOT add a date filter unless specified (e.g., 'this month').
-    - For financial metrics (revenue, base cost, average sales), use a CTE structure like:
+    - If the query asks for 'all time' or 'total', do NOT add a date filter unless specified.
+    - For financial metrics (revenue, base cost, profit, margin), use a CTE structure like:
       WITH invoice_stats AS (
         SELECT 
           COUNT(invoice_id) AS total_invoices,
@@ -317,7 +317,9 @@ def get_sql_chain():
         i_stats.total_invoices,
         i_stats.average_sales_value,
         i_stats.total_revenue,
-        c_stats.base_cost
+        c_stats.base_cost,
+        (i_stats.total_revenue - c_stats.base_cost) AS total_profit,
+        ROUND(((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue * 100), 1) AS profit_margin
       FROM invoice_stats i_stats
       CROSS JOIN cost_stats c_stats;
     - Ensure queries are valid for MariaDB 10.6.21.
@@ -331,7 +333,7 @@ def get_sql_chain():
         "llama3-8b-8192",
         "llama-3.3-70b-versatile",
         "llama3-70b-8192",
-        "gemma2-9b-it",
+        "gema2-9b-it",
     ]
     proposal_llms = [
         ChatGroq(model=model, temperature=0, api_key=st.secrets["GROQ_API_KEY"])
@@ -373,7 +375,6 @@ def get_sql_chain():
         | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
         | StrOutputParser()
     )
-
 # Generate AI response
 def get_response(user_query: str, chat_history: list):
     time_keywords = ["current time", "what time is it", "date and time", "today's date", "now"]
