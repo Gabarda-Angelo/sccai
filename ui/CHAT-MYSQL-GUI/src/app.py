@@ -176,9 +176,9 @@ def validate_query(query):
         "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS", "WITH"
     ]
     query_upper = query.upper().strip()
-    if not query_upper.startswith("SELECT"):
-        raise ValueError("Query must start with SELECT")
-    if not any(kw in query_upper for kw in allowed_keywords[1:]):  # Exclude SELECT from keyword check
+    if not (query_upper.startswith("SELECT") or query_upper.startswith("WITH")):
+        raise ValueError("Query must start with SELECT or WITH")
+    if not any(kw in query_upper for kw in allowed_keywords[1:]):
         raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
     return True
 
@@ -201,13 +201,14 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
                     result[key] = 0.0 if key != 'total_invoices' else 0
                 elif isinstance(result[key], str):
                     try:
-                        # Remove commas and convert to float/int
+                        # Remove commas, whitespace, and convert to float/int
                         cleaned_value = result[key].replace(',', '').strip()
                         result[key] = float(cleaned_value) if key != 'total_invoices' else int(cleaned_value)
                     except (ValueError, AttributeError) as e:
                         st.write(f"Debug: Failed to convert {key} = '{result[key]}' to numeric: {str(e)}")
                         result[key] = 0.0 if key != 'total_invoices' else 0
                 elif not isinstance(result[key], (int, float)):
+                    st.write(f"Debug: Non-numeric value for {key} = '{result[key]}'")
                     result[key] = 0.0 if key != 'total_invoices' else 0
 
         warning = ""
@@ -226,21 +227,16 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
         elif "total revenue" in question_lower:
             revenue = result.get('total_revenue', 0.0)
             response = f"Total Revenue: **₱{revenue:,.2f}**\n\nThis reflects all sales after discounts, indicating strong performance."
-        elif "total base cost" in question_lower:
+        elif "base cost" in question_lower:  # Updated to catch "base costs"
             cost = result.get('base_cost', 0.0)
             response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
             response += warning
         elif "total profit" in question_lower:
-            revenue = result.get('total_revenue', 0.0)
-            cost = result.get('base_cost', 0.0)
-            profit = revenue - cost
+            profit = result.get('total_profit', 0.0)
             response = f"Total Profit: **₱{profit:,.2f}**\n\nThis is your revenue minus base costs, showing financial health."
             response += warning
         elif "profit margin" in question_lower:
-            revenue = result.get('total_revenue', 0.0)
-            cost = result.get('base_cost', 0.0)
-            profit = revenue - cost
-            margin = (profit / revenue * 100) if revenue > 0 else 0.0
+            margin = result.get('profit_margin', 0.0)
             response = f"Profit Margin: **{margin:.1f}%**\n\nThis shows the percentage of revenue retained as profit."
             response += warning
         elif "average sales value" in question_lower:
@@ -256,6 +252,7 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
     
     response += "\n\nWould you like more details or to check specific products?"
     return response
+
 # Define SQL chain
 def get_sql_chain():
     schema = """
@@ -333,7 +330,7 @@ def get_sql_chain():
         "llama3-8b-8192",
         "llama-3.3-70b-versatile",
         "llama3-70b-8192",
-        "gema2-9b-it",
+        "gemma2-9b-it",
     ]
     proposal_llms = [
         ChatGroq(model=model, temperature=0, api_key=st.secrets["GROQ_API_KEY"])
@@ -351,7 +348,7 @@ def get_sql_chain():
     **Schema:** {schema}
 
     Return ONLY the final SQL query. Ensure:
-    1. Starts with SELECT
+    1. Starts with SELECT or WITH
     2. Uses explicit JOIN syntax with aliases (prefer LEFT JOIN for cost/profit)
     3. Handles JSON_EXTRACT for JSON fields
     4. Uses COALESCE for purchase_price in cost calculations
@@ -375,6 +372,7 @@ def get_sql_chain():
         | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
         | StrOutputParser()
     )
+
 # Generate AI response
 def get_response(user_query: str, chat_history: list):
     time_keywords = ["current time", "what time is it", "date and time", "today's date", "now"]
@@ -394,7 +392,7 @@ def get_response(user_query: str, chat_history: list):
         current_sg_date = now_sg.strftime('%Y-%m-%d')
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
-        # Default to all-time financial query unless date is specified
+        # Default to financial query with date range from tablereport.php
         query_lower = user_query.lower()
         if any(keyword in query_lower for keyword in ["revenue", "base cost", "profit", "margin", "invoices", "average sales"]):
             sql_query = """
@@ -405,12 +403,16 @@ def get_response(user_query: str, chat_history: list):
                     SUM(total) AS total_revenue
                 FROM invoices
                 WHERE total > 0
+                AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-04-25 23:59:59'
             ),
             cost_stats AS (
                 SELECT 
                     COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-                FROM invoice_details id
+                FROM invoices i
+                LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
                 LEFT JOIN products p ON id.product_id = p.product_id
+                WHERE i.total > 0
+                AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-04-25 23:59:59'
             )
             SELECT 
                 i_stats.total_invoices,
@@ -425,9 +427,11 @@ def get_response(user_query: str, chat_history: list):
             # Add date filter if specified (e.g., "this month")
             if "this month" in query_lower:
                 sql_query = sql_query.replace(
-                    "WHERE total > 0",
-                    f"WHERE total > 0 AND order_date LIKE '{current_sg_date[:7]}%'"
+                    "AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-04-25 23:59:59'",
+                    f"AND order_date LIKE '{current_sg_date[:7]}%'"
                 )
+            debug_info["raw_query"] = sql_query
+            debug_info["cleaned_query"] = sql_query
         else:
             sql_chain = get_sql_chain()
             raw_query = sql_chain.invoke({
@@ -459,8 +463,6 @@ def get_response(user_query: str, chat_history: list):
             )
             debug_info["cleaned_query"] = sql_query
 
-        debug_info["cleaned_query"] = sql_query
-
         # Validate query
         try:
             validate_query(sql_query)
@@ -491,6 +493,7 @@ def get_response(user_query: str, chat_history: list):
 
         natural_response = format_response(user_query, data, missing_products)
         return natural_response, data, debug_info
+
 # Determine chart type
 def determine_chart_type(query, df):
     if df.empty or len(df.columns) < 2 or len(df) < 2:  # Skip charts for single records
