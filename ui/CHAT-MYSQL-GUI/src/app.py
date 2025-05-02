@@ -94,9 +94,9 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted", "average_sales_value", "q", "rate"]):
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted", "average_sales_value"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)" if col in ["total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "average_sales_value", "rate"] else col}, inplace=True)
+                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 with st.spinner("Generating chart..."):
@@ -149,12 +149,6 @@ def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "
                     st.session_state.last_query = params["query"]
                     params["query"] = quote(params["query"])
                 payload.update(params)
-            if action == "get_best_selling_products":
-                singapore_tz = pytz.timezone('Asia/Singapore')
-                now_sg = datetime.datetime.now(singapore_tz)
-                date_to = now_sg.strftime('%Y-%m-%d 23:59:59')
-                date_from = now_sg.replace(day=1).strftime('%Y-%m-%d 00:00:00')
-                payload.update({"date_from": date_from, "date_to": date_to})
             response = requests.get(
                 st.secrets["API_URL"],
                 params=payload,
@@ -202,11 +196,12 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
         result = data[0]
         # Convert string values to numeric where applicable
         for key in result:
-            if key in ['total_revenue', 'base_cost', 'total_profit', 'profit_margin', 'average_sales_value', 'total_invoices', 'q', 'rate']:
+            if key in ['total_revenue', 'base_cost', 'total_profit', 'profit_margin', 'average_sales_value', 'total_invoices']:
                 if result[key] is None:
                     result[key] = 0.0 if key != 'total_invoices' else 0
                 elif isinstance(result[key], str):
                     try:
+                        # Remove commas, whitespace, and convert to float/int
                         cleaned_value = result[key].replace(',', '').strip()
                         result[key] = float(cleaned_value) if key != 'total_invoices' else int(cleaned_value)
                     except (ValueError, AttributeError) as e:
@@ -225,15 +220,14 @@ def format_response(question: str, data: list, missing_products: int = None) -> 
             warning += "\n\n⚠️ Warning: Profit is 0. This may indicate missing purchase_price data or no valid sales records."
 
         if "best selling products" in question_lower:
-            response = "Top-selling products this month:\n\n"
-            for row in data:
-                response += f"- **{row['product_name']}** (ID: {row['product_id']}) with **{row['q']}** units sold at **₱{row['rate']:,.2f}** max rate\n"
-            if len(data) >= 2:
-                response += f"\n**{data[0]['product_name']}** leads, followed by **{data[1]['product_name']}**."
+            response = "Top-selling products in your store:\n\n"
+            for row in data[:3]:
+                response += f"- **{row['product_name']}** with **{row['total_quantity']}** units sold\n"
+            response += f"**{data[0]['product_name']}** takes the top spot, followed by **{data[1]['product_name']}**."
         elif "total revenue" in question_lower:
             revenue = result.get('total_revenue', 0.0)
             response = f"Total Revenue: **₱{revenue:,.2f}**\n\nThis reflects all sales after discounts, indicating strong performance."
-        elif "base cost" in question_lower:
+        elif "base cost" in question_lower:  # Updated to catch "base costs"
             cost = result.get('base_cost', 0.0)
             response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
             response += warning
@@ -289,24 +283,13 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - For best-selling products, use:
-      SELECT id.product_id, p.product_name, SUM(id.quantity) AS q,
-             MAX(id.unit_price) AS rate, SUM(id.total_price) AS total
-      FROM invoice_details id
-      JOIN products p ON id.product_id = p.product_id
-      JOIN invoices i ON id.invoice_id = i.invoice_id
-      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN DATE_SUB('{current_sg_datetime}', INTERVAL 30 DAY) AND '{current_sg_datetime}'
-      GROUP BY id.product_id
-      ORDER BY SUM(id.quantity) DESC
-      LIMIT 10
-    - If the user specifies 'this month', use:
-      WHERE CONCAT(i.order_date, ' ', i.order_time) LIKE '{current_sg_date[:7]}%'
     - For revenue, use SUM(i.total) from invoices where total > 0.
     - For base cost, use COALESCE(SUM(id.quantity * p.purchase_price), 0) from invoice_details id LEFT JOIN products p.
     - For profit, use (total_revenue - base_cost) in the SQL query or compute in Python.
     - For profit margin, use ROUND(((total_revenue - base_cost) / total_revenue * 100), 1) in the SQL query.
     - For average sales value, use ROUND(AVG(i.total), 2) from invoices where total > 0.
     - For total invoices, use COUNT(*) from invoices.
+    - For best-selling products, use SUM(id.quantity) from invoice_details id JOIN products p, grouped by product_id.
     - If asked about missing purchase prices, use SELECT product_id, product_name FROM products WHERE purchase_price IS NULL OR purchase_price = 0.
     - If asked about invalid invoice_details, use SELECT id.product_id FROM invoice_details id LEFT JOIN products p ON id.product_id = p.product_id WHERE p.product_id IS NULL.
     - Use LEFT JOIN for cost calculations to include all invoice_details records.
@@ -409,23 +392,8 @@ def get_response(user_query: str, chat_history: list):
         current_sg_date = now_sg.strftime('%Y-%m-%d')
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
-        # Handle predefined queries like best-selling products
+        # Default to financial query with date range from tablereport.php
         query_lower = user_query.lower()
-        if "best selling products" in query_lower:
-            params = {}
-            if "this month" in query_lower:
-                params["date_from"] = now_sg.replace(day=1).strftime('%Y-%m-%d 00:00:00')
-                params["date_to"] = now_sg.strftime('%Y-%m-%d 23:59:59')
-            data, api_response, status_code, raw_data, _ = fetch_data_from_api("get_best_selling_products", params)
-            debug_info["api_response"] = api_response
-            debug_info["status_code"] = status_code
-            debug_info["raw_data"] = json.dumps(raw_data, indent=2) if raw_data else "No data returned"
-            if data is None:
-                return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or checking the database connection.", None, debug_info
-            natural_response = format_response(user_query, data)
-            return natural_response, data, debug_info
-
-        # Handle financial queries with date range
         if any(keyword in query_lower for keyword in ["revenue", "base cost", "profit", "margin", "invoices", "average sales"]):
             sql_query = """
             WITH invoice_stats AS (
@@ -456,6 +424,7 @@ def get_response(user_query: str, chat_history: list):
             FROM invoice_stats i_stats
             CROSS JOIN cost_stats c_stats;
             """
+            # Add date filter if specified (e.g., "this month")
             if "this month" in query_lower:
                 sql_query = sql_query.replace(
                     "AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-04-25 23:59:59'",
@@ -527,7 +496,7 @@ def get_response(user_query: str, chat_history: list):
 
 # Determine chart type
 def determine_chart_type(query, df):
-    if df.empty or len(df.columns) < 2 or len(df) < 2:
+    if df.empty or len(df.columns) < 2 or len(df) < 2:  # Skip charts for single records
         return None, None
     columns = df.columns.tolist()
     query_lower = query.lower()
@@ -563,7 +532,7 @@ def main():
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
-                st.checkbox("Debug Mode", key="debug_mode", value=True)
+                st.checkbox("Debug Mode", key="debug_mode", value=True)  # Default to True
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
