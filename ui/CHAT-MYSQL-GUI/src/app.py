@@ -41,7 +41,7 @@ if "chat_history" not in st.session_state:
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
 if "debug_mode" not in st.session_state:
-    st.session_state.debug_mode = True  # Enabled by default per DEBUG_MODE = "true"
+    st.session_state.debug_mode = True  # Enabled by default
 
 # Authentication function
 def authenticate(email, password):
@@ -78,7 +78,7 @@ def handle_query(query: str):
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
         except Exception as e:
-            natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
+            natural_response = f"Sorry, an error occurred: {str(e)}. Please try rephrasing your question or contact support."
             data = None
             debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
@@ -115,6 +115,8 @@ def handle_query(query: str):
                     st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
                 st.table(df)
+            elif len(df) == 1 and len(df.columns) == 1:
+                st.markdown(f"**Result**: {df.iloc[0, 0]}")
 
 # Display chat history
 def display_chat_history():
@@ -161,15 +163,11 @@ def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "
 
 # Validate SQL query
 def validate_query(query):
-    allowed_keywords = [
-        "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
-        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS"
-    ]
     query_upper = query.upper().strip()
     if not query_upper.startswith("SELECT"):
         raise ValueError("Query must start with SELECT")
-    if not any(kw in query_upper for kw in allowed_keywords[1:]):  # Exclude SELECT from keyword check
-        raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
+    if any(kw in query_upper for kw in ["INSERT", "UPDATE", "DELETE", "DROP"]):
+        raise ValueError("Only SELECT queries are allowed")
     return True
 
 # Define SQL chain
@@ -188,13 +186,14 @@ def get_sql_chain():
     **Database Schema:**
     {schema}
 
-    **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
-    **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
+    **Current date in Manila:** {current_manila_date} (YYYY-MM-DD)
+    **Current datetime in Manila:** {current_manila_datetime} (YYYY-MM-DD HH:MM:SS)
 
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
+    - Use 'today' as '{current_manila_date}' (e.g., WHERE order_date = '{current_manila_date}').
+    - For time-based queries, use CONVERT_TZ(order_date, '+00:00', '+08:00') to align with Asia/Manila.
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
     - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
@@ -208,8 +207,7 @@ def get_sql_chain():
 
     prompt = ChatPromptTemplate.from_template(template)
     models = [
-        "llama3-8b-8192",
-        "llama-3.3-70b-versatile",
+        "llama-3.3-70b-versatile",  # Prioritize stronger model
         "llama3-70b-8192",
         "gemma2-9b-it",
     ]
@@ -240,8 +238,8 @@ def get_sql_chain():
     return (
         RunnablePassthrough.assign(
             schema=lambda _: schema,
-            current_sg_date=lambda x: x["current_sg_date"],
-            current_sg_datetime=lambda x: x["current_sg_datetime"],
+            current_manila_date=lambda x: x["current_manila_date"],
+            current_manila_datetime=lambda x: x["current_manila_datetime"],
             chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-5:]])
         )
         | RunnablePassthrough.assign(
@@ -264,21 +262,27 @@ def get_response(user_query: str, chat_history: list):
     ]
     debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        current_time = datetime.datetime.now(singapore_tz)
-        return f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')} in Singapore.", None, debug_info
+        manila_tz = pytz.timezone('Asia/Manila')
+        current_time = datetime.datetime.now(manila_tz)
+        return f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')} in Manila.", None, debug_info
     else:
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        now_sg = datetime.datetime.now(singapore_tz)
-        current_sg_date = now_sg.strftime('%Y-%m-%d')
-        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+        manila_tz = pytz.timezone('Asia/Manila')
+        now_manila = datetime.datetime.now(manila_tz)
+        current_manila_date = now_manila.strftime('%Y-%m-%d')
+        current_manila_datetime = now_manila.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Check for missing data
+        data_check_query = "SELECT COUNT(*) as count FROM products WHERE purchase_price IS NULL;"
+        check_data, check_response, check_status = fetch_data_from_api("execute_query", {"query": data_check_query})
+        if check_data and check_data[0]["count"] > 0:
+            debug_info["api_response"] += f" Warning: {check_data[0]['count']} products have missing purchase_price, which may affect profit calculations."
 
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
             "question": user_query,
             "chat_history": chat_history,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
+            "current_manila_date": current_manila_date,
+            "current_manila_datetime": current_manila_datetime
         })
         debug_info["raw_query"] = raw_query
 
@@ -305,23 +309,18 @@ def get_response(user_query: str, chat_history: list):
         )
         debug_info["cleaned_query"] = query
 
-        # Debug: Show queries
-        if st.session_state.debug_mode:
-            st.write(f"Raw query: {raw_query}")
-            st.write(f"Cleaned query: {query}")
-
         # Validate query
         try:
             validate_query(query)
         except ValueError as e:
             debug_info["api_response"] = str(e)
-            return f"Invalid SQL query: {str(e)}. Please rephrase your question.", None, debug_info
+            return f"Sorry, the query is invalid: {str(e)}. Please rephrase your question.", None, debug_info
 
         data, api_response, status_code = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
         if data is None:
-            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or adjusting your query.", None, debug_info
+            return f"Couldn't retrieve data: {api_response} (Status: {status_code}). Try rephrasing your query or checking the database.", None, debug_info
 
         response_template = """
         Generate a natural language response based on:
@@ -336,6 +335,7 @@ def get_response(user_query: str, chat_history: list):
         - Parse JSON fields (e.g., amount_discounted) into readable format.
         - Keep concise (<200 words).
         - Suggest follow-up: "Would you like more details or to check specific products?"
+        - If results are empty, warn about potential missing data.
         """
 
         chain = (
@@ -352,17 +352,22 @@ def get_response(user_query: str, chat_history: list):
             "chat_history": chat_history,
         })
 
+        if not data:
+            natural_response += "\n\n**Note**: This may be due to missing data (e.g., purchase prices or sales records). Would you like me to check specific products or periods?"
+
         return natural_response, data, debug_info
 
 # Determine chart type
 def determine_chart_type(query, df):
-    if df.empty or len(df.columns) < 2 or len(df) < 2:  # Skip charts for single records
+    if df.empty or len(df.columns) < 1:
         return None, None
     columns = df.columns.tolist()
     query_lower = query.lower()
     date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
     numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
+    if len(df) == 1 and len(columns) == 1:
+        return None, None  # Skip charts for single-value results
     if date_columns and numerical_columns:
         return "line", (date_columns[0], numerical_columns[0])
     elif categorical_columns and numerical_columns:
@@ -392,7 +397,7 @@ def main():
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
-                st.checkbox("Debug Mode", key="debug_mode", value=True)  # Default to True
+                st.checkbox("Debug Mode", key="debug_mode", value=True)
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
