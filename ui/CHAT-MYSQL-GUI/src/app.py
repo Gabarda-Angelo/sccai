@@ -12,7 +12,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
-import time
 
 # Set page configuration
 st.set_page_config(
@@ -78,13 +77,10 @@ def handle_query(query: str):
                 st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
-                st.write(f"**Raw Data**: {debug_info['raw_data']}")
-                if debug_info.get('missing_products') is not None:
-                    st.write(f"**Missing Products in Invoice Details**: {debug_info['missing_products']}")
         except Exception as e:
-            natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question or check the database connection."
+            natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
             data = None
-            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A", "raw_data": "N/A", "missing_products": "N/A"}
+            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -94,7 +90,7 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted", "average_sales_value"]):
+                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
@@ -137,121 +133,44 @@ def clear_chat():
     ]
     st.success("Chat history cleared. Starting a new conversation!")
 
-# Fetch data from API with retry
+# Fetch data from API
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "") -> tuple:
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            payload = {"action": action, "key": st.secrets["API_KEY"]}
-            if params:
-                if "query" in params:
-                    st.session_state.last_query = params["query"]
-                    params["query"] = quote(params["query"])
-                payload.update(params)
-            response = requests.get(
-                st.secrets["API_URL"],
-                params=payload,
-                timeout=15
-            )
-            status_code = response.status_code
-            if not response.text.strip():
-                return None, "Empty response from API", status_code, None, None
-            data = response.json()
-            if data.get("status") == "success":
-                return data["data"], "Success", status_code, data, None
-            else:
-                return None, data.get("error", "Unknown error"), status_code, data, None
-        except requests.RequestException as e:
-            if attempt < max_retries - 1:
-                time.sleep(1)  # Wait before retrying
-                continue
-            return None, str(e), "N/A", None, None
-    return None, "Max retries exceeded", "N/A", None, None
+    try:
+        payload = {"action": action, "key": st.secrets["API_KEY"]}
+        if params:
+            if "query" in params:
+                st.session_state.last_query = params["query"]
+                params["query"] = quote(params["query"])
+            payload.update(params)
+        response = requests.get(
+            st.secrets["API_URL"],
+            params=payload,
+            timeout=15
+        )
+        status_code = response.status_code
+        if not response.text.strip():
+            return None, "Empty response from API", status_code
+        data = response.json()
+        if data.get("status") == "success":
+            return data["data"], "Success", status_code
+        else:
+            return None, data.get("error", "Unknown error"), status_code
+    except requests.RequestException as e:
+        return None, str(e), "N/A"
 
 # Validate SQL query
 def validate_query(query):
     allowed_keywords = [
         "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
-        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS", "WITH"
+        "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS"
     ]
     query_upper = query.upper().strip()
-    if not (query_upper.startswith("SELECT") or query_upper.startswith("WITH")):
-        raise ValueError("Query must start with SELECT or WITH")
-    if not any(kw in query_upper for kw in allowed_keywords[1:]):
+    if not query_upper.startswith("SELECT"):
+        raise ValueError("Query must start with SELECT")
+    if not any(kw in query_upper for kw in allowed_keywords[1:]):  # Exclude SELECT from keyword check
         raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
     return True
-
-# Format response
-def format_response(question: str, data: list, missing_products: int = None) -> str:
-    if not data or not isinstance(data, list) or len(data) == 0:
-        if any(keyword in question.lower() for keyword in ["profit", "base cost", "margin"]):
-            return ("No data found. This may be due to missing purchase price information. "
-                    "Please check the products table for valid purchase_price values. "
-                    "Would you like to see products with missing purchase prices?")
-        return "Sorry, I couldn't retrieve the data. Please try again or check the database connection."
-
-    question_lower = question.lower()
-    try:
-        result = data[0]
-        # Convert string values to numeric where applicable
-        for key in result:
-            if key in ['total_revenue', 'base_cost', 'total_profit', 'profit_margin', 'average_sales_value', 'total_invoices']:
-                if result[key] is None:
-                    result[key] = 0.0 if key != 'total_invoices' else 0
-                elif isinstance(result[key], str):
-                    try:
-                        # Remove commas, whitespace, and convert to float/int
-                        cleaned_value = result[key].replace(',', '').strip()
-                        result[key] = float(cleaned_value) if key != 'total_invoices' else int(cleaned_value)
-                    except (ValueError, AttributeError) as e:
-                        st.write(f"Debug: Failed to convert {key} = '{result[key]}' to numeric: {str(e)}")
-                        result[key] = 0.0 if key != 'total_invoices' else 0
-                elif not isinstance(result[key], (int, float)):
-                    st.write(f"Debug: Non-numeric value for {key} = '{result[key]}'")
-                    result[key] = 0.0 if key != 'total_invoices' else 0
-
-        warning = ""
-        if missing_products and missing_products > 0:
-            warning += f"\n\n⚠️ Warning: {missing_products} invoice_details records have product_ids not found in products table, which may affect cost and profit calculations."
-        if any(keyword in question_lower for keyword in ["base cost", "profit"]) and result.get('base_cost', 0.0) == 0.0:
-            warning += "\n\n⚠️ Warning: Base cost is 0. This may indicate missing purchase_price data."
-        if "profit" in question_lower and result.get('total_profit', 0.0) == 0.0:
-            warning += "\n\n⚠️ Warning: Profit is 0. This may indicate missing purchase_price data or no valid sales records."
-
-        if "best selling products" in question_lower:
-            response = "Top-selling products in your store:\n\n"
-            for row in data[:3]:
-                response += f"- **{row['product_name']}** with **{row['total_quantity']}** units sold\n"
-            response += f"**{data[0]['product_name']}** takes the top spot, followed by **{data[1]['product_name']}**."
-        elif "total revenue" in question_lower:
-            revenue = result.get('total_revenue', 0.0)
-            response = f"Total Revenue: **₱{revenue:,.2f}**\n\nThis reflects all sales after discounts, indicating strong performance."
-        elif "base cost" in question_lower:  # Updated to catch "base costs"
-            cost = result.get('base_cost', 0.0)
-            response = f"Total Base Cost: **₱{cost:,.2f}**\n\nThis covers the cost of goods sold, key for profitability analysis."
-            response += warning
-        elif "total profit" in question_lower:
-            profit = result.get('total_profit', 0.0)
-            response = f"Total Profit: **₱{profit:,.2f}**\n\nThis is your revenue minus base costs, showing financial health."
-            response += warning
-        elif "profit margin" in question_lower:
-            margin = result.get('profit_margin', 0.0)
-            response = f"Profit Margin: **{margin:.1f}%**\n\nThis shows the percentage of revenue retained as profit."
-            response += warning
-        elif "average sales value" in question_lower:
-            avg_sales = result.get('average_sales_value', 0.0)
-            response = f"Average Sales Value: **₱{avg_sales:,.2f}**\n\nThis is the average value of each invoice, reflecting typical transaction size."
-        elif any(keyword in question_lower for keyword in ["total invoices", "how many invoice"]):
-            invoices = result.get('total_invoices', 0)
-            response = f"Total Invoices: **{invoices}**\n\nThis is the total number of invoices processed by the store."
-        else:
-            response = json.dumps(data, indent=2)
-    except (KeyError, TypeError, ValueError) as e:
-        response = f"Error formatting response: {str(e)}. Please check the database or try rephrasing the query."
-    
-    response += "\n\nWould you like more details or to check specific products?"
-    return response
 
 # Define SQL chain
 def get_sql_chain():
@@ -260,14 +179,7 @@ def get_sql_chain():
     - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash/Card/Check), created_at, updated_at
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
-    - categories: category_id (PK), category_name, created_at, updated_at
-    - employees: employee_id (PK), first_name, last_name, role (Owner/Admin/Cashier), email, password_hash, created_at, updated_at, last_password_change
-    - admin_logs: adminlogs_id (PK), action_type (INSERT/UPDATE/DELETE), admin_id (FK to employees), approved_by_owner (FK to employees), details (JSON), created_at
-    - discount_logs: discount_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
-    - inventory_logs: log_id (PK), product_id (FK to products), change_type (Sale/Restock/Adjustment), quantity, log_date, notes, created_at, updated_at
-    - sync_log: id (PK), table_name, record_id, action (INSERT/UPDATE/DELETE), timestamp, synced
-    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, ip_address, created_at, updated_at
-    - void_logs: void_id (PK), invoice_id (FK to invoices), cashier_id (FK to employees), admin_email (FK to employees.email), details (JSON), created_at
+    ...
     """
 
     template = """
@@ -283,42 +195,11 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - For revenue, use SUM(i.total) from invoices where total > 0.
-    - For base cost, use COALESCE(SUM(id.quantity * p.purchase_price), 0) from invoice_details id LEFT JOIN products p.
-    - For profit, use (total_revenue - base_cost) in the SQL query or compute in Python.
-    - For profit margin, use ROUND(((total_revenue - base_cost) / total_revenue * 100), 1) in the SQL query.
-    - For average sales value, use ROUND(AVG(i.total), 2) from invoices where total > 0.
-    - For total invoices, use COUNT(*) from invoices.
-    - For best-selling products, use SUM(id.quantity) from invoice_details id JOIN products p, grouped by product_id.
-    - If asked about missing purchase prices, use SELECT product_id, product_name FROM products WHERE purchase_price IS NULL OR purchase_price = 0.
-    - If asked about invalid invoice_details, use SELECT id.product_id FROM invoice_details id LEFT JOIN products p ON id.product_id = p.product_id WHERE p.product_id IS NULL.
-    - Use LEFT JOIN for cost calculations to include all invoice_details records.
+    - For revenue, use SUM(i.total) from invoices to account for discounts.
+    - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
+    - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
-    - If the query asks for 'all time' or 'total', do NOT add a date filter unless specified.
-    - For financial metrics (revenue, base cost, profit, margin), use a CTE structure like:
-      WITH invoice_stats AS (
-        SELECT 
-          COUNT(invoice_id) AS total_invoices,
-          ROUND(AVG(total), 2) AS average_sales_value,
-          SUM(total) AS total_revenue
-        FROM invoices
-        WHERE total > 0
-      ),
-      cost_stats AS (
-        SELECT 
-          COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-        FROM invoice_details id
-        LEFT JOIN products p ON id.product_id = p.product_id
-      )
-      SELECT 
-        i_stats.total_invoices,
-        i_stats.average_sales_value,
-        i_stats.total_revenue,
-        c_stats.base_cost,
-        (i_stats.total_revenue - c_stats.base_cost) AS total_profit,
-        ROUND(((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue * 100), 1) AS profit_margin
-      FROM invoice_stats i_stats
-      CROSS JOIN cost_stats c_stats;
+    - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
 
@@ -348,10 +229,10 @@ def get_sql_chain():
     **Schema:** {schema}
 
     Return ONLY the final SQL query. Ensure:
-    1. Starts with SELECT or WITH
-    2. Uses explicit JOIN syntax with aliases (prefer LEFT JOIN for cost/profit)
+    1. Starts with SELECT
+    2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for JSON fields
-    4. Uses COALESCE for purchase_price in cost calculations
+    4. Uses COALESCE for purchase_price in profit calculations
     5. Valid for MariaDB 10.6.21
     """
 
@@ -381,7 +262,7 @@ def get_response(user_query: str, chat_history: list):
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
         "profit", "margin"
     ]
-    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": "", "raw_data": "", "missing_products": None}
+    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
         singapore_tz = pytz.timezone('Asia/Singapore')
         current_time = datetime.datetime.now(singapore_tz)
@@ -392,106 +273,85 @@ def get_response(user_query: str, chat_history: list):
         current_sg_date = now_sg.strftime('%Y-%m-%d')
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
-        # Default to financial query with date range from tablereport.php
-        query_lower = user_query.lower()
-        if any(keyword in query_lower for keyword in ["revenue", "base cost", "profit", "margin", "invoices", "average sales"]):
-            sql_query = """
-            WITH invoice_stats AS (
-                SELECT 
-                    COUNT(invoice_id) AS total_invoices,
-                    ROUND(AVG(total), 2) AS average_sales_value,
-                    SUM(total) AS total_revenue
-                FROM invoices
-                WHERE total > 0
-                AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-04-25 23:59:59'
-            ),
-            cost_stats AS (
-                SELECT 
-                    COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-                FROM invoices i
-                LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
-                LEFT JOIN products p ON id.product_id = p.product_id
-                WHERE i.total > 0
-                AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-04-25 23:59:59'
-            )
-            SELECT 
-                i_stats.total_invoices,
-                i_stats.average_sales_value,
-                i_stats.total_revenue,
-                c_stats.base_cost,
-                (i_stats.total_revenue - c_stats.base_cost) AS total_profit,
-                ROUND(((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue * 100), 1) AS profit_margin
-            FROM invoice_stats i_stats
-            CROSS JOIN cost_stats c_stats;
-            """
-            # Add date filter if specified (e.g., "this month")
-            if "this month" in query_lower:
-                sql_query = sql_query.replace(
-                    "AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-04-25 23:59:59'",
-                    f"AND order_date LIKE '{current_sg_date[:7]}%'"
-                )
-            debug_info["raw_query"] = sql_query
-            debug_info["cleaned_query"] = sql_query
-        else:
-            sql_chain = get_sql_chain()
-            raw_query = sql_chain.invoke({
-                "question": user_query,
-                "chat_history": chat_history,
-                "current_sg_date": current_sg_date,
-                "current_sg_datetime": current_sg_datetime
-            })
-            debug_info["raw_query"] = raw_query
-            query_lines = raw_query.split("\n")
-            sql_query = ""
-            in_sql_block = False
-            for line in query_lines:
-                line = line.strip()
-                if line.upper().startswith("SELECT") or line.upper().startswith("WITH"):
-                    in_sql_block = True
-                    sql_query = line
-                elif in_sql_block:
-                    sql_query += "\n" + line
-                    if ";" in line:
-                        break
-            sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
-            if not sql_query:
-                raise ValueError("No valid SQL query extracted from response")
-            if not sql_query.endswith(";"):
-                sql_query += ";"
-            sql_query = "\n".join(
-                [line for line in sql_query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
-            )
-            debug_info["cleaned_query"] = sql_query
+        sql_chain = get_sql_chain()
+        raw_query = sql_chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+            "current_sg_date": current_sg_date,
+            "current_sg_datetime": current_sg_datetime
+        })
+        debug_info["raw_query"] = raw_query
+
+        # Extract SQL query
+        query_lines = raw_query.split("\n")
+        sql_query = ""
+        in_sql_block = False
+        for line in query_lines:
+            line = line.strip()
+            if line.upper().startswith("SELECT"):
+                in_sql_block = True
+                sql_query = line
+            elif in_sql_block:
+                sql_query += "\n" + line
+                if ";" in line:
+                    break
+        query = sql_query.replace("```sql", "").replace("```", "").strip()
+        if not query:
+            raise ValueError("No valid SQL query extracted from response")
+        if not query.endswith(";"):
+            query += ";"
+        query = "\n".join(
+            [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
+        )
+        debug_info["cleaned_query"] = query
+
+        # Debug: Show queries
+        if st.session_state.debug_mode:
+            st.write(f"Raw query: {raw_query}")
+            st.write(f"Cleaned query: {query}")
 
         # Validate query
         try:
-            validate_query(sql_query)
+            validate_query(query)
         except ValueError as e:
             debug_info["api_response"] = str(e)
             return f"Invalid SQL query: {str(e)}. Please rephrase your question.", None, debug_info
 
-        # Check for missing products
-        missing_products = None
-        if any(keyword in query_lower for keyword in ["base cost", "profit", "margin"]):
-            missing_query = """
-            SELECT COUNT(*) AS missing_products
-            FROM invoice_details id
-            LEFT JOIN products p ON id.product_id = p.product_id
-            WHERE p.product_id IS NULL;
-            """
-            missing_data, _, _, _, _ = fetch_data_from_api("execute_query", {"query": missing_query})
-            if missing_data and isinstance(missing_data, list) and len(missing_data) > 0:
-                missing_products = missing_data[0].get('missing_products', 0)
-            debug_info["missing_products"] = missing_products
-
-        data, api_response, status_code, raw_data, _ = fetch_data_from_api("execute_query", {"query": sql_query})
+        data, api_response, status_code = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
-        debug_info["raw_data"] = json.dumps(raw_data, indent=2) if raw_data else "No data returned"
         if data is None:
-            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or checking the database connection.", None, debug_info
+            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or adjusting your query.", None, debug_info
 
-        natural_response = format_response(user_query, data, missing_products)
+        response_template = """
+        Generate a natural language response based on:
+        - **Question:** {question}
+        - **Results:** {response}
+        - **History:** {chat_history}
+
+        **Guidelines:**
+        - If empty results, check if the query involves profit and suggest: "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames."
+        - Highlight insights with **bold**.
+        - Use - for lists, ₱ for money.
+        - Parse JSON fields (e.g., amount_discounted) into readable format.
+        - Keep concise (<200 words).
+        - Suggest follow-up: "Would you like more details or to check specific products?"
+        """
+
+        chain = (
+            RunnablePassthrough.assign(
+                response=lambda _: json.dumps(data, indent=2)
+            )
+            | ChatPromptTemplate.from_template(response_template)
+            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+            | StrOutputParser()
+        )
+
+        natural_response = chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+        })
+
         return natural_response, data, debug_info
 
 # Determine chart type
