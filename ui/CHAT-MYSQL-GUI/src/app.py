@@ -77,10 +77,11 @@ def handle_query(query: str):
                 st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
+                st.write(f"**Data Returned**: {json.dumps(data, indent=2)}")
         except Exception as e:
             natural_response = f"Sorry, an error occurred: {str(e)}. Please try rephrasing your question or contact support."
             data = None
-            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A"}
+            debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A", "data_returned": "N/A"}
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -90,27 +91,41 @@ def handle_query(query: str):
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted"]):
+                if any(mon in col.lower() for mon in ["total_sold", "rate", "total", "subtotal", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                    if "rate" in col.lower() or "total" in col.lower():
+                        df[col] = df[col].apply(lambda x: f"₱{x:,.2f}" if pd.notnull(x) else x)
+                        df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
             if chart_type:
                 with st.spinner("Generating chart..."):
                     st.markdown(f"### {chart_type.capitalize()} Chart")
                     fig, ax = plt.subplots()
                     if chart_type == 'bar':
-                        df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1]} by {columns[0]}")
+                        plot_df = df.copy()
+                        for col in plot_df.columns:
+                            if col.endswith(" (₱)"):
+                                plot_df[col] = plot_df[col].str.replace('₱', '').str.replace(',', '').astype(float)
+                        plot_df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                        ax.set_title(f"{columns[1].replace(' (₱)', '')} by {columns[0]}")
                         ax.set_xlabel(columns[0])
                         ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'line':
-                        df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1]} Over Time")
+                        plot_df = df.copy()
+                        for col in plot_df.columns:
+                            if col.endswith(" (₱)"):
+                                plot_df[col] = plot_df[col].str.replace('₱', '').str.replace(',', '').astype(float)
+                        plot_df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                        ax.set_title(f"{columns[1].replace(' (₱)', '')} Over Time")
                         ax.set_xlabel("Date")
                         ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
                     elif chart_type == 'pie':
-                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                        ax.set_title(f"Distribution of {columns[1]}")
+                        plot_df = df.copy()
+                        for col in plot_df.columns:
+                            if col.endswith(" (₱)"):
+                                plot_df[col] = plot_df[col].str.replace('₱', '').str.replace(',', '').astype(float)
+                        ax.pie(plot_df[columns[1]], labels=plot_df[columns[0]], autopct='%1.1f%%')
+                        ax.set_title(f"Distribution of {columns[1].replace(' (₱)', '')}")
                     st.pyplot(fig)
                     st.download_button("Download Data", df.to_csv(index=False), "data.csv")
             if len(df) > 1 or len(df.columns) > 1:
@@ -193,12 +208,14 @@ def get_sql_chain():
 
     **Instructions:**
     - Use 'today' as '{current_manila_date}' (e.g., WHERE order_date = '{current_manila_date}').
-    - For time-based queries, use CONVERT_TZ(order_date, '+00:00', '+08:00') to align with Asia/Manila.
+    - For time-based queries, use CONCAT(i.order_date, ' ', i.order_time) for precise datetime filtering.
+    - For best-selling products, include product_id, product_name, SUM(quantity) as total_sold, MAX(unit_price) as rate, SUM(total_price) as total, GROUP BY id.product_id, ORDER BY SUM(quantity) DESC, LIMIT 10.
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
     - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
-    - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
+    - If the query asks for 'all time' or 'from the very first invoice', use the earliest invoice date from invoices.
+    - For 'this month', use the full month (e.g., 2025-05-01 to 2025-05-31).
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
 
@@ -231,7 +248,9 @@ def get_sql_chain():
     2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for JSON fields
     4. Uses COALESCE for purchase_price in profit calculations
-    5. Valid for MariaDB 10.6.21
+    5. Uses CONCAT(order_date, ' ', order_time) for datetime filtering
+    6. For best-selling products, GROUP BY id.product_id, ORDER BY SUM(quantity) DESC, LIMIT 10
+    7. Valid for MariaDB 10.6.21
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -260,17 +279,75 @@ def get_response(user_query: str, chat_history: list):
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
         "profit", "margin"
     ]
-    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": ""}
-    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
-        manila_tz = pytz.timezone('Asia/Manila')
-        current_time = datetime.datetime.now(manila_tz)
-        return f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')} in Manila.", None, debug_info
-    else:
-        manila_tz = pytz.timezone('Asia/Manila')
-        now_manila = datetime.datetime.now(manila_tz)
-        current_manila_date = now_manila.strftime('%Y-%m-%d')
-        current_manila_datetime = now_manila.strftime('%Y-%m-%d %H:%M:%S')
+    debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": "", "data_returned": ""}
+    manila_tz = pytz.timezone('Asia/Manila')
+    now_manila = datetime.datetime.now(manila_tz)
+    current_manila_date = now_manila.strftime('%Y-%m-%d')
+    current_manila_datetime = now_manila.strftime('%Y-%m-%d %H:%M:%S')
 
+    # Handle best-selling products query directly via API
+    if "best-selling" in user_query.lower() or "best selling" in user_query.lower():
+        date_from = date_to = None
+        if "this month" in user_query.lower():
+            date_from = now_manila.replace(day=1).strftime('%Y-%m-%d 00:00:00')
+            date_to = now_manila.replace(day=1, month=now_manila.month+1 if now_manila.month < 12 else 1, year=now_manila.year+1 if now_manila.month == 12 else now_manila.year).replace(day=1).strftime('%Y-%m-%d 00:00:00')
+        elif "this week" in user_query.lower():
+            date_from = (now_manila - datetime.timedelta(days=now_manila.weekday())).strftime('%Y-%m-%d 00:00:00')
+            date_to = (now_manila + datetime.timedelta(days=6-now_manila.weekday())).strftime('%Y-%m-%d 23:59:59')
+        elif "this year" in user_query.lower():
+            date_from = now_manila.replace(month=1, day=1).strftime('%Y-%m-%d 00:00:00')
+            date_to = now_manila.replace(month=12, day=31).strftime('%Y-%m-%d 23:59:59')
+        else:
+            # Fetch earliest invoice date
+            data, _, _ = fetch_data_from_api("execute_query", {"query": "SELECT MIN(CONCAT(order_date, ' ', order_time)) AS min_date FROM invoices;"})
+            date_from = data[0]["min_date"] if data and data[0]["min_date"] else '1970-01-01 00:00:00'
+            date_to = now_manila.strftime('%Y-%m-%d 23:59:59')
+
+        params = {"date_from": date_from, "date_to": date_to}
+        data, api_response, status_code = fetch_data_from_api("get_best_selling_products", params)
+        debug_info["api_response"] = api_response
+        debug_info["status_code"] = status_code
+        debug_info["raw_query"] = "API call: get_best_selling_products"
+        debug_info["cleaned_query"] = f"date_from: {date_from}, date_to: {date_to}"
+        debug_info["data_returned"] = json.dumps(data, indent=2)
+
+        if data is None:
+            return f"Couldn't retrieve best-selling products: {api_response}. Try rephrasing or checking the database.", None, debug_info
+
+        response_template = """
+        Generate a natural language response based on:
+        - **Question:** {question}
+        - **Results:** {response}
+        - **History:** {chat_history}
+
+        **Guidelines:**
+        - List top products with product ID, name, quantity sold, rate (₱), and total sales (₱).
+        - Highlight insights with **bold**.
+        - Use - for lists.
+        - Keep concise (<200 words).
+        - Suggest follow-up: "Would you like to see sales for a different period or product details?"
+        """
+
+        chain = (
+            RunnablePassthrough.assign(
+                response=lambda _: json.dumps(data, indent=2)
+            )
+            | ChatPromptTemplate.from_template(response_template)
+            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+            | StrOutputParser()
+        )
+
+        natural_response = chain.invoke({
+            "question": user_query,
+            "chat_history": chat_history,
+        })
+
+        return natural_response, data, debug_info
+
+    # Handle other queries via SQL generation
+    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
+        return f"Your current time and date is {current_manila_datetime} in Manila.", None, debug_info
+    else:
         # Check for missing data
         data_check_query = "SELECT COUNT(*) as count FROM products WHERE purchase_price IS NULL;"
         check_data, check_response, check_status = fetch_data_from_api("execute_query", {"query": data_check_query})
@@ -319,6 +396,7 @@ def get_response(user_query: str, chat_history: list):
         data, api_response, status_code = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
+        debug_info["data_returned"] = json.dumps(data, indent=2)
         if data is None:
             return f"Couldn't retrieve data: {api_response} (Status: {status_code}). Try rephrasing your query or checking the database.", None, debug_info
 
@@ -368,6 +446,9 @@ def determine_chart_type(query, df):
     categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
     if len(df) == 1 and len(columns) == 1:
         return None, None  # Skip charts for single-value results
+    if "best-selling" in query_lower or "best selling" in query_lower:
+        if "product_name" in columns and "total_sold" in columns:
+            return "bar", ("product_name", "total_sold")
     if date_columns and numerical_columns:
         return "line", (date_columns[0], numerical_columns[0])
     elif categorical_columns and numerical_columns:
