@@ -194,12 +194,18 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use 'today' as '{current_sg_date}' (e.g., WHERE order_date = '{current_sg_date}').
-    - For revenue, use SUM(i.total) from invoices to account for discounts.
-    - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
-    - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
-    - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
-    - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter.
+    - Use CONCAT(i.order_date, ' ', i.order_time) for date filtering with BETWEEN clause.
+    - For overview stats, use:
+      - COUNT(invoice_id) for total invoices
+      - AVG(total) for average sales value
+      - SUM(total) for total revenue
+      - SUM(id.quantity * p.purchase_price) for base cost
+      - COUNT of products where stock <= reorder_level for low stock
+      - Top product by SUM(id.quantity)
+    - For best-selling products, select product_id, product_name, SUM(quantity), MAX(unit_price), SUM(total_price), GROUP BY product_id, ORDER BY quantity DESC, LIMIT 10.
+    - For recent invoices, select invoice_id, CONCAT(order_date, ' ', order_time), total, payment_type, ORDER BY invoice_id DESC, LIMIT 30.
+    - For sales details, select invoice_id, CONCAT(order_date, ' ', order_time), subtotal, discount, total, paid, due, payment_type, ORDER BY invoice_id DESC.
+    - Use COALESCE(p.purchase_price, 0) for profit calculations.
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
 
@@ -233,7 +239,8 @@ def get_sql_chain():
     2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for JSON fields
     4. Uses COALESCE for purchase_price in profit calculations
-    5. Valid for MariaDB 10.6.21
+    5. Uses CONCAT(order_date, ' ', order_time) for date filtering
+    6. Valid for MariaDB 10.6.21
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
