@@ -108,49 +108,86 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
-            # Standardize column names
-            df.rename(columns={
-                'product_id': 'Product ID',
-                'product_name': 'Product Name',
-                'total_sold': 'QTY',
-                'max_price': 'Rate'
-            }, inplace=True)
-            # Drop unwanted columns
-            if 'total_revenue' in df.columns:
-                df.drop(columns=['total_revenue'], inplace=True)
-            # Select only relevant columns
-            df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
-            # Adjust quantities for voids
-            df = adjust_quantities_with_voids(df)
-            # Preprocess data
-            for col in df.columns:
-                if "date" in col.lower():
-                    df[col] = pd.to_datetime(df[col], errors='coerce')
-                if col == 'Rate':
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-            chart_type, columns = determine_chart_type(query, df)
-            if chart_type:
-                with st.spinner("Generating chart..."):
-                    st.markdown(f"### {chart_type.capitalize()} Chart")
-                    fig, ax = plt.subplots()
-                    if chart_type == 'bar':
-                        df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1]} by {columns[0]}")
-                        ax.set_xlabel(columns[0])
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
-                    elif chart_type == 'line':
-                        df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
-                        ax.set_title(f"{columns[1]} Over Time")
-                        ax.set_xlabel("Date")
-                        ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
-                    elif chart_type == 'pie':
-                        ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                        ax.set_title(f"Distribution of {columns[1]}")
-                    st.pyplot(fig)
-                    st.download_button("Download Data", df.to_csv(index=False), "data.csv")
-            if len(df) > 1 or len(df.columns) > 1:
-                st.table(df)
+            if query.lower().startswith("what are the admin overview metrics"):
+                # Process Admin Overview metrics
+                if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'low_stock_count', 'top_product']):
+                    # Calculate Profit and Profit Margin
+                    df['profit'] = df['total_revenue'] - df['base_cost']
+                    df['profit_margin'] = df.apply(
+                        lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
+                    )
+                    # Format monetary columns
+                    for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
+                        df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
+                    df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
+                    # Rename columns for display
+                    df.rename(columns={
+                        'total_invoices': 'Total Invoices',
+                        'avg_sales_value': 'Average Sales Value',
+                        'total_revenue': 'Total Revenue',
+                        'base_cost': 'Base Cost',
+                        'low_stock_count': 'Low Stock Products',
+                        'top_product': 'Top-Selling Product',
+                        'profit': 'Profit',
+                        'profit_margin': 'Profit Margin'
+                    }, inplace=True)
+                    # Display metrics in a card-like layout
+                    st.markdown("### Admin Overview")
+                    cols = st.columns(4)
+                    for i, col in enumerate(['Average Sales Value', 'Total Invoices', 'Total Revenue', 'Top-Selling Product']):
+                        with cols[i]:
+                            st.markdown(f"**{col}**")
+                            st.markdown(df[col].iloc[0])
+                    cols = st.columns(4)
+                    for i, col in enumerate(['Base Cost', 'Profit', 'Profit Margin', 'Low Stock Products']):
+                        with cols[i]:
+                            st.markdown(f"**{col}**")
+                            value = df[col].iloc[0]
+                            if col == 'Low Stock Products':
+                                value = f"{value} item(s)"
+                            st.markdown(value)
+                    # Download button for data
+                    st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
+            else:
+                # Handle other queries (e.g., best-selling products)
+                df.rename(columns={
+                    'product_id': 'Product ID',
+                    'product_name': 'Product Name',
+                    'total_sold': 'QTY',
+                    'max_price': 'Rate'
+                }, inplace=True)
+                if 'total_revenue' in df.columns:
+                    df.drop(columns=['total_revenue'], inplace=True)
+                df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
+                df = adjust_quantities_with_voids(df)
+                for col in df.columns:
+                    if "date" in col.lower():
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                    if col == 'Rate':
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                        df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                chart_type, columns = determine_chart_type(query, df)
+                if chart_type:
+                    with st.spinner("Generating chart..."):
+                        st.markdown(f"### {chart_type.capitalize()} Chart")
+                        fig, ax = plt.subplots()
+                        if chart_type == 'bar':
+                            df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                            ax.set_title(f"{columns[1]} by {columns[0]}")
+                            ax.set_xlabel(columns[0])
+                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        elif chart_type == 'line':
+                            df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                            ax.set_title(f"{columns[1]} Over Time")
+                            ax.set_xlabel("Date")
+                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        elif chart_type == 'pie':
+                            ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                            ax.set_title(f"Distribution of {columns[1]}")
+                        st.pyplot(fig)
+                        st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+                if len(df) > 1 or len(df.columns) > 1:
+                    st.table(df)
 
 # Display chat history
 def display_chat_history():
@@ -236,10 +273,48 @@ def get_sql_chain():
       FROM invoice_details id
       JOIN products p ON id.product_id = p.product_id
       JOIN invoices i ON id.invoice_id = i.invoice_id
-      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '{current_sg_datetime}'
+      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
       GROUP BY p.product_id, p.product_name
       ORDER BY total_sold DESC, p.product_id ASC
       LIMIT 10
+    - For admin overview metrics, use:
+      WITH invoice_stats AS (
+          SELECT 
+              COUNT(invoice_id) AS total_invoices,
+              ROUND(AVG(total), 2) AS avg_sales_value,
+              SUM(total) AS total_revenue
+          FROM invoices
+          WHERE total > 0
+          AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+      ),
+      cost_stats AS (
+          SELECT 
+              COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+          FROM invoices i
+          LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.total > 0
+          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+      )
+      SELECT 
+          i_stats.total_invoices,
+          i_stats.avg_sales_value,
+          i_stats.total_revenue,
+          c_stats.base_cost,
+          (SELECT COUNT(*) 
+           FROM products p 
+           WHERE p.stock <= p.reorder_level) AS low_stock_count,
+          (SELECT p.product_name 
+           FROM invoice_details id2
+           INNER JOIN products p ON id2.product_id = p.product_id
+           INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
+           WHERE i2.total > 0
+           AND CONCAT(i2.order_date, ' ', i2.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+           GROUP BY p.product_id, p.product_name
+           ORDER BY SUM(id2.quantity) DESC
+           LIMIT 1) AS top_product
+      FROM invoice_stats i_stats
+      CROSS JOIN cost_stats c_stats
     - Use 'today' as '{current_sg_date}' for daily queries.
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
@@ -296,7 +371,7 @@ def get_sql_chain():
             chat_history=lambda x: x["chat_history"],
         )
         | aggregator_prompt
-        | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+        | ChatGro unification(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
         | StrOutputParser()
     )
 
@@ -306,7 +381,7 @@ def get_response(user_query: str, chat_history: list):
     data_keywords = [
         "sales", "invoice", "product", "category", "stock", "revenue", "order", "employee",
         "payment", "quantity", "price", "total", "discount", "due", "paid", "inventory",
-        "profit", "margin"
+        "profit", "margin", "overview", "metrics"
     ]
     debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": ""}
     if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
@@ -475,6 +550,7 @@ def main():
                             handle_query(q)
                 with st.expander("💰 Financial Insights"):
                     queries = [
+                        "What are the admin overview metrics for the selected period?",
                         "What is the total amount due from unpaid invoices?",
                         "What is the total discount given this month?",
                         "What is the profit margin for SCC SHIRT this year?"
