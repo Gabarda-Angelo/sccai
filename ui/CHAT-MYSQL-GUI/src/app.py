@@ -108,7 +108,8 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
-            if query.lower().startswith("what are the admin overview metrics"):
+            query_lower = query.lower()
+            if query_lower.startswith("what are the admin overview metrics"):
                 # Process Admin Overview metrics
                 if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'low_stock_count', 'top_product']):
                     # Calculate Profit and Profit Margin
@@ -148,15 +149,41 @@ def handle_query(query: str):
                             st.markdown(value)
                     # Download button for data
                     st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
-            elif "total revenue" in query.lower():
-                # Process Total Revenue query
-                if 'total_revenue' in df.columns:
-                    df['total_revenue'] = df['total_revenue'].apply(lambda x: f"₱{x:,.2f}")
-                    st.markdown("### Total Revenue")
-                    st.markdown(f"**Total Revenue**: {df['total_revenue'].iloc[0]}")
-                    st.download_button("Download Total Revenue Data", df.to_csv(index=False), "total_revenue.csv")
+            elif any(keyword in query_lower for keyword in ["total revenue", "total profit", "base cost", "profit margin", "total invoices"]):
+                # Process individual metric queries using Admin Overview data
+                if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost']):
+                    # Calculate Profit and Profit Margin
+                    df['profit'] = df['total_revenue'] - df['base_cost']
+                    df['profit_margin'] = df.apply(
+                        lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
+                    )
+                    # Format monetary columns
+                    for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
+                        df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
+                    df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
+                    # Display requested metric
+                    if "total revenue" in query_lower:
+                        st.markdown("### Total Revenue")
+                        st.markdown(f"**Total Revenue**: {df['total_revenue'].iloc[0]}")
+                        st.download_button("Download Total Revenue Data", df[['total_revenue']].to_csv(index=False), "total_revenue.csv")
+                    elif "total profit" in query_lower:
+                        st.markdown("### Total Profit")
+                        st.markdown(f"**Total Profit**: {df['profit'].iloc[0]}")
+                        st.download_button("Download Total Profit Data", df[['profit']].to_csv(index=False), "total_profit.csv")
+                    elif "base cost" in query_lower:
+                        st.markdown("### Base Cost")
+                        st.markdown(f"**Base Cost**: {df['base_cost'].iloc[0]}")
+                        st.download_button("Download Base Cost Data", df[['base_cost']].to_csv(index=False), "base_cost.csv")
+                    elif "profit margin" in query_lower:
+                        st.markdown("### Profit Margin")
+                        st.markdown(f"**Profit Margin**: {df['profit_margin'].iloc[0]}")
+                        st.download_button("Download Profit Margin Data", df[['profit_margin']].to_csv(index=False), "profit_margin.csv")
+                    elif "total invoices" in query_lower:
+                        st.markdown("### Total Invoices")
+                        st.markdown(f"**Total Invoices**: {df['total_invoices'].iloc[0]}")
+                        st.download_button("Download Total Invoices Data", df[['total_invoices']].to_csv(index=False), "total_invoices.csv")
                 else:
-                    st.warning("No total revenue data found in the response.")
+                    st.warning("Required data not found in the response.")
             else:
                 # Handle other queries (e.g., best-selling products)
                 if all(col in df.columns for col in ['product_id', 'product_name', 'total_sold', 'max_price']):
@@ -289,7 +316,7 @@ def get_sql_chain():
       GROUP BY p.product_id, p.product_name
       ORDER BY total_sold DESC, p.product_id ASC
       LIMIT 10
-    - For admin overview metrics, use:
+    - For admin overview metrics or individual metrics (total revenue, total profit, base cost, profit margin, total invoices), use:
       WITH invoice_stats AS (
           SELECT 
               COUNT(invoice_id) AS total_invoices,
@@ -312,30 +339,14 @@ def get_sql_chain():
           i_stats.total_invoices,
           i_stats.avg_sales_value,
           i_stats.total_revenue,
-          c_stats.base_cost,
-          (SELECT COUNT(*) 
-           FROM products p 
-           WHERE p.stock <= p.reorder_level) AS low_stock_count,
-          (SELECT p.product_name 
-           FROM invoice_details id2
-           INNER JOIN products p ON id2.product_id = p.product_id
-           INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
-           WHERE i2.total > 0
-           AND CONCAT(i2.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
-           GROUP BY p.product_id, p.product_name
-           ORDER BY SUM(id2.quantity) DESC
-           LIMIT 1) AS top_product
+          c_stats.base_cost
       FROM invoice_stats i_stats
       CROSS JOIN cost_stats c_stats
-    - For total revenue, use:
-      SELECT SUM(total) AS total_revenue
-      FROM invoices
-      WHERE total > 0
-      AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
     - Use 'today' as '{current_sg_date}' for daily queries.
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
-    - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
+    - For profit, calculate as total_revenue - base_cost in the application logic.
+    - For profit margin, calculate as (profit / total_revenue * 100) if total_revenue > 0, else 0 in the application logic.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
     - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter unless specified.
     - Ensure queries are valid for MariaDB 10.6.21.
