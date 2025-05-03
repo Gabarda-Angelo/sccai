@@ -42,6 +42,20 @@ if "chat_history" not in st.session_state:
     ]
 if "debug_mode" not in st.session_state:
     st.session_state.debug_mode = True  # Enabled by default
+if "date_from" not in st.session_state:
+    # Fetch the earliest invoice date as default
+    try:
+        response = requests.get(
+            st.secrets["API_URL"],
+            params={"action": "execute_query", "key": st.secrets["API_KEY"], "query": "SELECT MIN(order_date) AS min_date FROM invoices"}
+        )
+        data = response.json()
+        min_date = data["data"][0]["min_date"] if data["data"] and data["data"][0]["min_date"] else "2025-01-01"
+        st.session_state.date_from = f"{min_date} 00:00:00"
+    except:
+        st.session_state.date_from = "2025-01-01 00:00:00"
+if "date_to" not in st.session_state:
+    st.session_state.date_to = datetime.datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y-%m-%d %H:%M:%S')
 
 # Authentication function
 def authenticate(email, password):
@@ -108,8 +122,7 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
-            query_lower = query.lower()
-            if query_lower.startswith("what are the admin overview metrics"):
+            if query.lower().startswith("what are the admin overview metrics"):
                 # Process Admin Overview metrics
                 if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'low_stock_count', 'top_product']):
                     # Calculate Profit and Profit Margin
@@ -149,84 +162,46 @@ def handle_query(query: str):
                             st.markdown(value)
                     # Download button for data
                     st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
-            elif any(keyword in query_lower for keyword in ["total revenue", "total profit", "base cost", "profit margin", "total invoices"]):
-                # Process individual metric queries using Admin Overview data
-                if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost']):
-                    # Calculate Profit and Profit Margin
-                    df['profit'] = df['total_revenue'] - df['base_cost']
-                    df['profit_margin'] = df.apply(
-                        lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
-                    )
-                    # Format monetary columns
-                    for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
-                        df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
-                    df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
-                    # Display requested metric
-                    if "total revenue" in query_lower:
-                        st.markdown("### Total Revenue")
-                        st.markdown(f"**Total Revenue**: {df['total_revenue'].iloc[0]}")
-                        st.download_button("Download Total Revenue Data", df[['total_revenue']].to_csv(index=False), "total_revenue.csv")
-                    elif "total profit" in query_lower:
-                        st.markdown("### Total Profit")
-                        st.markdown(f"**Total Profit**: {df['profit'].iloc[0]}")
-                        st.download_button("Download Total Profit Data", df[['profit']].to_csv(index=False), "total_profit.csv")
-                    elif "base cost" in query_lower:
-                        st.markdown("### Base Cost")
-                        st.markdown(f"**Base Cost**: {df['base_cost'].iloc[0]}")
-                        st.download_button("Download Base Cost Data", df[['base_cost']].to_csv(index=False), "base_cost.csv")
-                    elif "profit margin" in query_lower:
-                        st.markdown("### Profit Margin")
-                        st.markdown(f"**Profit Margin**: {df['profit_margin'].iloc[0]}")
-                        st.download_button("Download Profit Margin Data", df[['profit_margin']].to_csv(index=False), "profit_margin.csv")
-                    elif "total invoices" in query_lower:
-                        st.markdown("### Total Invoices")
-                        st.markdown(f"**Total Invoices**: {df['total_invoices'].iloc[0]}")
-                        st.download_button("Download Total Invoices Data", df[['total_invoices']].to_csv(index=False), "total_invoices.csv")
-                else:
-                    st.warning("Required data not found in the response.")
             else:
                 # Handle other queries (e.g., best-selling products)
-                if all(col in df.columns for col in ['product_id', 'product_name', 'total_sold', 'max_price']):
-                    df.rename(columns={
-                        'product_id': 'Product ID',
-                        'product_name': 'Product Name',
-                        'total_sold': 'QTY',
-                        'max_price': 'Rate'
-                    }, inplace=True)
-                    if 'total_revenue' in df.columns:
-                        df.drop(columns=['total_revenue'], inplace=True)
-                    df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
-                    df = adjust_quantities_with_voids(df)
-                    for col in df.columns:
-                        if "date" in col.lower():
-                            df[col] = pd.to_datetime(df[col], errors='coerce')
-                        if col == 'Rate':
-                            df[col] = pd.to_numeric(df[col], errors='coerce')
-                            df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                    chart_type, columns = determine_chart_type(query, df)
-                    if chart_type:
-                        with st.spinner("Generating chart..."):
-                            st.markdown(f"### {chart_type.capitalize()} Chart")
-                            fig, ax = plt.subplots()
-                            if chart_type == 'bar':
-                                df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
-                                ax.set_title(f"{columns[1]} by {columns[0]}")
-                                ax.set_xlabel(columns[0])
-                                ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
-                            elif chart_type == 'line':
-                                df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
-                                ax.set_title(f"{columns[1]} Over Time")
-                                ax.set_xlabel("Date")
-                                ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
-                            elif chart_type == 'pie':
-                                ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                                ax.set_title(f"Distribution of {columns[1]}")
-                            st.pyplot(fig)
-                            st.download_button("Download Data", df.to_csv(index=False), "data.csv")
-                    if len(df) > 1 or len(df.columns) > 1:
-                        st.table(df)
-                else:
-                    st.warning("Unexpected data format. Please check the query or data source.")
+                df.rename(columns={
+                    'product_id': 'Product ID',
+                    'product_name': 'Product Name',
+                    'total_sold': 'QTY',
+                    'max_price': 'Rate'
+                }, inplace=True)
+                if 'total_revenue' in df.columns:
+                    df.drop(columns=['total_revenue'], inplace=True)
+                df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
+                df = adjust_quantities_with_voids(df)
+                for col in df.columns:
+                    if "date" in col.lower():
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                    if col == 'Rate':
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                        df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                chart_type, columns = determine_chart_type(query, df)
+                if chart_type:
+                    with st.spinner("Generating chart..."):
+                        st.markdown(f"### {chart_type.capitalize()} Chart")
+                        fig, ax = plt.subplots()
+                        if chart_type == 'bar':
+                            df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                            ax.set_title(f"{columns[1]} by {columns[0]}")
+                            ax.set_xlabel(columns[0])
+                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        elif chart_type == 'line':
+                            df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                            ax.set_title(f"{columns[1]} Over Time")
+                            ax.set_xlabel("Date")
+                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                        elif chart_type == 'pie':
+                            ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                            ax.set_title(f"Distribution of {columns[1]}")
+                        st.pyplot(fig)
+                        st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+                if len(df) > 1 or len(df.columns) > 1:
+                    st.table(df)
 
 # Display chat history
 def display_chat_history():
@@ -303,20 +278,12 @@ def get_sql_chain():
 
     **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
     **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
+    **Date range for filtering:** BETWEEN '{date_from}' AND '{date_to}'
 
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - For best-selling products, use:
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price
-      FROM invoice_details id
-      JOIN products p ON id.product_id = p.product_id
-      JOIN invoices i ON id.invoice_id = i.invoice_id
-      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
-      GROUP BY p.product_id, p.product_name
-      ORDER BY total_sold DESC, p.product_id ASC
-      LIMIT 10
-    - For admin overview metrics or individual metrics (total revenue, total profit, base cost, profit margin, total invoices), use:
+    - For admin overview metrics, use:
       WITH invoice_stats AS (
           SELECT 
               COUNT(invoice_id) AS total_invoices,
@@ -324,7 +291,7 @@ def get_sql_chain():
               SUM(total) AS total_revenue
           FROM invoices
           WHERE total > 0
-          AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+          AND CONCAT(order_date, ' ', order_time) BETWEEN '{date_from}' AND '{date_to}'
       ),
       cost_stats AS (
           SELECT 
@@ -333,20 +300,31 @@ def get_sql_chain():
           LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.total > 0
-          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{date_from}' AND '{date_to}'
       )
       SELECT 
           i_stats.total_invoices,
           i_stats.avg_sales_value,
           i_stats.total_revenue,
-          c_stats.base_cost
+          c_stats.base_cost,
+          (SELECT COUNT(*) 
+           FROM products p 
+           WHERE p.stock <= p.reorder_level) AS low_stock_count,
+          (SELECT p.product_name 
+           FROM invoice_details id2
+           INNER JOIN products p ON id2.product_id = p.product_id
+           INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
+           WHERE i2.total > 0
+           AND CONCAT(i2.order_date, ' ', i2.order_time) BETWEEN '{date_from}' AND '{date_to}'
+           GROUP BY p.product_id, p.product_name
+           ORDER BY SUM(id2.quantity) DESC
+           LIMIT 1) AS top_product
       FROM invoice_stats i_stats
       CROSS JOIN cost_stats c_stats
     - Use 'today' as '{current_sg_date}' for daily queries.
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
-    - For profit, calculate as total_revenue - base_cost in the application logic.
-    - For profit margin, calculate as (profit / total_revenue * 100) if total_revenue > 0, else 0 in the application logic.
+    - For profit, calculate as total_revenue - base_cost in the application layer.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
     - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter unless specified.
     - Ensure queries are valid for MariaDB 10.6.21.
@@ -391,6 +369,8 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
+            date_from=lambda _: st.session_state.date_from,
+            date_to=lambda _: st.session_state.date_to,
             chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-5:]])
         )
         | RunnablePassthrough.assign(
@@ -542,6 +522,22 @@ def main():
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
                 st.checkbox("Debug Mode", key="debug_mode", value=True)
+                # Date range picker
+                with st.form("date_filter_form"):
+                    st.markdown("### Filter by Date")
+                    date_from = st.text_input("From (YYYY-MM-DD HH:MM:SS)", value=st.session_state.date_from)
+                    date_to = st.text_input("To (YYYY-MM-DD HH:MM:SS)", value=st.session_state.date_to)
+                    submit_dates = st.form_submit_button("Apply Date Filter")
+                    if submit_dates:
+                        try:
+                            datetime.datetime.strptime(date_from, '%Y-%m-%d %H:%M:%S')
+                            datetime.datetime.strptime(date_to, '%Y-%m-%d %H:%M:%S')
+                            st.session_state.date_from = date_from
+                            st.session_state.date_to = date_to
+                            st.success("Date filter applied!")
+                            st.rerun()
+                        except ValueError:
+                            st.error("Invalid date format. Use YYYY-MM-DD HH:MM:SS")
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
