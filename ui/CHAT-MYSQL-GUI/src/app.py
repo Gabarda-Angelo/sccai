@@ -148,46 +148,58 @@ def handle_query(query: str):
                             st.markdown(value)
                     # Download button for data
                     st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
+            elif "total revenue" in query.lower():
+                # Process Total Revenue query
+                if 'total_revenue' in df.columns:
+                    df['total_revenue'] = df['total_revenue'].apply(lambda x: f"₱{x:,.2f}")
+                    st.markdown("### Total Revenue")
+                    st.markdown(f"**Total Revenue**: {df['total_revenue'].iloc[0]}")
+                    st.download_button("Download Total Revenue Data", df.to_csv(index=False), "total_revenue.csv")
+                else:
+                    st.warning("No total revenue data found in the response.")
             else:
                 # Handle other queries (e.g., best-selling products)
-                df.rename(columns={
-                    'product_id': 'Product ID',
-                    'product_name': 'Product Name',
-                    'total_sold': 'QTY',
-                    'max_price': 'Rate'
-                }, inplace=True)
-                if 'total_revenue' in df.columns:
-                    df.drop(columns=['total_revenue'], inplace=True)
-                df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
-                df = adjust_quantities_with_voids(df)
-                for col in df.columns:
-                    if "date" in col.lower():
-                        df[col] = pd.to_datetime(df[col], errors='coerce')
-                    if col == 'Rate':
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                        df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                chart_type, columns = determine_chart_type(query, df)
-                if chart_type:
-                    with st.spinner("Generating chart..."):
-                        st.markdown(f"### {chart_type.capitalize()} Chart")
-                        fig, ax = plt.subplots()
-                        if chart_type == 'bar':
-                            df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
-                            ax.set_title(f"{columns[1]} by {columns[0]}")
-                            ax.set_xlabel(columns[0])
-                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
-                        elif chart_type == 'line':
-                            df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
-                            ax.set_title(f"{columns[1]} Over Time")
-                            ax.set_xlabel("Date")
-                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
-                        elif chart_type == 'pie':
-                            ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
-                            ax.set_title(f"Distribution of {columns[1]}")
-                        st.pyplot(fig)
-                        st.download_button("Download Data", df.to_csv(index=False), "data.csv")
-                if len(df) > 1 or len(df.columns) > 1:
-                    st.table(df)
+                if all(col in df.columns for col in ['product_id', 'product_name', 'total_sold', 'max_price']):
+                    df.rename(columns={
+                        'product_id': 'Product ID',
+                        'product_name': 'Product Name',
+                        'total_sold': 'QTY',
+                        'max_price': 'Rate'
+                    }, inplace=True)
+                    if 'total_revenue' in df.columns:
+                        df.drop(columns=['total_revenue'], inplace=True)
+                    df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
+                    df = adjust_quantities_with_voids(df)
+                    for col in df.columns:
+                        if "date" in col.lower():
+                            df[col] = pd.to_datetime(df[col], errors='coerce')
+                        if col == 'Rate':
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                            df.rename(columns={col: f"{col} (₱)"}, inplace=True)
+                    chart_type, columns = determine_chart_type(query, df)
+                    if chart_type:
+                        with st.spinner("Generating chart..."):
+                            st.markdown(f"### {chart_type.capitalize()} Chart")
+                            fig, ax = plt.subplots()
+                            if chart_type == 'bar':
+                                df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax)
+                                ax.set_title(f"{columns[1]} by {columns[0]}")
+                                ax.set_xlabel(columns[0])
+                                ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                            elif chart_type == 'line':
+                                df.plot(kind='line', x=columns[0], y=columns[1], ax=ax)
+                                ax.set_title(f"{columns[1]} Over Time")
+                                ax.set_xlabel("Date")
+                                ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'))
+                            elif chart_type == 'pie':
+                                ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
+                                ax.set_title(f"Distribution of {columns[1]}")
+                            st.pyplot(fig)
+                            st.download_button("Download Data", df.to_csv(index=False), "data.csv")
+                    if len(df) > 1 or len(df.columns) > 1:
+                        st.table(df)
+                else:
+                    st.warning("Unexpected data format. Please check the query or data source.")
 
 # Display chat history
 def display_chat_history():
@@ -315,6 +327,11 @@ def get_sql_chain():
            LIMIT 1) AS top_product
       FROM invoice_stats i_stats
       CROSS JOIN cost_stats c_stats
+    - For total revenue, use:
+      SELECT SUM(total) AS total_revenue
+      FROM invoices
+      WHERE total > 0
+      AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
     - Use 'today' as '{current_sg_date}' for daily queries.
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
@@ -392,7 +409,7 @@ def get_response(user_query: str, chat_history: list):
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
         current_sg_date = now_sg.strftime('%Y-%m-%d')
-        current_sg_datetime = now_sg.strftime('%Y-%m-DD %H:%M:%S')
+        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
