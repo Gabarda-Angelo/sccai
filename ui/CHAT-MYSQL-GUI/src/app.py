@@ -309,7 +309,7 @@ def get_sql_chain():
            INNER JOIN products p ON id2.product_id = p.product_id
            INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
            WHERE i2.total > 0
-           AND CONCAT(i2.order_date, ' ', i2.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+           AND CONCAT(i2.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
            GROUP BY p.product_id, p.product_name
            ORDER BY SUM(id2.quantity) DESC
            LIMIT 1) AS top_product
@@ -368,10 +368,10 @@ def get_sql_chain():
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
             question=lambda x: x["question"],
-            chat_history=lambda x: x["chat_history"],
+            chat_history=lambda x: x["chat_history"]
         )
         | aggregator_prompt
-        | ChatGro unification(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
+        | ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
         | StrOutputParser()
     )
 
@@ -392,7 +392,7 @@ def get_response(user_query: str, chat_history: list):
         singapore_tz = pytz.timezone('Asia/Singapore')
         now_sg = datetime.datetime.now(singapore_tz)
         current_sg_date = now_sg.strftime('%Y-%m-%d')
-        current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+        current_sg_datetime = now_sg.strftime('%Y-%m-DD %H:%M:%S')
 
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
