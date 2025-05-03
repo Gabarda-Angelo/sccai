@@ -41,7 +41,7 @@ if "chat_history" not in st.session_state:
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
 if "debug_mode" not in st.session_state:
-    st.session_state.debug_mode = True  # Enabled by default per DEBUG_MODE = "true"
+    st.session_state.debug_mode = True  # Enabled by default
 
 # Authentication function
 def authenticate(email, password):
@@ -62,6 +62,28 @@ def authenticate(email, password):
     except Exception as e:
         st.error(f"Authentication error: {str(e)}")
     return False
+
+# Adjust quantities based on void_logs
+def adjust_quantities_with_voids(df):
+    void_data, _, _ = fetch_data_from_api("execute_query", {
+        "query": """
+        SELECT JSON_EXTRACT(details, '$.item[*].product_id') AS product_ids,
+               JSON_EXTRACT(details, '$.item[*].original_qty') AS original_qty,
+               JSON_EXTRACT(details, '$.item[*].new_qty') AS new_qty
+        FROM void_logs
+        WHERE status = 'voided_before_payment'
+        """
+    })
+    if void_data and 'Product ID' in df.columns:
+        for void in void_data:
+            product_ids = json.loads(void['product_ids']) if void['product_ids'] else []
+            original_qty = json.loads(void['original_qty']) if void['original_qty'] else []
+            new_qty = json.loads(void['new_qty']) if void['new_qty'] else []
+            for pid, oq, nq in zip(product_ids, original_qty, new_qty):
+                if pid in df['Product ID'].values:
+                    adjustment = oq - nq
+                    df.loc[df['Product ID'] == pid, 'QTY'] -= adjustment
+    return df
 
 # Handle user query
 def handle_query(query: str):
@@ -86,11 +108,25 @@ def handle_query(query: str):
         st.markdown(natural_response)
         if data and isinstance(data, list) and len(data) >= 1:
             df = pd.DataFrame(data)
+            # Standardize column names
+            df.rename(columns={
+                'product_id': 'Product ID',
+                'product_name': 'Product Name',
+                'total_sold': 'QTY',
+                'max_price': 'Rate'
+            }, inplace=True)
+            # Drop unwanted columns
+            if 'total_revenue' in df.columns:
+                df.drop(columns=['total_revenue'], inplace=True)
+            # Select only relevant columns
+            df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
+            # Adjust quantities for voids
+            df = adjust_quantities_with_voids(df)
             # Preprocess data
             for col in df.columns:
                 if "date" in col.lower():
                     df[col] = pd.to_datetime(df[col], errors='coerce')
-                if any(mon in col for mon in ["subtotal", "total", "unit_price", "sale_price", "purchase_price", "total_price", "paid", "due", "profit", "margin", "amount_discounted"]):
+                if col == 'Rate':
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.rename(columns={col: f"{col} (₱)"}, inplace=True)
             chart_type, columns = determine_chart_type(query, df)
@@ -168,7 +204,7 @@ def validate_query(query):
     query_upper = query.upper().strip()
     if not query_upper.startswith("SELECT"):
         raise ValueError("Query must start with SELECT")
-    if not any(kw in query_upper for kw in allowed_keywords[1:]):  # Exclude SELECT from keyword check
+    if not any(kw in query_upper for kw in allowed_keywords[1:]):
         raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
     return True
 
@@ -179,6 +215,7 @@ def get_sql_chain():
     - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash/Card/Check), created_at, updated_at
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+    - void_logs: void_id (PK), invoice_id (FK to invoices), void_type, details (JSON), status, created_at, updated_at
     ...
     """
 
@@ -194,18 +231,21 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - Use CONCAT(i.order_date, ' ', i.order_time) for date filtering with BETWEEN clause.
-    - For overview stats, use:
-      - COUNT(invoice_id) for total invoices
-      - AVG(total) for average sales value
-      - SUM(total) for total revenue
-      - SUM(id.quantity * p.purchase_price) for base cost
-      - COUNT of products where stock <= reorder_level for low stock
-      - Top product by SUM(id.quantity)
-    - For best-selling products, select product_id, product_name, SUM(quantity), MAX(unit_price), SUM(total_price), GROUP BY product_id, ORDER BY quantity DESC, LIMIT 10.
-    - For recent invoices, select invoice_id, CONCAT(order_date, ' ', order_time), total, payment_type, ORDER BY invoice_id DESC, LIMIT 30.
-    - For sales details, select invoice_id, CONCAT(order_date, ' ', order_time), subtotal, discount, total, paid, due, payment_type, ORDER BY invoice_id DESC.
-    - Use COALESCE(p.purchase_price, 0) for profit calculations.
+    - For best-selling products, use:
+      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price
+      FROM invoice_details id
+      JOIN products p ON id.product_id = p.product_id
+      JOIN invoices i ON id.invoice_id = i.invoice_id
+      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '{current_sg_datetime}'
+      GROUP BY p.product_id, p.product_name
+      ORDER BY total_sold DESC, p.product_id ASC
+      LIMIT 10
+    - Use 'today' as '{current_sg_date}' for daily queries.
+    - For revenue, use SUM(i.total) from invoices to account for discounts.
+    - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
+    - For profit, use SUM(i.total - (id.quantity * COALESCE(p.purchase_price, 0))) from invoices i JOIN invoice_details id JOIN products p.
+    - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
+    - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter unless specified.
     - Ensure queries are valid for MariaDB 10.6.21.
     - Return only the SQL query, no explanations.
 
@@ -239,8 +279,7 @@ def get_sql_chain():
     2. Uses explicit JOIN syntax with aliases
     3. Handles JSON_EXTRACT for JSON fields
     4. Uses COALESCE for purchase_price in profit calculations
-    5. Uses CONCAT(order_date, ' ', order_time) for date filtering
-    6. Valid for MariaDB 10.6.21
+    5. Valid for MariaDB 10.6.21
     """
 
     aggregator_prompt = ChatPromptTemplate.from_template(aggregator_template)
@@ -363,7 +402,7 @@ def get_response(user_query: str, chat_history: list):
 
 # Determine chart type
 def determine_chart_type(query, df):
-    if df.empty or len(df.columns) < 2 or len(df) < 2:  # Skip charts for single records
+    if df.empty or len(df.columns) < 2 or len(df) < 2:
         return None, None
     columns = df.columns.tolist()
     query_lower = query.lower()
@@ -399,7 +438,7 @@ def main():
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
-                st.checkbox("Debug Mode", key="debug_mode", value=True)  # Default to True
+                st.checkbox("Debug Mode", key="debug_mode", value=True)
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
