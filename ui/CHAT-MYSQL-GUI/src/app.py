@@ -125,9 +125,6 @@ def handle_query(query: str):
             if query.lower().startswith("what are the admin overview metrics"):
                 # Process Admin Overview metrics
                 if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'low_stock_count', 'top_product']):
-                    # Validate and correct negative values
-                    df['total_revenue'] = df['total_revenue'].apply(lambda x: max(x, 0))
-                    df['base_cost'] = df['base_cost'].apply(lambda x: max(x, 0))
                     # Calculate Profit and Profit Margin
                     df['profit'] = df['total_revenue'] - df['base_cost']
                     df['profit_margin'] = df.apply(
@@ -286,39 +283,6 @@ def get_sql_chain():
     **Conversation Summary:** {chat_summary}
 
     **Instructions:**
-    - For best-selling products, use:
-      SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price
-      FROM invoice_details id
-      JOIN products p ON id.product_id = p.product_id
-      JOIN invoices i ON id.invoice_id = i.invoice_id
-      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{date_from}' AND '{date_to}'
-      GROUP BY p.product_id, p.product_name
-      ORDER BY total_sold DESC, p.product_id ASC
-      LIMIT 10
-    - For total revenue, use:
-      SELECT SUM(total) AS total_revenue
-      FROM invoices i
-      WHERE i.total > 0
-      AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{date_from}' AND '{date_to}'
-    - For total profit, use:
-      SELECT 
-          SUM(i.total - COALESCE(SUM(id.quantity * p.purchase_price), 0)) AS total_profit
-      FROM 
-          invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-      WHERE 
-          i.total > 0
-          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{date_from}' AND '{date_to}'
-      GROUP BY 
-          i.invoice_id
-    - For base cost, use:
-      SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-      FROM invoices i
-      LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-      LEFT JOIN products p ON id.product_id = p.product_id
-      WHERE i.total > 0
-      AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{date_from}' AND '{date_to}'
     - For admin overview metrics, use:
       WITH invoice_stats AS (
           SELECT 
@@ -360,7 +324,7 @@ def get_sql_chain():
     - Use 'today' as '{current_sg_date}' for daily queries.
     - For revenue, use SUM(i.total) from invoices to account for discounts.
     - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)) from invoice_details id JOIN products p.
-    - For profit, calculate as total_revenue - base_cost in the application layer for admin overview, or use the specific profit query.
+    - For profit, calculate as total_revenue - base_cost in the application layer.
     - Use COALESCE to handle NULL purchase_price values, assuming 0 if NULL.
     - If the query asks for 'all time' or 'from the very first invoice', do NOT add a date filter unless specified.
     - Ensure queries are valid for MariaDB 10.6.21.
@@ -495,7 +459,6 @@ def get_response(user_query: str, chat_history: list):
         - **History:** {chat_history}
 
         **Guidelines:**
-        - If results are negative (e.g., revenue, profit, base cost), indicate a potential issue: "The calculated value is negative (₱{value}), which may indicate data inconsistencies. Please verify the data or try a different time period."
         - If empty results, check if the query involves profit and suggest: "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames."
         - Highlight insights with **bold**.
         - Use - for lists, ₱ for money.
