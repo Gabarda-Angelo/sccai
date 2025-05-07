@@ -111,28 +111,21 @@ class AISQLAgent:
         except Exception as e:
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
         
-        # Clean query
+        # Improved query extraction
         query_lines = raw_query.split("\n")
         sql_query = ""
-        in_sql_block = False
         for line in query_lines:
             line = line.strip()
-            if line.upper().startswith("SELECT"):
-                in_sql_block = True
-                sql_query = line
-            elif in_sql_block:
-                sql_query += "\n" + line
+            if line and not line.startswith(("--", "#", "/*")):
+                sql_query += line + "\n"
                 if ";" in line:
                     break
-        query = sql_query.replace("```sql", "").replace("```", "").strip()
-        if not query:
+        sql_query = sql_query.strip()
+        if not sql_query:
             raise ValueError("No valid SQL query extracted")
-        if not query.endswith(";"):
-            query += ";"
-        query = "\n".join(
-            [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
-        )
-        return query, raw_query
+        if not sql_query.endswith(";"):
+            sql_query += ";"
+        return sql_query, raw_query
 
     def validate_query(self, query):
         allowed_keywords = [
@@ -151,12 +144,15 @@ class AISQLAgent:
         payload = {"action": "execute_query", "key": self.api_key, "query": quote(query)}
         response = requests.get(self.api_url, params=payload, timeout=15)
         status_code = response.status_code
-        if not response.text.strip():
-            return None, "Empty response from API", status_code
-        data = response.json()
-        if data.get("status") == "success":
-            return data["data"], "Success", status_code
-        return None, data.get("error", "Unknown error"), status_code
+        if status_code != 200:
+            return None, f"API returned status {status_code}: {response.text}", status_code
+        try:
+            data = response.json()
+            if data.get("status") == "success":
+                return data["data"], "Success", status_code
+            return None, data.get("error", "Unknown error"), status_code
+        except json.JSONDecodeError:
+            return None, "Invalid JSON response", status_code
 
     def generate_response(self, user_query, data, chat_history):
         response_template = """
