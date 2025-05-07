@@ -14,6 +14,7 @@ import datetime
 import pytz
 from retry import retry
 import logging
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -95,47 +96,66 @@ class AISQLAgent:
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date'
           GROUP BY e.employee_id
           ORDER BY total_sales DESC
+        - For employee details:
+          SELECT employee_id, first_name, last_name, email, role
+          FROM employees
+          WHERE role IN ('Owner', 'Admin', 'Cashier');
+        - For invoice details:
+          SELECT i.invoice_id, i.order_date, i.order_time, e.first_name, e.last_name, p.product_name, id.quantity, id.unit_price, id.total_price
+          FROM invoices i
+          INNER JOIN employees e ON i.employee_id = e.employee_id
+          INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          INNER JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = 'specific_date';
         - Handle void_logs by adjusting quantities where status = 'voided_before_payment'.
         - Ensure queries are secure, avoiding SQL injection risks.
-        - Return only the SQL query, no explanations or additional text.
+        - Return only the SQL query, no explanations, no markdown, no backticks.
 
         **User Question:** {question}
         """
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.llm | StrOutputParser()
         try:
-            raw_query = chain.invoke({
+            raw_response = chain.invoke({
                 "question": user_query,
                 "chat_history": " ".join([msg.content for msg in chat_history[-5:]]),
                 "schema": self.schema,
                 "current_sg_date": current_sg_date,
                 "current_sg_datetime": current_sg_datetime
             })
+            # Extract the raw SQL query, removing any markdown or formatting
+            sql_query_match = re.search(r'(?is)(SELECT.*?;)', raw_response)
+            if sql_query_match:
+                sql_query = sql_query_match.group(1).strip()
+            else:
+                raise ValueError("No SQL query found in the response")
+            if not sql_query.endswith(";"):
+                sql_query += ";"
+            return sql_query, raw_response
         except Exception as e:
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
-        
-        sql_query = raw_query.strip()
-        if not sql_query:
-            raise ValueError("No valid SQL query extracted")
-        if not sql_query.endswith(";"):
-            sql_query += ";"
-        return sql_query, raw_query
 
     def validate_query(self, query):
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
             raise ValueError("Query must start with SELECT")
-        for table in self.allowed_tables.keys():
-            if table.upper() in query_upper:
-                select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
-                columns = [col.strip() for col in select_part.split(",")]
-                for col in columns:
-                    if "." in col:
-                        table_name, col_name = col.split(".")
-                        if table_name.upper() not in [t.upper() for t in self.allowed_tables.keys()]:
-                            raise ValueError(f"Unauthorized table: {table_name}")
-                        if col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name.lower()]]:
-                            raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
+        # Extract table names from FROM and JOIN clauses, ignoring aliases
+        table_names = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)?', query_upper)
+        for table in table_names:
+            if table not in [t.upper() for t in self.allowed_tables.keys()]:
+                raise ValueError(f"Unauthorized table: {table}")
+        # Validate columns in SELECT clause
+        select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
+        columns = [col.strip() for col in select_part.split(",")]
+        for col in columns:
+            if "." in col:
+                table_alias, col_name = col.split(".")
+                # Map alias to actual table
+                table_match = re.search(rf'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+{table_alias}\b', query_upper)
+                if table_match:
+                    table_name = table_match.group(1).lower()
+                    if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
+                        raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
         return True
 
     @retry(tries=3, delay=1, backoff=2)
@@ -248,13 +268,13 @@ def handle_query(query: str, agent: AISQLAgent):
             current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
             # Generate and validate SQL query
-            sql_query, raw_query = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime)
+            sql_query, raw_response = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime)
             agent.validate_query(sql_query)
 
             # Execute query
             data, api_response, status_code = agent.execute_query(sql_query)
             debug_info = {
-                "raw_query": raw_query,
+                "raw_response": raw_response,
                 "cleaned_query": sql_query,
                 "api_response": api_response,
                 "status_code": status_code
@@ -269,7 +289,7 @@ def handle_query(query: str, agent: AISQLAgent):
             # Display debug info if enabled
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
-                st.write(f"**Raw Query**: {debug_info['raw_query']}")
+                st.write(f"**Raw Response**: {debug_info['raw_response']}")
                 st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
@@ -279,70 +299,53 @@ def handle_query(query: str, agent: AISQLAgent):
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
 
-                # Handle admin overview metrics
-                if query_lower.startswith("what are the admin overview metrics"):
-                    if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'profit', 'profit_margin', 'low_stock_count', 'top_product']):
-                        for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
-                            df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
-                        df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
+                # Handle employee details
+                if "employee" in query_lower and "details" in query_lower:
+                    if all(col in df.columns for col in ['employee_id', 'first_name', 'last_name', 'email', 'role']):
                         df.rename(columns={
-                            'total_invoices': 'Total Invoices',
-                            'avg_sales_value': 'Average Sales Value',
-                            'total_revenue': 'Total Revenue',
-                            'base_cost': 'Base Cost',
-                            'profit': 'Profit',
-                            'profit_margin': 'Profit Margin',
-                            'low_stock_count': 'Low Stock Products',
-                            'top_product': 'Top-Selling Product'
+                            'employee_id': 'Employee ID',
+                            'first_name': 'First Name',
+                            'last_name': 'Last Name',
+                            'email': 'Email',
+                            'role': 'Role'
                         }, inplace=True)
-                        st.markdown("### Admin Overview")
-                        cols = st.columns(4)
-                        for i, col in enumerate(['Average Sales Value', 'Total Invoices', 'Total Revenue', 'Top-Selling Product']):
-                            with cols[i]:
-                                st.markdown(f"**{col}**")
-                                st.markdown(df[col].iloc[0])
-                        cols = st.columns(4)
-                        for i, col in enumerate(['Base Cost', 'Profit', 'Profit Margin', 'Low Stock Products']):
-                            with cols[i]:
-                                st.markdown(f"**{col}**")
-                                value = df[col].iloc[0]
-                                if col == 'Low Stock Products':
-                                    value = f"{value} item(s)"
-                                st.markdown(value)
-                        st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
+                        st.markdown("### Registered Employees")
+                        if len(df) > 100:
+                            st.write("Showing first 10 rows. Download the full data below.")
+                            st.table(df.head(10))
+                            st.download_button("Download Employee Data", df.to_csv(index=False), "employees.csv")
+                        else:
+                            st.table(df)
                     else:
-                        st.warning("Required columns missing in admin overview data.")
+                        st.warning("Required employee data not found in the response.")
 
-                # Handle financial metrics
-                elif any(keyword in query_lower for keyword in ["total revenue", "total profit", "base cost", "profit margin", "total invoices"]):
-                    if all(col in df.columns for col in ['total_revenue', 'base_cost', 'profit', 'profit_margin']):
-                        for col in ['total_revenue', 'base_cost', 'profit']:
-                            df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
-                        df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
-                        if "total revenue" in query_lower:
-                            st.markdown("### Total Revenue")
-                            st.markdown(f"**Total Revenue**: {df['total_revenue'].iloc[0]}")
-                            st.download_button("Download Total Revenue Data", df[['total_revenue']].to_csv(index=False), "total_revenue.csv")
-                        elif "total profit" in query_lower:
-                            st.markdown("### Total Profit")
-                            st.markdown(f"**Total Profit**: {df['profit'].iloc[0]}")
-                            st.download_button("Download Total Profit Data", df[['profit']].to_csv(index=False), "total_profit.csv")
-                        elif "base cost" in query_lower:
-                            st.markdown("### Base Cost")
-                            st.markdown(f"**Base Cost**: {df['base_cost'].iloc[0]}")
-                            st.download_button("Download Base Cost Data", df[['base_cost']].to_csv(index=False), "base_cost.csv")
-                        elif "profit margin" in query_lower:
-                            st.markdown("### Profit Margin")
-                            st.markdown(f"**Profit Margin**: {df['profit_margin'].iloc[0]}")
-                            st.download_button("Download Profit Margin Data", df[['profit_margin']].to_csv(index=False), "profit_margin.csv")
-                        elif "total invoices" in query_lower:
-                            st.markdown("### Total Invoices")
-                            st.markdown(f"**Total Invoices**: {df['total_invoices'].iloc[0]}")
-                            st.download_button("Download Total Invoices Data", df[['total_invoices']].to_csv(index=False), "total_invoices.csv")
+                # Handle invoice details
+                elif "invoice" in query_lower and "details" in query_lower:
+                    if all(col in df.columns for col in ['invoice_id', 'order_date', 'order_time', 'first_name', 'last_name', 'product_name', 'quantity', 'unit_price', 'total_price']):
+                        df.rename(columns={
+                            'invoice_id': 'Invoice ID',
+                            'order_date': 'Order Date',
+                            'order_time': 'Order Time',
+                            'first_name': 'Employee First Name',
+                            'last_name': 'Employee Last Name',
+                            'product_name': 'Product Name',
+                            'quantity': 'Quantity',
+                            'unit_price': 'Unit Price (₱)',
+                            'total_price': 'Total Price (₱)'
+                        }, inplace=True)
+                        df['Unit Price (₱)'] = df['Unit Price (₱)'].apply(lambda x: f"₱{x:,.2f}")
+                        df['Total Price (₱)'] = df['Total Price (₱)'].apply(lambda x: f"₱{x:,.2f}")
+                        st.markdown("### Invoice Details")
+                        if len(df) > 100:
+                            st.write("Showing first 10 rows. Download the full data below.")
+                            st.table(df.head(10))
+                            st.download_button("Download Invoice Data", df.to_csv(index=False), "invoices.csv")
+                        else:
+                            st.table(df)
                     else:
-                        st.warning("Required financial data not found in the response.")
+                        st.warning("Required invoice data not found in the response.")
 
-                # Handle product-related queries
+                # Handle other queries (e.g., product-related)
                 else:
                     if all(col in df.columns for col in ['product_id', 'product_name', 'total_sold', 'max_price']):
                         df.rename(columns={
@@ -404,7 +407,7 @@ def handle_query(query: str, agent: AISQLAgent):
             logging.error(natural_response)
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
-                st.write(f"**Raw Query**: {raw_query if 'raw_query' in locals() else 'N/A'}")
+                st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
                 st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
                 st.write(f"**API Response**: {str(ve)}")
                 st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
@@ -413,7 +416,7 @@ def handle_query(query: str, agent: AISQLAgent):
             logging.error(natural_response)
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
-                st.write(f"**Raw Query**: {raw_query if 'raw_query' in locals() else 'N/A'}")
+                st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
                 st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
                 st.write(f"**API Response**: {str(re)}")
                 st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
@@ -422,7 +425,7 @@ def handle_query(query: str, agent: AISQLAgent):
             logging.error(natural_response)
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
-                st.write(f"**Raw Query**: {raw_query if 'raw_query' in locals() else 'N/A'}")
+                st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
                 st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
                 st.write(f"**API Response**: {str(e)}")
                 st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
