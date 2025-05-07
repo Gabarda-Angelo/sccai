@@ -49,9 +49,11 @@ class AISQLAgent:
         **Conversation History:** {chat_history}
 
         **Instructions:**
-        - Always generate a SELECT query, even for calculations like profit or totals.
-        - Use 'today' as '{current_sg_date}' for daily queries.
-        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or >= and <= with DATE_FORMAT.
+        - Always generate a valid SELECT query starting with 'SELECT'.
+        - Use standard SQL operators: '>=', '<=', '=', etc. Do NOT use Unicode symbols like '≥' or '≤'.
+        - For date ranges, use 'BETWEEN' or '>= AND <=' with proper formatting.
+        - Use 'DATE_SUB' for date arithmetic, e.g., 'DATE_SUB("{current_sg_date}", INTERVAL 7 DAY)'.
+        - Use 'DATE_FORMAT' for month-based queries, e.g., 'DATE_FORMAT("{current_sg_date}", "%Y-%m-01")'.
         - Handle NULL values with COALESCE, e.g., for missing purchase prices.
         - Use JOINs to combine tables when needed.
         - For aggregations, use SUM, COUNT, AVG, etc.
@@ -60,18 +62,34 @@ class AISQLAgent:
           FROM invoice_details id
           JOIN products p ON id.product_id = p.product_id
           JOIN invoices i ON id.invoice_id = i.invoice_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
+          WHERE i.order_date BETWEEN (SELECT MIN(order_date) FROM invoices) AND '{current_sg_date}'
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
-          LIMIT 10
+          LIMIT 10;
+        - Example for total revenue in May 2025:
+          SELECT SUM(i.total) AS total_revenue
+          FROM invoices i
+          WHERE i.order_date BETWEEN '2025-05-01' AND LAST_DAY('2025-05-01')
+          GROUP BY MONTH(i.order_date);
         - Example for profit this month:
           SELECT (SUM(i.total) - SUM(id.quantity * COALESCE(p.purchase_price, 0))) AS profit
           FROM invoices i
           JOIN invoice_details id ON i.invoice_id = id.invoice_id
           JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date >= DATE_FORMAT('{current_sg_date}', '%Y-%m-01')
-          AND i.order_date <= LAST_DAY('{current_sg_date}')
-        - For employee sales, use employees e and invoices i with appropriate JOINs.
+          WHERE i.order_date BETWEEN DATE_FORMAT('{current_sg_date}', '%Y-%m-01') AND LAST_DAY('{current_sg_date}');
+        - Example for employee sales this week:
+          SELECT e.employee_id, e.first_name, e.last_name, SUM(i.total) AS total_sold
+          FROM invoices i
+          JOIN employees e ON i.employee_id = e.employee_id
+          WHERE i.order_date BETWEEN DATE_SUB('{current_sg_date}', INTERVAL 7 DAY) AND '{current_sg_date}'
+          GROUP BY e.employee_id, e.first_name, e.last_name
+          ORDER BY total_sold DESC
+          LIMIT 1;
+        - For specific dates (e.g., May 3, 2025), use exact date matches:
+          SELECT SUM(i.total) AS total_revenue
+          FROM invoices i
+          WHERE i.order_date = '2025-05-03';
+        - Ensure queries are syntactically correct and end with a semicolon.
         - Return only the SQL query, no explanations or additional text.
 
         **User Question:** {question}
@@ -100,6 +118,10 @@ class AISQLAgent:
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
             raise ValueError(f"Query must start with SELECT: {query}")
+        # Check for basic syntax errors
+        if query.count("(") != query.count(")"):
+            raise ValueError(f"Mismatched parentheses in query: {query}")
+        # Extract table names from FROM and JOIN clauses
         table_names = self.extract_table_names(query_upper)
         for table in table_names:
             if table not in [t.upper() for t in self.allowed_tables.keys()]:
@@ -107,8 +129,9 @@ class AISQLAgent:
         return True
 
     def extract_table_names(self, query):
-        pattern = r'(?:FROM|JOIN)\s+(\w+)'
-        matches = re.findall(pattern, query)
+        # Match table names after FROM or JOIN, ignoring aliases
+        pattern = r'(?:FROM|JOIN)\s+(\w+)(?:\s+(?:\w+))?[\s;]'
+        matches = re.findall(pattern, query, re.IGNORECASE)
         return matches
 
     @retry(tries=3, delay=1, backoff=2)
@@ -202,7 +225,7 @@ def adjust_quantities_with_voids(df, agent):
                JSON_EXTRACT(details, '$.item[*].original_qty') AS original_qty,
                JSON_EXTRACT(details, '$.item[*].new_qty') AS new_qty
         FROM void_logs
-        WHERE status = 'voided_before_payment'
+        WHERE status = 'voided_before_payment';
     """)
     if void_data and 'Product ID' in df.columns:
         for void in void_data:
@@ -443,13 +466,14 @@ def main():
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
     - void_logs: void_id (PK), invoice_id (FK to invoices), void_type, details (JSON), status, created_at, updated_at
-    ...
+    - employees: employee_id (PK), first_name, last_name, email, password_hash, role, created_at, updated_at
     """
     allowed_tables = {
         "invoices": ["invoice_id", "employee_id", "order_date", "order_time", "subtotal", "discount", "total", "paid", "due", "payment_type", "created_at", "updated_at"],
         "invoice_details": ["detail_id", "invoice_id", "product_id", "quantity", "unit_price", "total_price", "created_at", "updated_at"],
         "products": ["product_id", "barcode", "product_name", "category_id", "description", "stock", "reorder_level", "purchase_price", "sale_price", "image", "created_at", "updated_at"],
-        "void_logs": ["void_id", "invoice_id", "void_type", "details", "status", "created_at", "updated_at"]
+        "void_logs": ["void_id", "invoice_id", "void_type", "details", "status", "created_at", "updated_at"],
+        "employees": ["employee_id", "first_name", "last_name", "email", "password_hash", "role", "created_at", "updated_at"]
     }
     agent = AISQLAgent(
         api_url=st.secrets["API_URL"],
