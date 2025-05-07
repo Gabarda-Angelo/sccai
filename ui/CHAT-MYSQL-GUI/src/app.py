@@ -14,6 +14,7 @@ import datetime
 import pytz
 from retry import retry
 import logging
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.ERROR)
@@ -48,14 +49,13 @@ class AISQLAgent:
         **Conversation History:** {chat_history}
 
         **Instructions:**
-        - Generate SQL queries that are valid for MariaDB 10.6.21.
+        - Always generate a SELECT query, even for calculations like profit or totals.
         - Use 'today' as '{current_sg_date}' for daily queries.
-        - For date ranges, use BETWEEN 'start_date' AND 'end_date'.
-        - Handle NULL values appropriately, e.g., use COALESCE for missing purchase prices.
-        - For aggregations, use SUM, COUNT, AVG, etc., as needed.
-        - Use JOINs to combine data from multiple tables when necessary.
-        - Ensure all selected columns are properly aliased if needed.
-        - For best-selling products:
+        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or >= and <= with DATE_FORMAT.
+        - Handle NULL values with COALESCE, e.g., for missing purchase prices.
+        - Use JOINs to combine tables when needed.
+        - For aggregations, use SUM, COUNT, AVG, etc.
+        - Example for best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price
           FROM invoice_details id
           JOIN products p ON id.product_id = p.product_id
@@ -64,11 +64,14 @@ class AISQLAgent:
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
           LIMIT 10
-        - For profit calculations, compute as (SUM(i.total) - SUM(id.quantity * COALESCE(p.purchase_price, 0))).
-        - For profit margin, use ROUND(((total_revenue - base_cost) / total_revenue) * 100, 2) and handle division by zero with CASE.
-        - For specific products, filter using WHERE p.product_name = 'product_name' or p.product_id = 'product_id'.
-        - For time periods (e.g., this week), adjust date ranges accordingly (e.g., DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)).
-        - For 'all time', use (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) as the start date.
+        - Example for profit this month:
+          SELECT (SUM(i.total) - SUM(id.quantity * COALESCE(p.purchase_price, 0))) AS profit
+          FROM invoices i
+          JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date >= DATE_FORMAT('{current_sg_date}', '%Y-%m-01')
+          AND i.order_date <= LAST_DAY('{current_sg_date}')
+        - For employee sales, use employees e and invoices i with appropriate JOINs.
         - Return only the SQL query, no explanations or additional text.
 
         **User Question:** {question}
@@ -96,19 +99,17 @@ class AISQLAgent:
     def validate_query(self, query):
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
-            raise ValueError("Query must start with SELECT")
-        for table in self.allowed_tables.keys():
-            if table.upper() in query_upper:
-                select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
-                columns = [col.strip() for col in select_part.split(",")]
-                for col in columns:
-                    if "." in col:
-                        table_name, col_name = col.split(".")
-                        if table_name.upper() not in [t.upper() for t in self.allowed_tables.keys()]:
-                            raise ValueError(f"Unauthorized table: {table_name}")
-                        if col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name.lower()]]:
-                            raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
+            raise ValueError(f"Query must start with SELECT: {query}")
+        table_names = self.extract_table_names(query_upper)
+        for table in table_names:
+            if table not in [t.upper() for t in self.allowed_tables.keys()]:
+                raise ValueError(f"Unauthorized table: {table}")
         return True
+
+    def extract_table_names(self, query):
+        pattern = r'(?:FROM|JOIN)\s+(\w+)'
+        matches = re.findall(pattern, query)
+        return matches
 
     @retry(tries=3, delay=1, backoff=2)
     def execute_query(self, query):
@@ -368,7 +369,7 @@ def handle_query(query: str, agent: AISQLAgent):
             else:
                 st.warning("No data returned from the query.")
         except ValueError as ve:
-            natural_response = f"Query generation error: {str(ve)}. Please try rephrasing your question."
+            natural_response = f"Query generation error: {str(ve)}. Generated query: {raw_query if 'raw_query' in locals() else 'N/A'}. Please try rephrasing your question."
             logging.error(natural_response)
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
