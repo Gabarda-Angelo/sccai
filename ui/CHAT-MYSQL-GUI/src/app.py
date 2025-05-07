@@ -12,7 +12,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
-import uuid
 from retry import retry
 
 # Set page configuration
@@ -41,7 +40,7 @@ class AISQLAgent:
         **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
         **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
 
-        **Conversation Summary:** {chat_summary}
+        **Conversation History:** {chat_history}
 
         **Instructions:**
         - For best-selling products:
@@ -101,13 +100,17 @@ class AISQLAgent:
         """
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.llm | StrOutputParser()
-        raw_query = chain.invoke({
-            "question": user_query,
-            "chat_history": " ".join([msg.content for msg in chat_history[-5:]]),
-            "schema": self.schema,
-            "current_sg_date": current_sg_date,
-            "current_sg_datetime": current_sg_datetime
-        })
+        try:
+            raw_query = chain.invoke({
+                "question": user_query,
+                "chat_history": " ".join([msg.content for msg in chat_history[-5:]]),
+                "schema": self.schema,
+                "current_sg_date": current_sg_date,
+                "current_sg_datetime": current_sg_datetime
+            })
+        except Exception as e:
+            raise ValueError(f"Failed to generate SQL query: {str(e)}")
+        
         # Clean query
         query_lines = raw_query.split("\n")
         sql_query = ""
