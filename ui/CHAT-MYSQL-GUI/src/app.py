@@ -13,6 +13,10 @@ from langchain_groq import ChatGroq
 import datetime
 import pytz
 from retry import retry
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.ERROR)
 
 # Set page configuration
 st.set_page_config(
@@ -23,11 +27,12 @@ st.set_page_config(
 
 # AI SQL Agent Class
 class AISQLAgent:
-    def __init__(self, api_url, api_key, groq_api_key, schema):
+    def __init__(self, api_url, api_key, groq_api_key, schema, allowed_tables):
         self.api_url = api_url
         self.api_key = api_key
         self.groq_api_key = groq_api_key
         self.schema = schema
+        self.allowed_tables = allowed_tables
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime):
@@ -43,6 +48,13 @@ class AISQLAgent:
         **Conversation History:** {chat_history}
 
         **Instructions:**
+        - Generate SQL queries that are valid for MariaDB 10.6.21.
+        - Use 'today' as '{current_sg_date}' for daily queries.
+        - For date ranges, use BETWEEN 'start_date' AND 'end_date'.
+        - Handle NULL values appropriately, e.g., use COALESCE for missing purchase prices.
+        - For aggregations, use SUM, COUNT, AVG, etc., as needed.
+        - Use JOINs to combine data from multiple tables when necessary.
+        - Ensure all selected columns are properly aliased if needed.
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price
           FROM invoice_details id
@@ -52,54 +64,12 @@ class AISQLAgent:
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
           LIMIT 10
-        - For admin overview metrics or individual metrics (total revenue, total profit, base cost, profit margin, total invoices):
-          WITH invoice_stats AS (
-              SELECT 
-                  COUNT(invoice_id) AS total_invoices,
-                  ROUND(AVG(total), 2) AS avg_sales_value,
-                  SUM(total) AS total_revenue
-              FROM invoices
-              WHERE total > 0
-              AND CONCAT(order_date, ' ', order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
-          ),
-          cost_stats AS (
-              SELECT 
-                  COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-              FROM invoices i
-              LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
-              LEFT JOIN products p ON id.product_id = p.product_id
-              WHERE i.total > 0
-              AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
-          )
-          SELECT 
-              i_stats.total_invoices,
-              i_stats.avg_sales_value,
-              i_stats.total_revenue,
-              c_stats.base_cost,
-              (i_stats.total_revenue - c_stats.base_cost) AS profit,
-              CASE 
-                  WHEN i_stats.total_revenue > 0 THEN ROUND(((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue) * 100, 2)
-                  ELSE 0
-              END AS profit_margin,
-              (SELECT COUNT(*) FROM products p WHERE p.stock <= p.reorder_level) AS low_stock_count,
-              (SELECT p.product_name 
-               FROM invoice_details id2
-               JOIN products p ON id2.product_id = p.product_id
-               JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
-               WHERE i2.total > 0
-               AND CONCAT(i2.order_date, ' ', i2.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
-               GROUP BY p.product_id, p.product_name
-               ORDER BY SUM(id2.quantity) DESC
-               LIMIT 1) AS top_product
-          FROM invoice_stats i_stats
-          CROSS JOIN cost_stats c_stats
-        - Use 'today' as '{current_sg_date}' for daily queries.
-        - For revenue, use SUM(i.total) from invoices.
-        - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)).
-        - Use COALESCE to handle NULL purchase_price, assuming 0 if NULL.
-        - If 'all time' or 'from the very first invoice', use (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) as the start date.
-        - Ensure queries are valid for MariaDB 10.6.21.
-        - Return only the SQL query, no explanations.
+        - For profit calculations, compute as (SUM(i.total) - SUM(id.quantity * COALESCE(p.purchase_price, 0))).
+        - For profit margin, use ROUND(((total_revenue - base_cost) / total_revenue) * 100, 2) and handle division by zero with CASE.
+        - For specific products, filter using WHERE p.product_name = 'product_name' or p.product_id = 'product_id'.
+        - For time periods (e.g., this week), adjust date ranges accordingly (e.g., DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)).
+        - For 'all time', use (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) as the start date.
+        - Return only the SQL query, no explanations or additional text.
 
         **User Question:** {question}
         """
@@ -116,7 +86,6 @@ class AISQLAgent:
         except Exception as e:
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
         
-        # Improved query extraction to capture the entire SQL statement
         sql_query = raw_query.strip()
         if not sql_query:
             raise ValueError("No valid SQL query extracted")
@@ -125,15 +94,20 @@ class AISQLAgent:
         return sql_query, raw_query
 
     def validate_query(self, query):
-        allowed_keywords = [
-            "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
-            "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS"
-        ]
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
             raise ValueError("Query must start with SELECT")
-        if not any(kw in query_upper for kw in allowed_keywords[1:]):
-            raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
+        for table in self.allowed_tables.keys():
+            if table.upper() in query_upper:
+                select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
+                columns = [col.strip() for col in select_part.split(",")]
+                for col in columns:
+                    if "." in col:
+                        table_name, col_name = col.split(".")
+                        if table_name.upper() not in [t.upper() for t in self.allowed_tables.keys()]:
+                            raise ValueError(f"Unauthorized table: {table_name}")
+                        if col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name.lower()]]:
+                            raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
         return True
 
     @retry(tries=3, delay=1, backoff=2)
@@ -159,12 +133,12 @@ class AISQLAgent:
         - **History:** {chat_history}
 
         **Guidelines:**
-        - If empty results, check if the query involves profit and suggest: "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames."
+        - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try a different question."
         - Highlight insights with **bold**.
         - Use - for lists, ₱ for money.
-        - Parse JSON fields (e.g., amount_discounted) into readable format.
+        - Parse JSON fields into readable format.
         - Keep concise (<200 words).
-        - Suggest follow-up: "Would you like more details or to check specific products?"
+        - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
         chain = (
             RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
@@ -240,7 +214,7 @@ def adjust_quantities_with_voids(df, agent):
                     df.loc[df['Product ID'] == pid, 'QTY'] -= adjustment
     return df
 
-# Handle user query
+# Handle user query with improved error handling and data presentation
 def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
@@ -271,7 +245,7 @@ def handle_query(query: str, agent: AISQLAgent):
             # Generate natural language response
             natural_response = agent.generate_response(query, data, st.session_state.chat_history)
 
-            # Display debug info
+            # Display debug info if enabled
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
                 st.write(f"**Raw Query**: {debug_info['raw_query']}")
@@ -279,7 +253,7 @@ def handle_query(query: str, agent: AISQLAgent):
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
 
-            # Process data
+            # Process and display data
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
@@ -377,25 +351,49 @@ def handle_query(query: str, agent: AISQLAgent):
                                     ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                                     ax.set_title(f"Distribution of {columns[1]}")
                                 st.pyplot(fig)
-                                st.download_button("Download Data", df.to_csv(index=False), "data.csv")
-                        if len(df) > 1 or len(df.columns) > 1:
+                                st.download_button("Download Chart Data", df.to_csv(index=False), "chart_data.csv")
+                        if len(df) > 100:
+                            st.write("Showing first 10 rows. Download the full data below.")
+                            st.table(df.head(10))
+                            st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
+                        else:
                             st.table(df)
                     else:
-                        st.warning("Unexpected data format. Please check the query or data source.")
-        except Exception as e:
-            natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
-            debug_info = {
-                "raw_query": raw_query if 'raw_query' in locals() else "N/A",
-                "cleaned_query": sql_query if 'sql_query' in locals() else "N/A",
-                "api_response": str(e),
-                "status_code": "N/A"
-            }
+                        if len(df) > 100:
+                            st.write("Showing first 10 rows. Download the full data below.")
+                            st.table(df.head(10))
+                            st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
+                        else:
+                            st.table(df)
+            else:
+                st.warning("No data returned from the query.")
+        except ValueError as ve:
+            natural_response = f"Query generation error: {str(ve)}. Please try rephrasing your question."
+            logging.error(natural_response)
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
-                st.write(f"**Raw Query**: {debug_info['raw_query']}")
-                st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
-                st.write(f"**API Response**: {debug_info['api_response']}")
-                st.write(f"**API Status Code**: {debug_info['status_code']}")
+                st.write(f"**Raw Query**: {raw_query if 'raw_query' in locals() else 'N/A'}")
+                st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
+                st.write(f"**API Response**: {str(ve)}")
+                st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+        except requests.exceptions.RequestException as re:
+            natural_response = f"API error: {str(re)}. Please check your connection or try again later."
+            logging.error(natural_response)
+            if st.session_state.debug_mode:
+                st.markdown("### Debug Info")
+                st.write(f"**Raw Query**: {raw_query if 'raw_query' in locals() else 'N/A'}")
+                st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
+                st.write(f"**API Response**: {str(re)}")
+                st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+        except Exception as e:
+            natural_response = f"An unexpected error occurred: {str(e)}. Please contact support."
+            logging.error(natural_response)
+            if st.session_state.debug_mode:
+                st.markdown("### Debug Info")
+                st.write(f"**Raw Query**: {raw_query if 'raw_query' in locals() else 'N/A'}")
+                st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
+                st.write(f"**API Response**: {str(e)}")
+                st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
         st.session_state.chat_history.append(AIMessage(content=natural_response))
         with st.chat_message("AI", avatar="dist/img/ai.png"):
             st.markdown(natural_response)
@@ -446,11 +444,18 @@ def main():
     - void_logs: void_id (PK), invoice_id (FK to invoices), void_type, details (JSON), status, created_at, updated_at
     ...
     """
+    allowed_tables = {
+        "invoices": ["invoice_id", "employee_id", "order_date", "order_time", "subtotal", "discount", "total", "paid", "due", "payment_type", "created_at", "updated_at"],
+        "invoice_details": ["detail_id", "invoice_id", "product_id", "quantity", "unit_price", "total_price", "created_at", "updated_at"],
+        "products": ["product_id", "barcode", "product_name", "category_id", "description", "stock", "reorder_level", "purchase_price", "sale_price", "image", "created_at", "updated_at"],
+        "void_logs": ["void_id", "invoice_id", "void_type", "details", "status", "created_at", "updated_at"]
+    }
     agent = AISQLAgent(
         api_url=st.secrets["API_URL"],
         api_key=st.secrets["API_KEY"],
         groq_api_key=st.secrets["GROQ_API_KEY"],
-        schema=schema
+        schema=schema,
+        allowed_tables=allowed_tables
     )
 
     if not st.session_state.authenticated:
