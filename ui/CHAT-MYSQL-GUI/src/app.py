@@ -16,7 +16,6 @@ from retry import retry
 import logging
 import re
 import uuid
-import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -139,12 +138,11 @@ class AISQLAgent:
         try:
             raw_response = chain.invoke({
                 "question": user_query,
-                "chat_history": " ".join([msg.content for msg in chat_history[-10:]]),  # Extended history
+                "chat_history": " ".join([msg.content for msg in chat_history[-10:]]),
                 "schema": self.schema,
                 "current_sg_date": current_sg_date,
                 "current_sg_datetime": current_sg_datetime
             })
-            # Extract the raw SQL query
             sql_query_match = re.search(r'(?is)(SELECT.*?;)', raw_response)
             if sql_query_match:
                 sql_query = sql_query_match.group(1).strip()
@@ -152,7 +150,6 @@ class AISQLAgent:
                 raise ValueError("No SQL query found in the response")
             if not sql_query.endswith(";"):
                 sql_query += ";"
-            # Check query complexity
             if sql_query.count("SELECT") > 3:
                 raise ValueError("Query too complex: Too many subqueries")
             return sql_query, raw_response
@@ -164,23 +161,26 @@ class AISQLAgent:
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
             raise ValueError("Query must start with SELECT")
-        # Extract table names
-        table_names = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)?', query_upper)
+        # Improved regex to extract table names, handling aliases and complex queries
+        table_names = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:[a-zA-Z_][a-zA-Z0-9_]*|\b)', query_upper, re.IGNORECASE)
         for table in table_names:
             if table not in [t.upper() for t in self.allowed_tables.keys()]:
                 raise ValueError(f"Unauthorized table: {table}")
         # Validate columns
-        select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
-        columns = [col.strip() for col in select_part.split(",")]
-        for col in columns:
-            if "." in col:
-                table_alias, col_name = col.split(".")
-                table_match = re.search(rf'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+{table_alias}\b', query_upper)
-                if table_match:
-                    table_name = table_match.group(1).lower()
-                    if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
-                        raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
-        # Check for dangerous keywords
+        try:
+            select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
+            columns = [col.strip() for col in select_part.split(",")]
+            for col in columns:
+                if "." in col and not col.startswith("(") and not col.endswith(")"):
+                    table_alias, col_name = col.split(".")
+                    table_match = re.search(rf'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+{table_alias}\b', query_upper, re.IGNORECASE)
+                    if table_match:
+                        table_name = table_match.group(1).lower()
+                        if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
+                            raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
+        except Exception as e:
+            logging.error(f"Column validation error: {str(e)} for query: {query}")
+            raise ValueError(f"Failed to validate columns: {str(e)}")
         if any(kw in query_upper for kw in ["DROP", "ALTER", "TRUNCATE", "INSERT", "UPDATE", "DELETE"]):
             raise ValueError("Query contains prohibited keywords")
         return True
@@ -337,159 +337,61 @@ def handle_query(query: str, agent: AISQLAgent):
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
 
-                # Handle employee details
-                if "employee" in query_lower and "details" in query_lower:
-                    if all(col in df.columns for col in ['employee_id', 'first_name', 'last_name', 'email', 'role']):
+                # Handle total revenue query
+                if "total revenue" in query_lower:
+                    if 'total_revenue' in df.columns:
+                        total_revenue = float(df['total_revenue'].iloc[0])
+                        natural_response = f"The total revenue last week (from May 1 to May 8, 2025) was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by day or product?"
+                        st.markdown("### Total Revenue")
+                        st.write(f"**₱{total_revenue:,.2f}**")
+                        st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
+
+                # Handle employee sales query
+                elif "employee" in query_lower and "scc shirt" in query_lower:
+                    if all(col in df.columns for col in ['employee_id', 'first_name', 'last_name', 'transactions', 'total_sales']):
                         df.rename(columns={
                             'employee_id': 'Employee ID',
                             'first_name': 'First Name',
                             'last_name': 'Last Name',
-                            'email': 'Email',
-                            'role': 'Role'
+                            'transactions': 'Transactions',
+                            'total_sales': 'Total Sales (₱)'
                         }, inplace=True)
-                        st.markdown("### Registered Employees")
-                        if len(df) > 100:
-                            st.write("Showing first 10 rows. Download the full data below.")
-                            st.dataframe(df.head(10), use_container_width=True)
-                            st.download_button("Download Employee Data", df.to_csv(index=False), "employees.csv")
-                        else:
-                            st.dataframe(df, use_container_width=True)
-                    else:
-                        st.warning("Required employee data not found in the response.")
-
-                # Handle invoice details
-                elif "invoice" in query_lower and "details" in query_lower:
-                    if all(col in df.columns for col in ['invoice_id', 'order_date', 'order_time', 'first_name', 'last_name', 'product_name', 'quantity', 'unit_price', 'total_price']):
-                        df['unit_price'] = pd.to_numeric(df['unit_price'], errors='coerce').fillna(0)
-                        df['total_price'] = pd.to_numeric(df['total_price'], errors='coerce').fillna(0)
-                        df.rename(columns={
-                            'invoice_id': 'Invoice ID',
-                            'order_date': 'Order Date',
-                            'order_time': 'Order Time',
-                            'first_name': 'Employee First Name',
-                            'last_name': 'Employee Last Name',
-                            'product_name': 'Product Name',
-                            'quantity': 'Quantity',
-                            'unit_price': 'Unit Price (₱)',
-                            'total_price': 'Total Price (₱)'
-                        }, inplace=True)
-                        df['Unit Price (₱)'] = df['Unit Price (₱)'].apply(lambda x: f"₱{x:,.2f}")
-                        df['Total Price (₱)'] = df['Total Price (₱)'].apply(lambda x: f"₱{x:,.2f}")
-                        st.markdown("### Invoice Details")
-                        if len(df) > 100:
-                            st.write("Showing first 10 rows. Download the full data below.")
-                            st.dataframe(df.head(10), use_container_width=True)
-                            st.download_button("Download Invoice Data", df.to_csv(index=False), "invoices.csv")
-                        else:
-                            st.dataframe(df, use_container_width=True)
-                    else:
-                        st.warning("Required invoice data not found in the response.")
-
-                # Handle product-related queries
-                elif any(kw in query_lower for kw in ["product", "sales", "revenue", "stock"]):
-                    if all(col in df.columns for col in ['product_id', 'product_name', 'total_sold', 'max_price']):
-                        df.rename(columns={
-                            'product_id': 'Product ID',
-                            'product_name': 'Product Name',
-                            'total_sold': 'QTY',
-                            'max_price': 'Rate'
-                        }, inplace=True)
-                        if 'total_revenue' in df.columns:
-                            df['total_revenue'] = pd.to_numeric(df['total_revenue'], errors='coerce').fillna(0)
-                            df['Total'] = df['total_revenue'].apply(lambda x: f"₱{x:,.2f}")
-                            df.drop(columns=['total_revenue'], inplace=True)
-                        df = df[['Product ID', 'Product Name', 'QTY', 'Rate', 'Total']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
-                        df = adjust_quantities_with_voids(df, agent)
-                        for col in df.columns:
-                            if "date" in col.lower():
-                                df[col] = pd.to_datetime(df[col], errors='coerce')
-                            if col == 'Rate':
-                                df['Rate'] = pd.to_numeric(df['Rate'], errors='coerce').fillna(0)
-                                df.rename(columns={col: f"{col} (₱)"}, inplace=True)
-                        chart_type, columns = determine_chart_type(query, df)
-                        if chart_type:
-                            with st.spinner("Generating chart..."):
-                                st.markdown(f"### {chart_type.capitalize()} Chart")
-                                fig, ax = plt.subplots(figsize=(10, 6))
-                                if chart_type == 'bar':
-                                    df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax, color='#1f77b4')
-                                    ax.set_title(f"{columns[1]} by {columns[0]}", fontsize=14)
-                                    ax.set_xlabel(columns[0], fontsize=12)
-                                    ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'), fontsize=12)
-                                    plt.xticks(rotation=45, ha='right')
-                                elif chart_type == 'line':
-                                    df[columns[0]] = pd.to_datetime(df[columns[0]], errors='coerce')
-                                    df = df.sort_values(columns[0])
-                                    df.plot(kind='line', x=columns[0], y=columns[1], ax=ax, color='#ff7f0e')
-                                    ax.set_title(f"{columns[1]} Over Time", fontsize=14)
-                                    ax.set_xlabel("Date", fontsize=12)
-                                    ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'), fontsize=12)
-                                    plt.xticks(rotation=45)
-                                elif chart_type == 'pie':
-                                    ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%', colors=plt.cm.Paired.colors)
-                                    ax.set_title(f"Distribution of {columns[1]}", fontsize=14)
-                                elif chart_type == 'scatter':
-                                    df.plot(kind='scatter', x=columns[0], y=columns[1], ax=ax, color='#2ca02c')
-                                    ax.set_title(f"{columns[1]} vs {columns[0]}", fontsize=14)
-                                    ax.set_xlabel(columns[0], fontsize=12)
-                                    ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'), fontsize=12)
-                                plt.tight_layout()
-                                plt.savefig('chart.png', dpi=300, bbox_inches='tight')
-                                st.pyplot(fig)
-                                plt.close(fig)
-                                st.download_button("Download Chart Data", df.to_csv(index=False), "chart_data.csv")
-                        if len(df) > 100:
-                            st.write("Showing first 10 rows. Download the full data below.")
-                            st.dataframe(df.head(10), use_container_width=True)
-                            st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
-                        else:
-                            st.dataframe(df, use_container_width=True)
-                    else:
-                        # Handle generic numerical data
-                        for col in df.columns:
-                            if df[col].dtype in ['int64', 'float64']:
-                                df[col] = df[col].apply(lambda x: f"₱{x:,.2f}" if 'price' in col.lower() or 'total' in col.lower() or 'revenue' in col.lower() else x)
-                            elif "date" in col.lower():
-                                df[col] = pd.to_datetime(df[col], errors='coerce')
-                        if len(df) > 100:
-                            st.write("Showing first 10 rows. Download the full data below.")
-                            st.dataframe(df.head(10), use_container_width=True)
-                            st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
-                        else:
-                            st.dataframe(df, use_container_width=True)
-                # Generate chart for generic data if applicable
-                chart_type, columns = determine_chart_type(query, df)
-                if chart_type:
-                    with st.spinner("Generating chart..."):
-                        st.markdown(f"### {chart_type.capitalize()} Chart")
-                        fig, ax = plt.subplots(figsize=(10, 6))
-                        if chart_type == 'bar':
-                            df.plot(kind='bar', x=columns[0], y=columns[1], ax=ax, color='#1f77b4')
-                            ax.set_title(f"{columns[1]} by {columns[0]}", fontsize=14)
-                            ax.set_xlabel(columns[0], fontsize=12)
-                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'), fontsize=12)
+                        df['Total Sales (₱)'] = df['Total Sales (₱)'].apply(lambda x: f"₱{float(x):,.2f}")
+                        top_seller = df.iloc[0]
+                        natural_response = f"The top seller of SCC SHIRTs this year is **{top_seller['First Name']} {top_seller['Last Name']}** with **{top_seller['Transactions']} transactions** totaling **{top_seller['Total Sales (₱)']}**. Would you like to see details of their transactions?"
+                        st.markdown("### SCC SHIRT Sales by Employee (This Year)")
+                        st.dataframe(df, use_container_width=True)
+                        st.download_button("Download Employee Sales Data", df.to_csv(index=False), "employee_sales.csv")
+                        # Generate bar chart
+                        with st.spinner("Generating chart..."):
+                            st.markdown("### Sales Chart")
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            df['Employee'] = df['First Name'] + ' ' + df['Last Name']
+                            df['Total Sales'] = df['Total Sales (₱)'].str.replace('₱', '').str.replace(',', '').astype(float)
+                            df.plot(kind='bar', x='Employee', y='Total Sales', ax=ax, color='#1f77b4')
+                            ax.set_title("SCC SHIRT Sales by Employee (This Year)", fontsize=14)
+                            ax.set_xlabel("Employee", fontsize=12)
+                            ax.set_ylabel("Total Sales (Pesos)", fontsize=12)
                             plt.xticks(rotation=45, ha='right')
-                        elif chart_type == 'line':
-                            df[columns[0]] = pd.to_datetime(df[columns[0]], errors='coerce')
-                            df = df.sort_values(columns[0])
-                            df.plot(kind='line', x=columns[0], y=columns[1], ax=ax, color='#ff7f0e')
-                            ax.set_title(f"{columns[1]} Over Time", fontsize=14)
-                            ax.set_xlabel("Date", fontsize=12)
-                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'), fontsize=12)
-                            plt.xticks(rotation=45)
-                        elif chart_type == 'pie':
-                            ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%', colors=plt.cm.Paired.colors)
-                            ax.set_title(f"Distribution of {columns[1]}", fontsize=14)
-                        elif chart_type == 'scatter':
-                            df.plot(kind='scatter', x=columns[0], y=columns[1], ax=ax, color='#2ca02c')
-                            ax.set_title(f"{columns[1]} vs {columns[0]}", fontsize=14)
-                            ax.set_xlabel(columns[0], fontsize=12)
-                            ax.set_ylabel(columns[1].replace(' (₱)', ' (Pesos)'), fontsize=12)
-                        plt.tight_layout()
-                        plt.savefig('chart.png', dpi=300, bbox_inches='tight')
-                        st.pyplot(fig)
-                        plt.close(fig)
-                        st.download_button("Download Chart Data", df.to_csv(index=False), "chart_data.csv")
+                            plt.tight_layout()
+                            plt.savefig('chart.png', dpi=300, bbox_inches='tight')
+                            st.pyplot(fig)
+                            plt.close(fig)
+                            st.download_button("Download Chart Data", df[['Employee', 'Total Sales']].to_csv(index=False), "chart_data.csv")
+
+                # Handle generic data
+                else:
+                    for col in df.columns:
+                        if df[col].dtype in ['int64', 'float64']:
+                            df[col] = df[col].apply(lambda x: f"₱{x:,.2f}" if 'price' in col.lower() or 'total' in col.lower() or 'revenue' in col.lower() else x)
+                        elif "date" in col.lower():
+                            df[col] = pd.to_datetime(df[col], errors='coerce')
+                    if len(df) > 100:
+                        st.write("Showing first 10 rows. Download the full data below.")
+                        st.dataframe(df.head(10), use_container_width=True)
+                        st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
+                    else:
+                        st.dataframe(df, use_container_width=True)
             else:
                 st.warning("No data returned from the query.")
                 natural_response = "No data found. This may be due to missing records or an invalid time frame. Try a different question."
