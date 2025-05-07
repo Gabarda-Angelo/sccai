@@ -50,7 +50,7 @@ class AISQLAgent:
 
         **Instructions:**
         - Always generate a valid SELECT query starting with 'SELECT'.
-        - Use standard SQL operators: '>=', '<=', '=', etc. Do NOT use Unicode symbols like '≥' or '≤'.
+        - Use ONLY standard SQL operators: '>=', '<=', '=', etc. Strictly avoid Unicode symbols like '≥', '≤', or similar.
         - For date ranges, use 'BETWEEN' or '>= AND <=' with proper formatting.
         - Use 'DATE_SUB' for date arithmetic, e.g., 'DATE_SUB("{current_sg_date}", INTERVAL 7 DAY)'.
         - Use 'DATE_FORMAT' for month-based queries, e.g., 'DATE_FORMAT("{current_sg_date}", "%Y-%m-01")'.
@@ -78,7 +78,7 @@ class AISQLAgent:
           JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date BETWEEN DATE_FORMAT('{current_sg_date}', '%Y-%m-01') AND LAST_DAY('{current_sg_date}');
         - Example for employee sales this week:
-          SELECT e.employee_id, e.first_name, e.last_name, SUM(i.total) AS total_sold
+          SELECT e.employee_id, CONCAT(e.first_name, ' ', e.last_name) AS employee_name, SUM(i.total) AS total_sold
           FROM invoices i
           JOIN employees e ON i.employee_id = e.employee_id
           WHERE i.order_date BETWEEN DATE_SUB('{current_sg_date}', INTERVAL 7 DAY) AND '{current_sg_date}'
@@ -89,7 +89,7 @@ class AISQLAgent:
           SELECT SUM(i.total) AS total_revenue
           FROM invoices i
           WHERE i.order_date = '2025-05-03';
-        - Ensure queries are syntactically correct and end with a semicolon.
+        - Ensure queries are syntactically correct, use standard ASCII characters, and end with a semicolon.
         - Return only the SQL query, no explanations or additional text.
 
         **User Question:** {question}
@@ -107,7 +107,9 @@ class AISQLAgent:
         except Exception as e:
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
         
+        # Post-process to replace Unicode symbols
         sql_query = raw_query.strip()
+        sql_query = sql_query.replace('≥', '>=').replace('≤', '<=').replace('’', "'")
         if not sql_query:
             raise ValueError("No valid SQL query extracted")
         if not sql_query.endswith(";"):
@@ -123,8 +125,9 @@ class AISQLAgent:
             raise ValueError(f"Mismatched parentheses in query: {query}")
         # Extract table names from FROM and JOIN clauses
         table_names = self.extract_table_names(query_upper)
+        allowed_tables_upper = [t.upper() for t in self.allowed_tables.keys()]
         for table in table_names:
-            if table not in [t.upper() for t in self.allowed_tables.keys()]:
+            if table not in allowed_tables_upper:
                 raise ValueError(f"Unauthorized table: {table}")
         return True
 
@@ -132,7 +135,7 @@ class AISQLAgent:
         # Match table names after FROM or JOIN, ignoring aliases
         pattern = r'(?:FROM|JOIN)\s+(\w+)(?:\s+(?:\w+))?[\s;]'
         matches = re.findall(pattern, query, re.IGNORECASE)
-        return matches
+        return [m.upper() for m in matches]
 
     @retry(tries=3, delay=1, backoff=2)
     def execute_query(self, query):
