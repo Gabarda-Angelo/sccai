@@ -277,7 +277,8 @@ def handle_query(query: str, agent: AISQLAgent):
                 "raw_response": raw_response,
                 "cleaned_query": sql_query,
                 "api_response": api_response,
-                "status_code": status_code
+                "status_code": status_code,
+                "api_data": json.dumps(data, indent=2) if data else "No data"
             }
 
             if data is None:
@@ -293,6 +294,7 @@ def handle_query(query: str, agent: AISQLAgent):
                 st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
+                st.write(f"**API Data**: {debug_info['api_data']}")
 
             # Process and display data
             if data and isinstance(data, list) and len(data) >= 1:
@@ -322,6 +324,9 @@ def handle_query(query: str, agent: AISQLAgent):
                 # Handle invoice details
                 elif "invoice" in query_lower and "details" in query_lower:
                     if all(col in df.columns for col in ['invoice_id', 'order_date', 'order_time', 'first_name', 'last_name', 'product_name', 'quantity', 'unit_price', 'total_price']):
+                        # Convert unit_price and total_price to numeric, handling non-numeric values
+                        df['unit_price'] = pd.to_numeric(df['unit_price'], errors='coerce').fillna(0)
+                        df['total_price'] = pd.to_numeric(df['total_price'], errors='coerce').fillna(0)
                         df.rename(columns={
                             'invoice_id': 'Invoice ID',
                             'order_date': 'Order Date',
@@ -333,6 +338,7 @@ def handle_query(query: str, agent: AISQLAgent):
                             'unit_price': 'Unit Price (₱)',
                             'total_price': 'Total Price (₱)'
                         }, inplace=True)
+                        # Format currency columns
                         df['Unit Price (₱)'] = df['Unit Price (₱)'].apply(lambda x: f"₱{x:,.2f}")
                         df['Total Price (₱)'] = df['Total Price (₱)'].apply(lambda x: f"₱{x:,.2f}")
                         st.markdown("### Invoice Details")
@@ -355,6 +361,7 @@ def handle_query(query: str, agent: AISQLAgent):
                             'max_price': 'Rate'
                         }, inplace=True)
                         if 'total_revenue' in df.columns:
+                            df['total_revenue'] = pd.to_numeric(df['total_revenue'], errors='coerce').fillna(0)
                             df['Total'] = df['total_revenue'].apply(lambda x: f"₱{x:,.2f}")
                             df.drop(columns=['total_revenue'], inplace=True)
                         df = df[['Product ID', 'Product Name', 'QTY', 'Rate', 'Total']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
@@ -363,7 +370,7 @@ def handle_query(query: str, agent: AISQLAgent):
                             if "date" in col.lower():
                                 df[col] = pd.to_datetime(df[col], errors='coerce')
                             if col == 'Rate':
-                                df[col] = pd.to_numeric(df[col], errors='coerce')
+                                df['Rate'] = pd.to_numeric(df['Rate'], errors='coerce').fillna(0)
                                 df.rename(columns={col: f"{col} (₱)"}, inplace=True)
                         chart_type, columns = determine_chart_type(query, df)
                         if chart_type:
@@ -411,6 +418,7 @@ def handle_query(query: str, agent: AISQLAgent):
                 st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
                 st.write(f"**API Response**: {str(ve)}")
                 st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+                st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
         except requests.exceptions.RequestException as re:
             natural_response = f"API error: {str(re)}. Please check your connection or try again later."
             logging.error(natural_response)
@@ -420,6 +428,7 @@ def handle_query(query: str, agent: AISQLAgent):
                 st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
                 st.write(f"**API Response**: {str(re)}")
                 st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+                st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
         except Exception as e:
             natural_response = f"An unexpected error occurred: {str(e)}. Please contact support."
             logging.error(natural_response)
@@ -429,6 +438,7 @@ def handle_query(query: str, agent: AISQLAgent):
                 st.write(f"**Cleaned Query**: {sql_query if 'sql_query' in locals() else 'N/A'}")
                 st.write(f"**API Response**: {str(e)}")
                 st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+                st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
         st.session_state.chat_history.append(AIMessage(content=natural_response))
         with st.chat_message("AI", avatar="dist/img/ai.png"):
             st.markdown(natural_response)
