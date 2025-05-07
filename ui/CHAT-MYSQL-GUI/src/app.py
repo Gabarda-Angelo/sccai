@@ -48,7 +48,7 @@ class AISQLAgent:
           FROM invoice_details id
           JOIN products p ON id.product_id = p.product_id
           JOIN invoices i ON id.invoice_id = i.invoice_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '{current_sg_datetime}'
+          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
           LIMIT 10
@@ -60,7 +60,7 @@ class AISQLAgent:
                   SUM(total) AS total_revenue
               FROM invoices
               WHERE total > 0
-              AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '{current_sg_datetime}'
+              AND CONCAT(order_date, ' ', order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
           ),
           cost_stats AS (
               SELECT 
@@ -69,20 +69,25 @@ class AISQLAgent:
               LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
               LEFT JOIN products p ON id.product_id = p.product_id
               WHERE i.total > 0
-              AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '{current_sg_datetime}'
+              AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
           )
           SELECT 
               i_stats.total_invoices,
               i_stats.avg_sales_value,
               i_stats.total_revenue,
               c_stats.base_cost,
+              (i_stats.total_revenue - c_stats.base_cost) AS profit,
+              CASE 
+                  WHEN i_stats.total_revenue > 0 THEN ROUND(((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue) * 100, 2)
+                  ELSE 0
+              END AS profit_margin,
               (SELECT COUNT(*) FROM products p WHERE p.stock <= p.reorder_level) AS low_stock_count,
               (SELECT p.product_name 
                FROM invoice_details id2
                JOIN products p ON id2.product_id = p.product_id
                JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
                WHERE i2.total > 0
-               AND CONCAT(i2.order_date, ' ', i2.order_time) BETWEEN '2025-02-14 00:00:00' AND '{current_sg_datetime}'
+               AND CONCAT(i2.order_date, ' ', i2.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
                GROUP BY p.product_id, p.product_name
                ORDER BY SUM(id2.quantity) DESC
                LIMIT 1) AS top_product
@@ -92,7 +97,7 @@ class AISQLAgent:
         - For revenue, use SUM(i.total) from invoices.
         - For base cost, use SUM(id.quantity * COALESCE(p.purchase_price, 0)).
         - Use COALESCE to handle NULL purchase_price, assuming 0 if NULL.
-        - If 'all time' or 'from the very first invoice', omit date filters unless specified.
+        - If 'all time' or 'from the very first invoice', use (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) as the start date.
         - Ensure queries are valid for MariaDB 10.6.21.
         - Return only the SQL query, no explanations.
 
@@ -111,16 +116,8 @@ class AISQLAgent:
         except Exception as e:
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
         
-        # Improved query extraction
-        query_lines = raw_query.split("\n")
-        sql_query = ""
-        for line in query_lines:
-            line = line.strip()
-            if line and not line.startswith(("--", "#", "/*")):
-                sql_query += line + "\n"
-                if ";" in line:
-                    break
-        sql_query = sql_query.strip()
+        # Improved query extraction to capture the entire SQL statement
+        sql_query = raw_query.strip()
         if not sql_query:
             raise ValueError("No valid SQL query extracted")
         if not sql_query.endswith(";"):
@@ -287,11 +284,7 @@ def handle_query(query: str, agent: AISQLAgent):
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
                 if query_lower.startswith("what are the admin overview metrics"):
-                    if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'low_stock_count', 'top_product']):
-                        df['profit'] = df['total_revenue'] - df['base_cost']
-                        df['profit_margin'] = df.apply(
-                            lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
-                        )
+                    if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'profit', 'profit_margin', 'low_stock_count', 'top_product']):
                         for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
                             df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
                         df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
@@ -300,10 +293,10 @@ def handle_query(query: str, agent: AISQLAgent):
                             'avg_sales_value': 'Average Sales Value',
                             'total_revenue': 'Total Revenue',
                             'base_cost': 'Base Cost',
-                            'low_stock_count': 'Low Stock Products',
-                            'top_product': 'Top-Selling Product',
                             'profit': 'Profit',
-                            'profit_margin': 'Profit Margin'
+                            'profit_margin': 'Profit Margin',
+                            'low_stock_count': 'Low Stock Products',
+                            'top_product': 'Top-Selling Product'
                         }, inplace=True)
                         st.markdown("### Admin Overview")
                         cols = st.columns(4)
@@ -321,12 +314,8 @@ def handle_query(query: str, agent: AISQLAgent):
                                 st.markdown(value)
                         st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
                 elif any(keyword in query_lower for keyword in ["total revenue", "total profit", "base cost", "profit margin", "total invoices"]):
-                    if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost']):
-                        df['profit'] = df['total_revenue'] - df['base_cost']
-                        df['profit_margin'] = df.apply(
-                            lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
-                        )
-                        for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
+                    if all(col in df.columns for col in ['total_revenue', 'base_cost', 'profit', 'profit_margin']):
+                        for col in ['total_revenue', 'base_cost', 'profit']:
                             df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
                         df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
                         if "total revenue" in query_lower:
