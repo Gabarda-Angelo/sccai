@@ -14,10 +14,9 @@ import datetime
 import pytz
 from retry import retry
 import logging
-import re
 
 # Configure logging
-logging.basicConfig(level=logging.ERROR)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Set page configuration
 st.set_page_config(
@@ -49,55 +48,56 @@ class AISQLAgent:
         **Conversation History:** {chat_history}
 
         **Instructions:**
-        - Always generate a valid SELECT query starting with 'SELECT'.
-        - Use ONLY standard SQL operators: '>=', '<=', '=', etc. Strictly avoid Unicode symbols like '≥', '≤', or similar.
-        - For employee names, use CONCAT(e.first_name, ' ', e.last_name) AS employee_name, never 'employee_name' directly.
-        - For date ranges, use 'BETWEEN' or '>= AND <=' with proper formatting.
-        - Use 'DATE_SUB' for date arithmetic, e.g., 'DATE_SUB("{current_sg_date}", INTERVAL 7 DAY)'.
-        - Use 'DATE_FORMAT' for month-based queries, e.g., 'DATE_FORMAT("{current_sg_date}", "%Y-%m-01")'.
-        - Handle NULL values with COALESCE, e.g., for missing purchase prices.
-        - Use JOINs to combine tables when needed.
-        - For aggregations, use SUM, COUNT, AVG, etc.
-        - Example for best-selling products:
-          SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price
+        - Generate SQL queries valid for MariaDB 10.6.21, optimized for performance.
+        - Use 'today' as '{current_sg_date}' for daily queries.
+        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
+        - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
+        - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
+        - For aggregations, use SUM, COUNT, AVG, ROUND as needed.
+        - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
+        - For best-selling products:
+          SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
-          JOIN products p ON id.product_id = p.product_id
-          JOIN invoices i ON id.invoice_id = i.invoice_id
-          WHERE i.order_date BETWEEN (SELECT MIN(order_date) FROM invoices) AND '{current_sg_date}'
+          INNER JOIN products p ON id.product_id = p.product_id
+          INNER JOIN invoices i ON id.invoice_id = i.invoice_id
+          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
           LIMIT 10;
-        - Example for total revenue in May 2025:
-          SELECT SUM(i.total) AS total_revenue
+        - For profit calculations:
+          SELECT ROUND(SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0), 2) AS profit
           FROM invoices i
-          WHERE i.order_date BETWEEN '2025-05-01' AND LAST_DAY('2025-05-01')
-          GROUP BY MONTH(i.order_date);
-        - Example for profit this month:
-          SELECT (SUM(i.total) - SUM(id.quantity * COALESCE(p.purchase_price, 0))) AS profit
+          LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
+        - For profit margin:
+          SELECT ROUND(
+            CASE WHEN SUM(i.total) > 0
+                 THEN ((SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total) * 100)
+                 ELSE 0
+            END, 2) AS profit_margin
           FROM invoices i
-          JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date BETWEEN DATE_FORMAT('{current_sg_date}', '%Y-%m-01') AND LAST_DAY('{current_sg_date}');
-        - Example for employee sales this week:
-          SELECT e.employee_id, CONCAT(e.first_name, ' ', e.last_name) AS employee_name, SUM(i.total) AS total_sold
+          LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
+        - For specific products, use WHERE p.product_name LIKE '%name%' or p.product_id = id.
+        - For time periods:
+          - Today: WHERE i.order_date = '{current_sg_date}'
+          - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
+          - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
+          - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
+        - For low stock: SELECT product_name, stock FROM products WHERE stock <= reorder_level
+        - For employee performance:
+          SELECT e.first_name, e.last_name, COUNT(i.invoice_id) AS transactions, SUM(i.total) AS total_sales
           FROM invoices i
-          JOIN employees e ON i.employee_id = e.employee_id
-          WHERE i.order_date BETWEEN DATE_SUB('{current_sg_date}', INTERVAL 7 DAY) AND '{current_sg_date}'
-          GROUP BY e.employee_id, e.first_name, e.last_name
-          ORDER BY total_sold DESC
-          LIMIT 1;
-        - Example for employee details:
-          SELECT e.employee_id, CONCAT(e.first_name, ' ', e.last_name) AS employee_name, e.email, e.role
-          FROM employees e
-          WHERE e.employee_id = 1000006;
-        - Example for profit margin:
-          SELECT ((SUM(i.total) - SUM(id.quantity * COALESCE(p.purchase_price, 0))) / SUM(i.total) * 100) AS profit_margin
-          FROM invoices i
-          JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date BETWEEN DATE_FORMAT('{current_sg_date}', '%Y-%m-01') AND LAST_DAY('{current_sg_date}');
-        - Ensure queries are syntactically correct, use standard ASCII characters, and end with a semicolon.
-        - Return only the SQL query, no backticks, markdown, or additional text.
+          INNER JOIN employees e ON i.employee_id = e.employee_id
+          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date'
+          GROUP BY e.employee_id
+          ORDER BY total_sales DESC
+        - Handle void_logs by adjusting quantities where status = 'voided_before_payment'.
+        - Ensure queries are secure, avoiding SQL injection risks.
+        - Return only the SQL query, no explanations or additional text.
 
         **User Question:** {question}
         """
@@ -114,15 +114,7 @@ class AISQLAgent:
         except Exception as e:
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
         
-        # Robust query cleaning
         sql_query = raw_query.strip()
-        # Remove markdown and backticks
-        sql_query = re.sub(r'```(?:sql)?\n?', '', sql_query)
-        sql_query = sql_query.replace('`', '')
-        # Replace Unicode symbols
-        sql_query = sql_query.replace('≥', '>=').replace('≤', '<=').replace('’', "'")
-        # Normalize whitespace
-        sql_query = ' '.join(sql_query.split())
         if not sql_query:
             raise ValueError("No valid SQL query extracted")
         if not sql_query.endswith(";"):
@@ -132,38 +124,37 @@ class AISQLAgent:
     def validate_query(self, query):
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
-            raise ValueError(f"Query must start with SELECT: {query}")
-        # Check for basic syntax errors
-        if query.count("(") != query.count(")"):
-            raise ValueError(f"Mismatched parentheses in query: {query}")
-        # Extract table names from FROM and JOIN clauses
-        table_names = self.extract_table_names(query_upper)
-        allowed_tables_upper = [t.upper() for t in self.allowed_tables.keys()]
-        for table in table_names:
-            if table not in allowed_tables_upper:
-                raise ValueError(f"Unauthorized table: {table}")
+            raise ValueError("Query must start with SELECT")
+        for table in self.allowed_tables.keys():
+            if table.upper() in query_upper:
+                select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
+                columns = [col.strip() for col in select_part.split(",")]
+                for col in columns:
+                    if "." in col:
+                        table_name, col_name = col.split(".")
+                        if table_name.upper() not in [t.upper() for t in self.allowed_tables.keys()]:
+                            raise ValueError(f"Unauthorized table: {table_name}")
+                        if col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name.lower()]]:
+                            raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
         return True
-
-    def extract_table_names(self, query):
-        # Match table names after FROM or JOIN, ignoring aliases
-        pattern = r'(?:FROM|JOIN)\s+(\w+)(?:\s+(?:\w+))?[\s;]'
-        matches = re.findall(pattern, query, re.IGNORECASE)
-        return [m.upper() for m in matches]
 
     @retry(tries=3, delay=1, backoff=2)
     def execute_query(self, query):
         payload = {"action": "execute_query", "key": self.api_key, "query": quote(query)}
-        response = requests.get(self.api_url, params=payload, timeout=15)
-        status_code = response.status_code
-        if status_code != 200:
-            return None, f"API returned status {status_code}: {response.text}", status_code
         try:
-            data = response.json()
-            if data.get("status") == "success":
-                return data["data"], "Success", status_code
-            return None, data.get("error", "Unknown error"), status_code
-        except json.JSONDecodeError:
-            return None, "Invalid JSON response", status_code
+            response = requests.get(self.api_url, params=payload, timeout=15)
+            status_code = response.status_code
+            if status_code != 200:
+                return None, f"API returned status {status_code}: {response.text}", status_code
+            try:
+                data = response.json()
+                if data.get("status") == "success":
+                    return data["data"], "Success", status_code
+                return None, data.get("error", "Unknown error"), status_code
+            except json.JSONDecodeError:
+                return None, "Invalid JSON response", status_code
+        except requests.exceptions.RequestException as e:
+            return None, f"Request failed: {str(e)}", 500
 
     def generate_response(self, user_query, data, chat_history):
         response_template = """
@@ -173,9 +164,10 @@ class AISQLAgent:
         - **History:** {chat_history}
 
         **Guidelines:**
-        - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try checking a different period or verifying data availability."
-        - Highlight insights with **bold**.
-        - Use - for lists, ₱ for money.
+        - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try a different question."
+        - Highlight key insights with **bold**.
+        - Use - for lists, ₱ for currency, % for percentages.
+        - Format numbers: currency as ₱X,XXX.XX, percentages as XX.X%.
         - Parse JSON fields into readable format.
         - Keep concise (<200 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
@@ -188,7 +180,8 @@ class AISQLAgent:
         )
         return chain.invoke({
             "question": user_query,
-            "chat_history": chat_history,
+            "response": json.dumps(data, indent=2),
+            "chat_history": " ".join([msg.content for msg in chat_history[-5:]])
         })
 
 # Function to show pop-up messages
@@ -202,37 +195,6 @@ def show_popup(message):
         height=0,
         width=0,
     )
-
-# Initialize session state
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-    st.session_state.user = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
-    ]
-if "debug_mode" not in st.session_state:
-    st.session_state.debug_mode = True
-
-# Authentication function
-def authenticate(email, password):
-    try:
-        response = requests.post(
-            st.secrets["API_URL"],
-            params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
-            json={"email": email, "password": password}
-        )
-        data = response.json() if response.text.strip() else {}
-        if response.status_code == 200 and data.get("status") == "success" and "data" in data:
-            st.session_state.authenticated = True
-            st.session_state.user = data["data"]
-            st.success("Login Successful!")
-            return True
-        else:
-            st.error(f"Login failed: {data.get('error', 'Invalid credentials')}")
-    except Exception as e:
-        st.error(f"Authentication error: {str(e)}")
-    return False
 
 # Adjust quantities based on void_logs
 def adjust_quantities_with_voids(df, agent):
@@ -254,7 +216,26 @@ def adjust_quantities_with_voids(df, agent):
                     df.loc[df['Product ID'] == pid, 'QTY'] -= adjustment
     return df
 
-# Handle user query with improved error handling and data presentation
+# Determine chart type based on query and data
+def determine_chart_type(query, df):
+    if df.empty or len(df.columns) < 2 or len(df) < 1:
+        return None, None
+    columns = df.columns.tolist()
+    query_lower = query.lower()
+    date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
+    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
+    if date_columns and numerical_columns:
+        return "line", (date_columns[0], numerical_columns[0])
+    elif categorical_columns and numerical_columns:
+        unique_categories = len(df[categorical_columns[0]].unique())
+        if unique_categories <= 6 and "percentage" in query_lower:
+            return "pie", (categorical_columns[0], numerical_columns[0])
+        else:
+            return "bar", (categorical_columns[0], numerical_columns[0])
+    return None, None
+
+# Handle user query with enhanced error handling and data presentation
 def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
@@ -297,6 +278,8 @@ def handle_query(query: str, agent: AISQLAgent):
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
+
+                # Handle admin overview metrics
                 if query_lower.startswith("what are the admin overview metrics"):
                     if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'profit', 'profit_margin', 'low_stock_count', 'top_product']):
                         for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
@@ -327,6 +310,10 @@ def handle_query(query: str, agent: AISQLAgent):
                                     value = f"{value} item(s)"
                                 st.markdown(value)
                         st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
+                    else:
+                        st.warning("Required columns missing in admin overview data.")
+
+                # Handle financial metrics
                 elif any(keyword in query_lower for keyword in ["total revenue", "total profit", "base cost", "profit margin", "total invoices"]):
                     if all(col in df.columns for col in ['total_revenue', 'base_cost', 'profit', 'profit_margin']):
                         for col in ['total_revenue', 'base_cost', 'profit']:
@@ -353,7 +340,9 @@ def handle_query(query: str, agent: AISQLAgent):
                             st.markdown(f"**Total Invoices**: {df['total_invoices'].iloc[0]}")
                             st.download_button("Download Total Invoices Data", df[['total_invoices']].to_csv(index=False), "total_invoices.csv")
                     else:
-                        st.warning("Required data not found in the response.")
+                        st.warning("Required financial data not found in the response.")
+
+                # Handle product-related queries
                 else:
                     if all(col in df.columns for col in ['product_id', 'product_name', 'total_sold', 'max_price']):
                         df.rename(columns={
@@ -363,8 +352,9 @@ def handle_query(query: str, agent: AISQLAgent):
                             'max_price': 'Rate'
                         }, inplace=True)
                         if 'total_revenue' in df.columns:
+                            df['Total'] = df['total_revenue'].apply(lambda x: f"₱{x:,.2f}")
                             df.drop(columns=['total_revenue'], inplace=True)
-                        df = df[['Product ID', 'Product Name', 'QTY', 'Rate']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
+                        df = df[['Product ID', 'Product Name', 'QTY', 'Rate', 'Total']].dropna(subset=['Product ID', 'Product Name', 'QTY', 'Rate'])
                         df = adjust_quantities_with_voids(df, agent)
                         for col in df.columns:
                             if "date" in col.lower():
@@ -390,6 +380,7 @@ def handle_query(query: str, agent: AISQLAgent):
                                 elif chart_type == 'pie':
                                     ax.pie(df[columns[1]], labels=df[columns[0]], autopct='%1.1f%%')
                                     ax.set_title(f"Distribution of {columns[1]}")
+                                plt.savefig('chart.png')
                                 st.pyplot(fig)
                                 st.download_button("Download Chart Data", df.to_csv(index=False), "chart_data.csv")
                         if len(df) > 100:
@@ -407,9 +398,9 @@ def handle_query(query: str, agent: AISQLAgent):
                             st.table(df)
             else:
                 st.warning("No data returned from the query.")
-                natural_response = "No data found. This may be due to missing records or an invalid time frame. Try checking a different period or verifying data availability.\n\nWould you like more details or to explore another aspect?"
+                natural_response = "No data found. This may be due to missing records or an invalid time frame. Try a different question."
         except ValueError as ve:
-            natural_response = f"Query generation error: {str(ve)}. Generated query: {raw_query if 'raw_query' in locals() else 'N/A'}. Please try rephrasing your question."
+            natural_response = f"Query generation error: {str(ve)}. Please try rephrasing your question."
             logging.error(natural_response)
             if st.session_state.debug_mode:
                 st.markdown("### Debug Info")
@@ -439,6 +430,37 @@ def handle_query(query: str, agent: AISQLAgent):
         with st.chat_message("AI", avatar="dist/img/ai.png"):
             st.markdown(natural_response)
 
+# Initialize session state
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.user = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
+    ]
+if "debug_mode" not in st.session_state:
+    st.session_state.debug_mode = st.secrets.get("DEBUG_MODE", "true").lower() == "true"
+
+# Authentication function
+def authenticate(email, password):
+    try:
+        response = requests.post(
+            st.secrets["API_URL"],
+            params={"action": "authenticate_user", "key": st.secrets["API_KEY"]},
+            json={"email": email, "password": password}
+        )
+        data = response.json() if response.text.strip() else {}
+        if response.status_code == 200 and data.get("status") == "success" and "data" in data:
+            st.session_state.authenticated = True
+            st.session_state.user = data["data"]
+            st.success("Login Successful!")
+            return True
+        else:
+            st.error(f"Login failed: {data.get('error', 'Invalid credentials')}")
+    except Exception as e:
+        st.error(f"Authentication error: {str(e)}")
+    return False
+
 # Display chat history
 def display_chat_history():
     for message in st.session_state.chat_history:
@@ -452,28 +474,9 @@ def display_chat_history():
 # Clear chat history
 def clear_chat():
     st.session_state.chat_history = [
-        AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
+        AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
     ]
     st.success("Chat history cleared. Starting a new conversation!")
-
-# Determine chart type
-def determine_chart_type(query, df):
-    if df.empty or len(df.columns) < 2 or len(df) < 2:
-        return None, None
-    columns = df.columns.tolist()
-    query_lower = query.lower()
-    date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
-    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
-    categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
-    if date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
-        unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and "percentage" in query_lower:
-            return "pie", (categorical_columns[0], numerical_columns[0])
-        else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
-    return None, None
 
 # Main application
 def main():
@@ -482,15 +485,27 @@ def main():
     - invoices: invoice_id (PK), employee_id (FK to employees), order_date, order_time, subtotal, discount, total, paid, due, payment_type (Cash/Card/Check), created_at, updated_at
     - invoice_details: detail_id (PK), invoice_id (FK to invoices), product_id (FK to products), quantity, unit_price, total_price, created_at, updated_at
     - products: product_id (PK), barcode, product_name, category_id (FK to categories), description, stock, reorder_level, purchase_price, sale_price, image, created_at, updated_at
+    - categories: category_id (PK), category_name, created_at, updated_at
+    - employees: employee_id (PK), first_name, last_name, email, password_hash, role (Owner/Admin/Cashier), created_at, updated_at
     - void_logs: void_id (PK), invoice_id (FK to invoices), void_type, details (JSON), status, created_at, updated_at
-    - employees: employee_id (PK), first_name, last_name, email, password_hash, role, created_at, updated_at
+    - inventory_logs: log_id (PK), product_id (FK to products), adjustment_type, quantity, created_at, updated_at
+    - user_logins: log_id (PK), employee_id (FK to employees), login_time, logout_time, created_at, updated_at
+    - discount_logs: discount_id (PK), invoice_id (FK to invoices), discount_amount, created_at, updated_at
+    - admin_logs: adminlogs_id (PK), admin_id (FK to employees), action_type, details (JSON), approved_by_owner, created_at, updated_at
+    - sync_log: log_id (PK), table_name, record_id, action, timestamp, synced
     """
     allowed_tables = {
         "invoices": ["invoice_id", "employee_id", "order_date", "order_time", "subtotal", "discount", "total", "paid", "due", "payment_type", "created_at", "updated_at"],
         "invoice_details": ["detail_id", "invoice_id", "product_id", "quantity", "unit_price", "total_price", "created_at", "updated_at"],
         "products": ["product_id", "barcode", "product_name", "category_id", "description", "stock", "reorder_level", "purchase_price", "sale_price", "image", "created_at", "updated_at"],
+        "categories": ["category_id", "category_name", "created_at", "updated_at"],
+        "employees": ["employee_id", "first_name", "last_name", "email", "password_hash", "role", "created_at", "updated_at"],
         "void_logs": ["void_id", "invoice_id", "void_type", "details", "status", "created_at", "updated_at"],
-        "employees": ["employee_id", "first_name", "last_name", "email", "password_hash", "role", "created_at", "updated_at"]
+        "inventory_logs": ["log_id", "product_id", "adjustment_type", "quantity", "created_at", "updated_at"],
+        "user_logins": ["log_id", "employee_id", "login_time", "logout_time", "created_at", "updated_at"],
+        "discount_logs": ["discount_id", "invoice_id", "discount_amount", "created_at", "updated_at"],
+        "admin_logs": ["adminlogs_id", "admin_id", "action_type", "details", "approved_by_owner", "created_at", "updated_at"],
+        "sync_log": ["log_id", "table_name", "record_id", "action", "timestamp", "synced"]
     }
     agent = AISQLAgent(
         api_url=st.secrets["API_URL"],
@@ -517,7 +532,7 @@ def main():
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as {st.session_state.user['first_name']} {st.session_state.user['last_name']} ({st.session_state.user['role']})")
-                st.checkbox("Debug Mode", key="debug_mode", value=True)
+                st.checkbox("Debug Mode", key="debug_mode", value=st.session_state.debug_mode)
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
@@ -529,7 +544,8 @@ def main():
                     queries = [
                         "What are the best-selling products this month?",
                         "What is the total revenue for today?",
-                        "What is the daily sales trend for this month?"
+                        "What is the daily sales trend for this month?",
+                        "What is the revenue trend compared to last month?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"sales_{q}"):
@@ -538,7 +554,8 @@ def main():
                     queries = [
                         "Which products are below the reorder level?",
                         "What is the current stock level for SCC SHIRT?",
-                        "What are the most recent inventory adjustments?"
+                        "What are the most recent inventory adjustments?",
+                        "Which products are out of stock?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"inv_{q}"):
@@ -547,17 +564,19 @@ def main():
                     queries = [
                         "Who is currently logged in?",
                         "What are the total sales by each employee this week?",
-                        "Who has the highest number of transactions today?"
+                        "Who has the highest number of transactions today?",
+                        "Which employee has the highest sales this month?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"emp_{q}"):
                             handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
-                        "What are the admin overview metrics for the selected period?",
+                        "What are the admin overview metrics for this month?",
                         "What is the total amount due from unpaid invoices?",
                         "What is the total discount given this month?",
-                        "What is the profit margin for SCC SHIRT this year?"
+                        "What is the profit margin for SCC SHIRT this year?",
+                        "What is the highest revenue day this month?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{q}"):
