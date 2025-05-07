@@ -51,6 +51,7 @@ class AISQLAgent:
         **Instructions:**
         - Always generate a valid SELECT query starting with 'SELECT'.
         - Use ONLY standard SQL operators: '>=', '<=', '=', etc. Strictly avoid Unicode symbols like '≥', '≤', or similar.
+        - For employee names, use CONCAT(e.first_name, ' ', e.last_name) AS employee_name, never 'employee_name' directly.
         - For date ranges, use 'BETWEEN' or '>= AND <=' with proper formatting.
         - Use 'DATE_SUB' for date arithmetic, e.g., 'DATE_SUB("{current_sg_date}", INTERVAL 7 DAY)'.
         - Use 'DATE_FORMAT' for month-based queries, e.g., 'DATE_FORMAT("{current_sg_date}", "%Y-%m-01")'.
@@ -85,12 +86,18 @@ class AISQLAgent:
           GROUP BY e.employee_id, e.first_name, e.last_name
           ORDER BY total_sold DESC
           LIMIT 1;
-        - For specific dates (e.g., May 3, 2025), use exact date matches:
-          SELECT SUM(i.total) AS total_revenue
+        - Example for employee details:
+          SELECT e.employee_id, CONCAT(e.first_name, ' ', e.last_name) AS employee_name, e.email, e.role
+          FROM employees e
+          WHERE e.employee_id = 1000006;
+        - Example for profit margin:
+          SELECT ((SUM(i.total) - SUM(id.quantity * COALESCE(p.purchase_price, 0))) / SUM(i.total) * 100) AS profit_margin
           FROM invoices i
-          WHERE i.order_date = '2025-05-03';
+          JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date BETWEEN DATE_FORMAT('{current_sg_date}', '%Y-%m-01') AND LAST_DAY('{current_sg_date}');
         - Ensure queries are syntactically correct, use standard ASCII characters, and end with a semicolon.
-        - Return only the SQL query, no explanations or additional text.
+        - Return only the SQL query, no backticks, markdown, or additional text.
 
         **User Question:** {question}
         """
@@ -107,9 +114,15 @@ class AISQLAgent:
         except Exception as e:
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
         
-        # Post-process to replace Unicode symbols
+        # Robust query cleaning
         sql_query = raw_query.strip()
+        # Remove markdown and backticks
+        sql_query = re.sub(r'```(?:sql)?\n?', '', sql_query)
+        sql_query = sql_query.replace('`', '')
+        # Replace Unicode symbols
         sql_query = sql_query.replace('≥', '>=').replace('≤', '<=').replace('’', "'")
+        # Normalize whitespace
+        sql_query = ' '.join(sql_query.split())
         if not sql_query:
             raise ValueError("No valid SQL query extracted")
         if not sql_query.endswith(";"):
@@ -160,7 +173,7 @@ class AISQLAgent:
         - **History:** {chat_history}
 
         **Guidelines:**
-        - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try a different question."
+        - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try checking a different period or verifying data availability."
         - Highlight insights with **bold**.
         - Use - for lists, ₱ for money.
         - Parse JSON fields into readable format.
@@ -394,6 +407,7 @@ def handle_query(query: str, agent: AISQLAgent):
                             st.table(df)
             else:
                 st.warning("No data returned from the query.")
+                natural_response = "No data found. This may be due to missing records or an invalid time frame. Try checking a different period or verifying data availability.\n\nWould you like more details or to explore another aspect?"
         except ValueError as ve:
             natural_response = f"Query generation error: {str(ve)}. Generated query: {raw_query if 'raw_query' in locals() else 'N/A'}. Please try rephrasing your question."
             logging.error(natural_response)
