@@ -12,6 +12,10 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
 import datetime
 import pytz
+import logging
+
+# Configure logging
+logging.basicConfig(filename='app.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Set page configuration
 st.set_page_config(
@@ -41,7 +45,9 @@ if "chat_history" not in st.session_state:
         AIMessage(content="Hello! I will be your assistant. Ask me anything about your store.")
     ]
 if "debug_mode" not in st.session_state:
-    st.session_state.debug_mode = True  # Enabled by default
+    st.session_state.debug_mode = True
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
 
 # Authentication function
 def authenticate(email, password):
@@ -63,6 +69,41 @@ def authenticate(email, password):
         st.error(f"Authentication error: {str(e)}")
     return False
 
+# Validate API data
+def validate_api_data(data, expected_columns):
+    if not isinstance(data, list) or not data:
+        return False, "Empty or invalid data"
+    for row in data:
+        if not all(col in row for col in expected_columns):
+            return False, f"Missing columns: {set(expected_columns) - set(row.keys())}"
+        for col in expected_columns:
+            if col in ['total_revenue', 'base_cost', 'avg_sales_value']:
+                try:
+                    float(row[col])
+                except (ValueError, TypeError):
+                    return False, f"Invalid data type for {col}"
+    return True, ""
+
+# Check for missing purchase_price
+def check_missing_purchase_price(data):
+    if any(row.get('base_cost') is None for row in data):
+        return "Warning: Some products lack purchase_price, affecting cost calculations."
+    return ""
+
+# Process admin overview data
+def process_admin_overview(data):
+    df = pd.DataFrame(data)
+    if not all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost']):
+        return None
+    df['profit'] = df['total_revenue'] - df['base_cost']
+    df['profit_margin'] = df.apply(
+        lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
+    )
+    for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
+        df[col] = df[col].apply(lambda x: f"₱{float(x):,.2f}")
+    df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{float(x):.1f}%")
+    return df
+
 # Adjust quantities based on void_logs
 def adjust_quantities_with_voids(df):
     void_data, _, _ = fetch_data_from_api("execute_query", {
@@ -74,16 +115,75 @@ def adjust_quantities_with_voids(df):
         WHERE status = 'voided_before_payment'
         """
     })
-    if void_data and 'Product ID' in df.columns:
-        for void in void_data:
-            product_ids = json.loads(void['product_ids']) if void['product_ids'] else []
-            original_qty = json.loads(void['original_qty']) if void['original_qty'] else []
-            new_qty = json.loads(void['new_qty']) if void['new_qty'] else []
+    if not void_data or 'Product ID' not in df.columns:
+        return df
+    for void in void_data:
+        try:
+            product_ids = json.loads(void['product_ids'] or '[]')
+            original_qty = json.loads(void['original_qty'] or '[]')
+            new_qty = json.loads(void['new_qty'] or '[]')
+            if len(product_ids) != len(original_qty) or len(original_qty) != len(new_qty):
+                st.warning(f"Invalid void log data: {void}")
+                logging.warning(f"Invalid void log data: {void}")
+                continue
             for pid, oq, nq in zip(product_ids, original_qty, new_qty):
                 if pid in df['Product ID'].values:
-                    adjustment = oq - nq
-                    df.loc[df['Product ID'] == pid, 'QTY'] -= adjustment
+                    adjustment = max(0, oq - nq)
+                    df.loc[df['Product ID'] == pid, 'QTY'] = df.loc[df['Product ID'] == pid, 'QTY'] - adjustment
+        except json.JSONDecodeError as e:
+            st.warning(f"Failed to parse void log: {str(e)}")
+            logging.warning(f"Failed to parse void log: {str(e)}")
     return df
+
+# Map query to predefined action
+def map_query_to_action(query_lower):
+    if "best-selling" in query_lower:
+        return "get_best_selling_products", {"period": "month"}
+    elif "admin overview" in query_lower:
+        return "execute_query", {"query": tablereport_admin_overview_query()}
+    return None, None
+
+# Admin overview query template
+def tablereport_admin_overview_query():
+    return """
+    WITH invoice_stats AS (
+        SELECT 
+            COUNT(invoice_id) AS total_invoices,
+            ROUND(AVG(total), 2) AS avg_sales_value,
+            SUM(total) AS total_revenue
+        FROM invoices
+        WHERE total > 0
+        AND CONCAT(order_date, ' ', order_time) BETWEEN %s AND %s
+    ),
+    cost_stats AS (
+        SELECT 
+            COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+        FROM invoices i
+        LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
+        LEFT JOIN products p ON id.product_id = p.product_id
+        WHERE i.total > 0
+        AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN %s AND %s
+    )
+    SELECT 
+        i_stats.total_invoices,
+        i_stats.avg_sales_value,
+        i_stats.total_revenue,
+        c_stats.base_cost,
+        (SELECT COUNT(*) 
+         FROM products p 
+         WHERE p.stock <= p.reorder_level) AS low_stock_count,
+        (SELECT p.product_name 
+         FROM invoice_details id2
+         INNER JOIN products p ON id2.product_id = p.product_id
+         INNER JOIN invoices i2 ON id2.invoice_id = i2.invoice_id
+         WHERE i2.total > 0
+         AND CONCAT(i2.order_date, ' ', i2.order_time) BETWEEN %s AND %s
+         GROUP BY p.product_id, p.product_name
+         ORDER BY SUM(id2.quantity) DESC
+         LIMIT 1) AS top_product
+    FROM invoice_stats i_stats
+    CROSS JOIN cost_stats c_stats
+    """
 
 # Handle user query
 def handle_query(query: str):
@@ -99,10 +199,12 @@ def handle_query(query: str):
                 st.write(f"**Cleaned Query**: {debug_info['cleaned_query']}")
                 st.write(f"**API Response**: {debug_info['api_response']}")
                 st.write(f"**API Status Code**: {debug_info['status_code']}")
+                logging.debug(f"Query: {query}, Debug Info: {debug_info}")
         except Exception as e:
             natural_response = f"An error occurred: {str(e)}. Please try rephrasing your question."
             data = None
             debug_info = {"raw_query": "N/A", "cleaned_query": "N/A", "api_response": str(e), "status_code": "N/A"}
+            logging.error(f"Query error: {str(e)}")
     st.session_state.chat_history.append(AIMessage(content=natural_response))
     with st.chat_message("AI", avatar="dist/img/ai.png"):
         st.markdown(natural_response)
@@ -110,83 +212,79 @@ def handle_query(query: str):
             df = pd.DataFrame(data)
             query_lower = query.lower()
             if query_lower.startswith("what are the admin overview metrics"):
-                # Process Admin Overview metrics
-                if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'low_stock_count', 'top_product']):
-                    # Calculate Profit and Profit Margin
-                    df['profit'] = df['total_revenue'] - df['base_cost']
-                    df['profit_margin'] = df.apply(
-                        lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
-                    )
-                    # Format monetary columns
-                    for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
-                        df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
-                    df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
-                    # Rename columns for display
-                    df.rename(columns={
-                        'total_invoices': 'Total Invoices',
-                        'avg_sales_value': 'Average Sales Value',
-                        'total_revenue': 'Total Revenue',
-                        'base_cost': 'Base Cost',
-                        'low_stock_count': 'Low Stock Products',
-                        'top_product': 'Top-Selling Product',
-                        'profit': 'Profit',
-                        'profit_margin': 'Profit Margin'
-                    }, inplace=True)
-                    # Display metrics in a card-like layout
-                    st.markdown("### Admin Overview")
-                    cols = st.columns(4)
-                    for i, col in enumerate(['Average Sales Value', 'Total Invoices', 'Total Revenue', 'Top-Selling Product']):
-                        with cols[i]:
-                            st.markdown(f"**{col}**")
-                            st.markdown(df[col].iloc[0])
-                    cols = st.columns(4)
-                    for i, col in enumerate(['Base Cost', 'Profit', 'Profit Margin', 'Low Stock Products']):
-                        with cols[i]:
-                            st.markdown(f"**{col}**")
-                            value = df[col].iloc[0]
-                            if col == 'Low Stock Products':
-                                value = f"{value} item(s)"
-                            st.markdown(value)
-                    # Download button for data
-                    st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
+                expected_columns = ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost', 'low_stock_count', 'top_product']
+                is_valid, error_msg = validate_api_data(data, expected_columns)
+                if not is_valid:
+                    st.error(f"Invalid API data: {error_msg}")
+                    return
+                df = process_admin_overview(data)
+                if df is None:
+                    st.error("Failed to process admin overview data.")
+                    return
+                warning = check_missing_purchase_price(data)
+                date_from_str = (datetime.datetime.now(pytz.timezone('Asia/Manila')) - datetime.timedelta(days=30)).strftime('%Y-%m-%d 00:00:00')
+                date_to_str = datetime.datetime.now(pytz.timezone('Asia/Manila')).strftime('%Y-%m-%d 23:59:59')
+                natural_response = f"""
+                **Admin Overview for {date_from_str} to {date_to_str}:**
+                - **Total Invoices**: {df['total_invoices'].iloc[0]}
+                - **Average Sales Value**: {df['avg_sales_value'].iloc[0]}
+                - **Total Revenue**: {df['total_revenue'].iloc[0]}
+                - **Base Cost**: {df['base_cost'].iloc[0]}
+                - **Profit**: {df['profit'].iloc[0]}
+                - **Profit Margin**: {df['profit_margin'].iloc[0]}
+                - **Low Stock Products**: {df['low_stock_count'].iloc[0]} item(s)
+                - **Top-Selling Product**: {df['top_product'].iloc[0]}
+                {warning}
+                Would you like more details or to check specific products?
+                """
+                st.markdown(natural_response)
+                st.markdown("### Admin Overview")
+                df.rename(columns={
+                    'total_invoices': 'Total Invoices',
+                    'avg_sales_value': 'Average Sales Value',
+                    'total_revenue': 'Total Revenue',
+                    'base_cost': 'Base Cost',
+                    'low_stock_count': 'Low Stock Products',
+                    'top_product': 'Top-Selling Product',
+                    'profit': 'Profit',
+                    'profit_margin': 'Profit Margin'
+                }, inplace=True)
+                st.table(df)
+                st.download_button("Download Admin Overview Data", df.to_csv(index=False), "admin_overview.csv")
             elif any(keyword in query_lower for keyword in ["total revenue", "total profit", "base cost", "profit margin", "total invoices"]):
-                # Process individual metric queries using Admin Overview data
-                if all(col in df.columns for col in ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost']):
-                    # Calculate Profit and Profit Margin
-                    df['profit'] = df['total_revenue'] - df['base_cost']
-                    df['profit_margin'] = df.apply(
-                        lambda row: (row['profit'] / row['total_revenue'] * 100) if row['total_revenue'] > 0 else 0, axis=1
-                    )
-                    # Format monetary columns
-                    for col in ['avg_sales_value', 'total_revenue', 'base_cost', 'profit']:
-                        df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
-                    df['profit_margin'] = df['profit_margin'].apply(lambda x: f"{x:.1f}%")
-                    # Display requested metric
-                    if "total revenue" in query_lower:
-                        st.markdown("### Total Revenue")
-                        st.markdown(f"**Total Revenue**: {df['total_revenue'].iloc[0]}")
-                        st.download_button("Download Total Revenue Data", df[['total_revenue']].to_csv(index=False), "total_revenue.csv")
-                    elif "total profit" in query_lower:
-                        st.markdown("### Total Profit")
-                        st.markdown(f"**Total Profit**: {df['profit'].iloc[0]}")
-                        st.download_button("Download Total Profit Data", df[['profit']].to_csv(index=False), "total_profit.csv")
-                    elif "base cost" in query_lower:
-                        st.markdown("### Base Cost")
-                        st.markdown(f"**Base Cost**: {df['base_cost'].iloc[0]}")
-                        st.download_button("Download Base Cost Data", df[['base_cost']].to_csv(index=False), "base_cost.csv")
-                    elif "profit margin" in query_lower:
-                        st.markdown("### Profit Margin")
-                        st.markdown(f"**Profit Margin**: {df['profit_margin'].iloc[0]}")
-                        st.download_button("Download Profit Margin Data", df[['profit_margin']].to_csv(index=False), "profit_margin.csv")
-                    elif "total invoices" in query_lower:
-                        st.markdown("### Total Invoices")
-                        st.markdown(f"**Total Invoices**: {df['total_invoices'].iloc[0]}")
-                        st.download_button("Download Total Invoices Data", df[['total_invoices']].to_csv(index=False), "total_invoices.csv")
-                else:
-                    st.warning("Required data not found in the response.")
+                expected_columns = ['total_invoices', 'avg_sales_value', 'total_revenue', 'base_cost']
+                is_valid, error_msg = validate_api_data(data, expected_columns)
+                if not is_valid:
+                    st.error(f"Invalid API data: {error_msg}")
+                    return
+                df = process_admin_overview(data)
+                if df is None:
+                    st.error("Failed to process data.")
+                    return
+                if "total revenue" in query_lower:
+                    st.markdown("### Total Revenue")
+                    st.markdown(f"**Total Revenue**: {df['total_revenue'].iloc[0]}")
+                    st.download_button("Download Total Revenue Data", df[['total_revenue']].to_csv(index=False), "total_revenue.csv")
+                elif "total profit" in query_lower:
+                    st.markdown("### Total Profit")
+                    st.markdown(f"**Total Profit**: {df['profit'].iloc[0]}")
+                    st.download_button("Download Total Profit Data", df[['profit']].to_csv(index=False), "total_profit.csv")
+                elif "base cost" in query_lower:
+                    st.markdown("### Base Cost")
+                    st.markdown(f"**Base Cost**: {df['base_cost'].iloc[0]}")
+                    st.download_button("Download Base Cost Data", df[['base_cost']].to_csv(index=False), "base_cost.csv")
+                elif "profit margin" in query_lower:
+                    st.markdown("### Profit Margin")
+                    st.markdown(f"**Profit Margin**: {df['profit_margin'].iloc[0]}")
+                    st.download_button("Download Profit Margin Data", df[['profit_margin']].to_csv(index=False), "profit_margin.csv")
+                elif "total invoices" in query_lower:
+                    st.markdown("### Total Invoices")
+                    st.markdown(f"**Total Invoices**: {df['total_invoices'].iloc[0]}")
+                    st.download_button("Download Total Invoices Data", df[['total_invoices']].to_csv(index=False), "total_invoices.csv")
             else:
-                # Handle other queries (e.g., best-selling products)
-                if all(col in df.columns for col in ['product_id', 'product_name', 'total_sold', 'max_price']):
+                expected_columns = ['product_id', 'product_name', 'total_sold', 'max_price']
+                is_valid, error_msg = validate_api_data(data, expected_columns)
+                if is_valid:
                     df.rename(columns={
                         'product_id': 'Product ID',
                         'product_name': 'Product Name',
@@ -269,10 +367,12 @@ def fetch_data_from_api(action: str, params: dict = None, _cache_buster: str = "
         else:
             return None, data.get("error", "Unknown error"), status_code
     except requests.RequestException as e:
+        logging.error(f"API request failed: {str(e)}")
         return None, str(e), "N/A"
 
 # Validate SQL query
 def validate_query(query):
+    allowed_tables = ['invoices', 'invoice_details', 'products', 'void_logs']
     allowed_keywords = [
         "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP BY", "ORDER BY", "LIMIT",
         "SUM", "COUNT", "AVG", "MIN", "MAX", "JSON_EXTRACT", "BETWEEN", "LIKE", "IN", "AS"
@@ -282,6 +382,9 @@ def validate_query(query):
         raise ValueError("Query must start with SELECT")
     if not any(kw in query_upper for kw in allowed_keywords[1:]):
         raise ValueError("Query must contain at least one of: " + ", ".join(allowed_keywords[1:]))
+    for table in allowed_tables:
+        if table.upper() in query_upper and f" {table.upper()}." not in query_upper:
+            raise ValueError(f"Table {table} must use explicit alias")
     return True
 
 # Define SQL chain
@@ -301,8 +404,8 @@ def get_sql_chain():
     **Database Schema:**
     {schema}
 
-    **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
-    **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
+    **Current date in Manila:** {current_sg_date} (YYYY-MM-DD)
+    **Current datetime in Manila:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
 
     **Conversation Summary:** {chat_summary}
 
@@ -312,7 +415,7 @@ def get_sql_chain():
       FROM invoice_details id
       JOIN products p ON id.product_id = p.product_id
       JOIN invoices i ON id.invoice_id = i.invoice_id
-      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+      WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN %s AND %s
       GROUP BY p.product_id, p.product_name
       ORDER BY total_sold DESC, p.product_id ASC
       LIMIT 10
@@ -324,7 +427,7 @@ def get_sql_chain():
               SUM(total) AS total_revenue
           FROM invoices
           WHERE total > 0
-          AND CONCAT(order_date, ' ', order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+          AND CONCAT(order_date, ' ', order_time) BETWEEN %s AND %s
       ),
       cost_stats AS (
           SELECT 
@@ -333,7 +436,7 @@ def get_sql_chain():
           LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.total > 0
-          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-02-14 00:00:00' AND '2025-05-02 19:51:00'
+          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN %s AND %s
       )
       SELECT 
           i_stats.total_invoices,
@@ -356,15 +459,8 @@ def get_sql_chain():
     """
 
     prompt = ChatPromptTemplate.from_template(template)
-    models = [
-        "llama3-8b-8192",
-        "llama-3.3-70b-versatile",
-        "llama3-70b-8192",
-        "gemma2-9b-it",
-    ]
     proposal_llms = [
-        ChatGroq(model=model, temperature=0, api_key=st.secrets["GROQ_API_KEY"])
-        for model in models
+        ChatGroq(model="llama3-70b-8192", temperature=0, api_key=st.secrets["GROQ_API_KEY"])
     ]
     proposal_chain = RunnableParallel(
         **{f"proposal_{i}": prompt | llm | StrOutputParser() for i, llm in enumerate(proposal_llms)}
@@ -391,7 +487,7 @@ def get_sql_chain():
             schema=lambda _: schema,
             current_sg_date=lambda x: x["current_sg_date"],
             current_sg_datetime=lambda x: x["current_sg_datetime"],
-            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-5:]])
+            chat_summary=lambda x: " ".join([msg.content for msg in x["chat_history"][-10:]])
         )
         | RunnablePassthrough.assign(
             proposals=proposal_chain,
@@ -412,15 +508,22 @@ def get_response(user_query: str, chat_history: list):
         "profit", "margin", "overview", "metrics"
     ]
     debug_info = {"raw_query": "", "cleaned_query": "", "api_response": "", "status_code": ""}
-    if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        current_time = datetime.datetime.now(singapore_tz)
-        return f"Your current time and date is {current_time.strftime('%Y-%m-%d %H:%M:%S')} in Singapore.", None, debug_info
+    
+    action, params = map_query_to_action(user_query.lower())
+    if action:
+        data, api_response, status_code = fetch_data_from_api(action, params)
+        debug_info["api_response"] = api_response
+        debug_info["status_code"] = status_code
+        if data is None:
+            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or adjusting your query.", None, debug_info
     else:
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        now_sg = datetime.datetime.now(singapore_tz)
+        manila_tz = pytz.timezone('Asia/Manila')
+        now_sg = datetime.datetime.now(manila_tz)
         current_sg_date = now_sg.strftime('%Y-%m-%d')
         current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+
+        if any(keyword in user_query.lower() for keyword in time_keywords) and not any(keyword in user_query.lower() for keyword in data_keywords):
+            return f"Your current time and date is {current_sg_datetime} in Manila.", None, debug_info
 
         sql_chain = get_sql_chain()
         raw_query = sql_chain.invoke({
@@ -431,7 +534,6 @@ def get_response(user_query: str, chat_history: list):
         })
         debug_info["raw_query"] = raw_query
 
-        # Extract SQL query
         query_lines = raw_query.split("\n")
         sql_query = ""
         in_sql_block = False
@@ -452,56 +554,60 @@ def get_response(user_query: str, chat_history: list):
         query = "\n".join(
             [line for line in query.split("\n") if not line.strip().startswith(("--", "#", "/*"))]
         )
-        debug_info["cleaned_query"] = query
 
-        # Debug: Show queries
+        if "this month" in user_query.lower():
+            start_date = now_sg.replace(day=1).strftime('%Y-%m-%d 00:00:00')
+            end_date = current_sg_datetime
+            query = query.replace("'2025-02-14 00:00:00'", f"'{start_date}'").replace("'2025-05-02 19:51:00'", f"'{end_date}'")
+
+        debug_info["cleaned_query"] = query
         if st.session_state.debug_mode:
             st.write(f"Raw query: {raw_query}")
             st.write(f"Cleaned query: {query}")
 
-        # Validate query
         try:
             validate_query(query)
         except ValueError as e:
             debug_info["api_response"] = str(e)
-            return f"Invalid SQL query: {str(e)}. Please rephrase your question.", None, debug_info
+            return f"Invalid SQL query: {str(e)}. Try rephrasing your question.", None, debug_info
 
         data, api_response, status_code = fetch_data_from_api("execute_query", {"query": query})
         debug_info["api_response"] = api_response
         debug_info["status_code"] = status_code
         if data is None:
-            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing or adjusting your query.", None, debug_info
+            return f"Couldn't retrieve data. API error: {api_response} (Status: {status_code}). Try rephrasing, e.g., 'Show total revenue for this month'.", None, debug_info
 
-        response_template = """
-        Generate a natural language response based on:
-        - **Question:** {question}
-        - **Results:** {response}
-        - **History:** {chat_history}
+    response_template = """
+    Generate a natural language response based on:
+    - **Question:** {question}
+    - **Results:** {response}
+    - **History:** {chat_history}
 
-        **Guidelines:**
-        - If empty results, check if the query involves profit and suggest: "No profit data found. This may be due to missing purchase price information or no sales records. Try checking specific products or time frames."
-        - Highlight insights with **bold**.
-        - Use - for lists, ₱ for money.
-        - Parse JSON fields (e.g., amount_discounted) into readable format.
-        - Keep concise (<200 words).
-        - Suggest follow-up: "Would you like more details or to check specific products?"
-        """
+    **Guidelines:**
+    - Validate results: Ensure numerical values (e.g., total_revenue) are non-negative.
+    - If results are empty, suggest: "No data found. This may be due to missing records or incorrect date ranges. Try a different period or product."
+    - Highlight insights with **bold**.
+    - Use - for lists, ₱ for money.
+    - Include calculation details: e.g., "Profit calculated as Total Revenue (₱X) - Base Cost (₱Y) = ₱Z."
+    - Keep concise (<200 words).
+    - Suggest follow-up: "Would you like to drill down into specific products or adjust the time frame?"
+    """
 
-        chain = (
-            RunnablePassthrough.assign(
-                response=lambda _: json.dumps(data, indent=2)
-            )
-            | ChatPromptTemplate.from_template(response_template)
-            | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
-            | StrOutputParser()
+    chain = (
+        RunnablePassthrough.assign(
+            response=lambda _: json.dumps(data, indent=2)
         )
+        | ChatPromptTemplate.from_template(response_template)
+        | ChatGroq(model="llama3-70b-8192", temperature=0.2, api_key=st.secrets["GROQ_API_KEY"])
+        | StrOutputParser()
+    )
 
-        natural_response = chain.invoke({
-            "question": user_query,
-            "chat_history": chat_history,
-        })
+    natural_response = chain.invoke({
+        "question": user_query,
+        "chat_history": chat_history,
+    })
 
-        return natural_response, data, debug_info
+    return natural_response, data, debug_info
 
 # Determine chart type
 def determine_chart_type(query, df):
