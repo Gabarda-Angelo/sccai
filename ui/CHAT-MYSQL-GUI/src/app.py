@@ -69,25 +69,25 @@ class AISQLAgent:
         - For total revenue on a specific date:
           SELECT SUM(total) AS total_revenue
           FROM invoices
-          WHERE order_date = '{specific_date}';
+          WHERE order_date = '{specific_date}' AND total > 0;
         - For total cost on a specific date:
           SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
           FROM invoice_details id
           JOIN invoices i ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - For profit on a specific date:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - Example: For the question "what is the total profit on May 3, 2025?", generate:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '2025-05-03';
+          WHERE i.order_date = '2025-05-03' AND i.total > 0;
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -96,23 +96,24 @@ class AISQLAgent:
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
           INNER JOIN products p ON id.product_id = p.product_id
           INNER JOIN invoices i ON id.invoice_id = i.invoice_id
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
+          AND i.total > 0
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
           LIMIT 10;
         - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
         - For time periods:
-          - Today: WHERE i.order_date = '{current_sg_date}'
-          - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
-          - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
-          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
-          - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
+          - Today: WHERE i.order_date = '{current_sg_date}' AND i.total > 0
+          - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY) AND i.total > 0
+          - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH) AND i.total > 0
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR) AND i.total > 0
+          - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND i.total > 0
         - For low stock:
           SELECT product_name, stock, reorder_level
           FROM products
