@@ -67,51 +67,54 @@ class AISQLAgent:
         - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
         - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
         - For total revenue on a specific date:
-          SELECT SUM(i.total) AS total_revenue
-          FROM invoices i
-          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id
-          WHERE i.order_date = '{specific_date}'
-          AND i.total > 0
-          AND vl.void_id IS NULL;
+          SELECT SUM(total) AS total_revenue
+          FROM invoices
+          WHERE order_date = '{specific_date}' AND total > 0;
         - For total cost on a specific date:
           SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
           FROM invoice_details id
           JOIN invoices i ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
-          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id
-          WHERE i.order_date = '{specific_date}'
-          AND i.total > 0
-          AND vl.void_id IS NULL;
+          WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - For profit on a specific date:
-          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          SELECT 
+            SUM(i.total) AS total_revenue,
+            (SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0)
+             FROM invoice_details id
+             JOIN products p ON id.product_id = p.product_id
+             WHERE id.invoice_id IN (SELECT invoice_id FROM invoices WHERE order_date = '{specific_date}' AND total > 0)) AS total_cost,
+            SUM(i.total) - (SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0)
+                            FROM invoice_details id
+                            JOIN products p ON id.product_id = p.product_id
+                            WHERE id.invoice_id IN (SELECT invoice_id FROM invoices WHERE order_date = '{specific_date}' AND total > 0)) AS profit
           FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id
-          WHERE i.order_date = '{specific_date}'
-          AND i.total > 0
-          AND vl.void_id IS NULL;
+          WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - Example: For the question "what is the total profit on May 3, 2025?", generate:
-          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          SELECT 
+            SUM(i.total) AS total_revenue,
+            (SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0)
+             FROM invoice_details id
+             JOIN products p ON id.product_id = p.product_id
+             WHERE id.invoice_id IN (SELECT invoice_id FROM invoices WHERE order_date = '2025-05-03' AND total > 0)) AS total_cost,
+            SUM(i.total) - (SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0)
+                            FROM invoice_details id
+                            JOIN products p ON id.product_id = p.product_id
+                            WHERE id.invoice_id IN (SELECT invoice_id FROM invoices WHERE order_date = '2025-05-03' AND total > 0)) AS profit
           FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id
-          WHERE i.order_date = '2025-05-03'
-          AND i.total > 0
-          AND vl.void_id IS NULL;
+          WHERE i.order_date = '2025-05-03' AND i.total > 0;
         - For combined financial metrics on a specific date:
           SELECT 
-              SUM(i.total) AS total_revenue,
-              COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost,
-              SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+            SUM(i.total) AS total_revenue,
+            (SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0)
+             FROM invoice_details id
+             JOIN products p ON id.product_id = p.product_id
+             WHERE id.invoice_id IN (SELECT invoice_id FROM invoices WHERE order_date = '{specific_date}' AND total > 0)) AS total_cost,
+            SUM(i.total) - (SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0)
+                            FROM invoice_details id
+                            JOIN products p ON id.product_id = p.product_id
+                            WHERE id.invoice_id IN (SELECT invoice_id FROM invoices WHERE order_date = '{specific_date}' AND total > 0)) AS profit
           FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id
-          WHERE i.order_date = '{specific_date}'
-          AND i.total > 0
-          AND vl.void_id IS NULL;
+          WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
