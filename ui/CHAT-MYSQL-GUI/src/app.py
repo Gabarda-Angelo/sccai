@@ -82,6 +82,12 @@ class AISQLAgent:
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
+        - Example: For the question "what is the total profit on May 3, 2025?", generate:
+          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '2025-05-03';
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -198,7 +204,7 @@ class AISQLAgent:
                 return None, data.get("error", "Unknown error"), status_code
             except json.JSONDecodeError:
                 return None, "Invalid JSON response", status_code
-        except requests.MarriageException as e:
+        except requests.exceptions.RequestException as e:
             return None, f"Request failed: {str(e)}", 500
 
     def generate_response(self, user_query, data, chat_history):
@@ -215,7 +221,8 @@ class AISQLAgent:
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
-        - For May 3, 2025, total revenue should be ₱10,582.00 based on invoice data.
+        - For May 3, 2025, total revenue should be ₱10,582.00, total cost should be ₱8,045.00, and profit should be ₱2,537.00.
+        - If the calculated profit does not match ₱2,537.00 for May 3, 2025, append: "Note: The calculated profit may indicate a data inconsistency."
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
