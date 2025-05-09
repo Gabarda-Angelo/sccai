@@ -56,7 +56,7 @@ class AISQLAgent:
         - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
         - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
         - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
-        - For aggregations, use SUM, COUNT, AVG, ROUND as needed.
+        - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
         - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
@@ -83,7 +83,7 @@ class AISQLAgent:
           LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
-        - For specific products, use WHERE p.product_name LIKE '%name%' or p.product_id = id.
+        - For specific products, use WHERE p.product_name LIKE '%name%' or p.product_id = 'id'.
         - For employee sales of specific products:
           SELECT e.employee_id, e.first_name, e.last_name, COUNT(id.invoice_id) AS transactions, ROUND(SUM(id.total_price), 2) AS total_sales
           FROM invoices i
@@ -99,9 +99,9 @@ class AISQLAgent:
           - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
           - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
           - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
-        - For low stock: 
-          SELECT product_name, stock, reorder_level 
-          FROM products 
+        - For low stock:
+          SELECT product_name, stock, reorder_level
+          FROM products
           WHERE stock <= reorder_level;
         - For employee performance:
           SELECT e.employee_id, e.first_name, e.last_name, COUNT(i.invoice_id) AS transactions, ROUND(SUM(i.total), 2) AS total_sales
@@ -110,34 +110,9 @@ class AISQLAgent:
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date'
           GROUP BY e.employee_id, e.first_name, e.last_name
           ORDER BY total_sales DESC;
-        - For employee details:
-          SELECT employee_id, first_name, last_name, email, role
-          FROM employees
-          WHERE role IN ('Owner', 'Admin', 'Cashier');
-        - For invoice details:
-          SELECT i.invoice_id, i.order_date, i.order_time, e.first_name, e.last_name, p.product_name, id.quantity, id.unit_price, id.total_price
-          FROM invoices i
-          INNER JOIN employees e ON i.employee_id = e.employee_id
-          INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          INNER JOIN products p ON id.product_id = p.product_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
-        - For void adjustments:
-          SELECT JSON_EXTRACT(details, '$.item[*].product_id') AS product_ids,
-                 JSON_EXTRACT(details, '$.item[*].original_qty') AS original_qty,
-                 JSON_EXTRACT(details, '$.item[*].new_qty') AS new_qty
-          FROM void_logs
-          WHERE status = 'voided_before_payment';
-        - For discounts:
-          SELECT i.invoice_id, i.order_date, i.order_time, dl.discount_amount
-          FROM invoices i
-          INNER JOIN discount_logs dl ON i.invoice_id = dl.invoice_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
-        - For admin logs:
-          SELECT al.adminlogs_id, al.action_type, JSON_EXTRACT(al.details, '$.item[*]') AS items, al.approved_by_owner
-          FROM admin_logs al
-          WHERE al.created_at BETWEEN 'start_date' AND 'end_date';
-        - Ensure queries are secure, avoiding SQL injection risks.
-        - Optimize for performance with indexes and limiting rows where appropriate.
+        - Adjust for voids by joining void_logs where status = 'voided_before_payment' and parsing JSON details.
+        - Ensure calculations (e.g., SUM, AVG) are accurate, handling edge cases like division by zero.
+        - Optimize with LIMIT for large datasets and use indexes where possible.
         - Return only the SQL query, no explanations, no markdown, no backticks.
 
         **User Question:** {question}
@@ -170,7 +145,16 @@ class AISQLAgent:
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
             raise ValueError("Query must start with SELECT")
-        # Extract table names and their aliases
+        # Check for GROUP BY consistency with aggregations
+        if "GROUP BY" in query_upper:
+            select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
+            group_by_part = query_upper.split("GROUP BY")[1].split("ORDER BY")[0] if "ORDER BY" in query_upper else query_upper.split("GROUP BY")[1]
+            select_columns = [col.strip().split(" AS ")[0].strip() for col in select_part.split(",")]
+            group_by_columns = [col.strip() for col in group_by_part.split(",")]
+            for col in select_columns:
+                if not any(func in col for func in ["SUM(", "COUNT(", "AVG(", "MAX(", "MIN("]) and col not in group_by_columns:
+                    raise ValueError(f"Column {col} in SELECT must be in GROUP BY or aggregated")
+        # Extract and validate tables and columns
         table_alias_map = {}
         table_matches = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)?\b', query_upper, re.IGNORECASE)
         for table, alias in table_matches:
@@ -178,27 +162,20 @@ class AISQLAgent:
                 table_alias_map[alias] = table
             else:
                 table_alias_map[table] = table
-        # Validate tables
         for alias, table in table_alias_map.items():
             if table not in [t.upper() for t in self.allowed_tables.keys()]:
                 raise ValueError(f"Unauthorized table: {table}")
-        # Validate columns, skipping computed expressions
-        try:
-            select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
-            columns = [col.strip() for col in select_part.split(",")]
-            for col in columns:
-                # Skip computed columns (e.g., ROUND(SUM(...)), COUNT(...))
-                if col.startswith("(") or " AS " in col or any(func in col for func in ["SUM(", "COUNT(", "ROUND(", "COALESCE("]):
-                    continue
-                if "." in col:
-                    table_alias, col_name = col.split(".")
-                    if table_alias in table_alias_map:
-                        table_name = table_alias_map[table_alias].lower()
-                        if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
-                            raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
-        except Exception as e:
-            logging.error(f"Column validation error: {str(e)} for query: {query}")
-            raise ValueError(f"Failed to validate columns: {str(e)}")
+        select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
+        columns = [col.strip() for col in select_part.split(",")]
+        for col in columns:
+            if col.startswith("(") or " AS " in col or any(func in col for func in ["SUM(", "COUNT(", "ROUND(", "COALESCE("]):
+                continue
+            if "." in col:
+                table_alias, col_name = col.split(".")
+                if table_alias in table_alias_map:
+                    table_name = table_alias_map[table_alias].lower()
+                    if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
+                        raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
         if any(kw in query_upper for kw in ["DROP", "ALTER", "TRUNCATE", "INSERT", "UPDATE", "DELETE"]):
             raise ValueError("Query contains prohibited keywords")
         return True
@@ -234,6 +211,7 @@ class AISQLAgent:
         - Use - for lists, ₱ for currency, % for percentages.
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
+        - Ensure calculations match the data exactly (e.g., revenue, profit).
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
@@ -254,18 +232,6 @@ class AISQLAgent:
             logging.error(f"Response generation error: {str(e)}")
             return f"Error generating response: {str(e)}. Please try again."
 
-# Function to show pop-up messages
-def show_popup(message):
-    components.html(
-        f"""
-        <script>
-            alert("{message}");
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-
 # Adjust quantities based on void_logs
 def adjust_quantities_with_voids(df, agent):
     void_data, _, _ = agent.execute_query("""
@@ -275,16 +241,16 @@ def adjust_quantities_with_voids(df, agent):
         FROM void_logs
         WHERE status = 'voided_before_payment';
     """)
-    if void_data and 'Product ID' in df.columns:
+    if void_data and 'product_id' in df.columns:
         for void in void_data:
             product_ids = json.loads(void['product_ids']) if void['product_ids'] else []
             original_qty = json.loads(void['original_qty']) if void['original_qty'] else []
             new_qty = json.loads(void['new_qty']) if void['new_qty'] else []
             for pid, oq, nq in zip(product_ids, original_qty, new_qty):
-                if pid in df['Product ID'].values:
+                if pid in df['product_id'].values:
                     adjustment = oq - nq
-                    df.loc[df['Product ID'] == pid, 'QTY'] = df.loc[df['Product ID'] == pid, 'QTY'] - adjustment
-                    df.loc[df['Product ID'] == pid, 'QTY'] = df.loc[df['Product ID'] == pid, 'QTY'].clip(lower=0)
+                    df.loc[df['product_id'] == pid, 'quantity'] = df.loc[df['product_id'] == pid, 'quantity'] - adjustment
+                    df.loc[df['product_id'] == pid, 'quantity'] = df.loc[df['product_id'] == pid, 'quantity'].clip(lower=0)
     return df
 
 # Determine chart type based on query and data
@@ -337,8 +303,13 @@ def handle_query(query: str, agent: AISQLAgent):
             if data is None:
                 raise ValueError(f"API error: {api_response} (Status: {status_code})")
 
+            # Adjust for voids if applicable
+            df = pd.DataFrame(data)
+            if 'product_id' in df.columns and 'quantity' in df.columns:
+                df = adjust_quantities_with_voids(df, agent)
+
             # Generate natural language response
-            natural_response = agent.generate_response(query, data, st.session_state.chat_history)
+            natural_response = agent.generate_response(query, df.to_dict('records'), st.session_state.chat_history)
 
             # Display debug info if enabled
             if st.session_state.debug_mode:
@@ -351,51 +322,35 @@ def handle_query(query: str, agent: AISQLAgent):
                     st.write(f"**API Data**: ```json\n{debug_info['api_data']}\n```")
 
             # Process and display data
-            if data and isinstance(data, list) and len(data) >= 1:
-                df = pd.DataFrame(data)
+            if not df.empty:
                 query_lower = query.lower()
 
                 # Handle total revenue query
                 if "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        natural_response = f"The total revenue last week (from May 1 to May 8, 2025) was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by day or product?"
+                        natural_response = f"The total revenue is **₱{total_revenue:,.2f}**. Would you like a breakdown by day or product?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
 
-                # Handle employee sales query
-                elif "employee" in query_lower and "scc shirt" in query_lower:
-                    if all(col in df.columns for col in ['employee_id', 'first_name', 'last_name', 'transactions', 'total_sales']):
-                        df.rename(columns={
-                            'employee_id': 'Employee ID',
-                            'first_name': 'First Name',
-                            'last_name': 'Last Name',
-                            'transactions': 'Transactions',
-                            'total_sales': 'Total Sales (₱)'
-                        }, inplace=True)
-                        df['Total Sales (₱)'] = df['Total Sales (₱)'].apply(lambda x: f"₱{float(x):,.2f}")
-                        top_seller = df.iloc[0]
-                        natural_response = f"The top seller of SCC SHIRTs this year is **{top_seller['First Name']} {top_seller['Last Name']}** with **{top_seller['Transactions']} transactions** totaling **{top_seller['Total Sales (₱)']}**. Would you like to see details of their transactions?"
-                        st.markdown("### SCC SHIRT Sales by Employee (This Year)")
-                        st.dataframe(df, use_container_width=True)
-                        st.download_button("Download Employee Sales Data", df.to_csv(index=False), "employee_sales.csv")
-                        # Generate bar chart
-                        with st.spinner("Generating chart..."):
-                            st.markdown("### Sales Chart")
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            df['Employee'] = df['First Name'] + ' ' + df['Last Name']
-                            df['Total Sales'] = df['Total Sales (₱)'].str.replace('₱', '').str.replace(',', '').astype(float)
-                            df.plot(kind='bar', x='Employee', y='Total Sales', ax=ax, color='#1f77b4')
-                            ax.set_title("SCC SHIRT Sales by Employee (This Year)", fontsize=14)
-                            ax.set_xlabel("Employee", fontsize=12)
-                            ax.set_ylabel("Total Sales (Pesos)", fontsize=12)
-                            plt.xticks(rotation=45, ha='right')
-                            plt.tight_layout()
-                            plt.savefig('chart.png', dpi=300, bbox_inches='tight')
-                            st.pyplot(fig)
-                            plt.close(fig)
-                            st.download_button("Download Chart Data", df[['Employee', 'Total Sales']].to_csv(index=False), "chart_data.csv")
+                # Handle profit query
+                elif "profit" in query_lower and "margin" not in query_lower:
+                    if 'profit' in df.columns:
+                        profit = float(df['profit'].iloc[0])
+                        natural_response = f"The total profit is **₱{profit:,.2f}**. Would you like to see costs or revenue details?"
+                        st.markdown("### Total Profit")
+                        st.write(f"**₱{profit:,.2f}**")
+                        st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
+
+                # Handle profit margin query
+                elif "profit margin" in query_lower:
+                    if 'profit_margin' in df.columns:
+                        margin = float(df['profit_margin'].iloc[0])
+                        natural_response = f"The profit margin is **{margin:.2f}%**. Would you like to explore revenue or cost breakdowns?"
+                        st.markdown("### Profit Margin")
+                        st.write(f"**{margin:.2f}%**")
+                        st.download_button("Download Margin Data", df.to_csv(index=False), "margin.csv")
 
                 # Handle generic data
                 else:
@@ -410,42 +365,34 @@ def handle_query(query: str, agent: AISQLAgent):
                         st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
                     else:
                         st.dataframe(df, use_container_width=True)
+                    # Generate chart if applicable
+                    chart_type, axes = determine_chart_type(query, df)
+                    if chart_type:
+                        with st.spinner("Generating chart..."):
+                            st.markdown("### Data Visualization")
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            if chart_type == "bar":
+                                df.plot(kind='bar', x=axes[0], y=axes[1], ax=ax, color='#1f77b4')
+                            elif chart_type == "line":
+                                df.plot(kind='line', x=axes[0], y=axes[1], ax=ax, color='#1f77b4')
+                            elif chart_type == "pie":
+                                df.plot(kind='pie', y=axes[1], labels=df[axes[0]], ax=ax, autopct='%1.1f%%')
+                            ax.set_title(f"{query}", fontsize=14)
+                            ax.set_xlabel(axes[0], fontsize=12)
+                            ax.set_ylabel(axes[1], fontsize=12)
+                            plt.tight_layout()
+                            plt.savefig('chart.png', dpi=300, bbox_inches='tight')
+                            st.pyplot(fig)
+                            plt.close(fig)
             else:
                 st.warning("No data returned from the query.")
                 natural_response = "No data found. This may be due to missing records or an invalid time frame. Try a different question."
         except ValueError as ve:
             natural_response = f"Query error: {str(ve)}. Please try rephrasing your question."
             logging.error(natural_response)
-            if st.session_state.debug_mode:
-                with st.expander("Debug Info", expanded=False):
-                    st.markdown("### Debug Info")
-                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
-                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
-                    st.write(f"**API Response**: {str(ve)}")
-                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
-                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
-        except requests.exceptions.RequestException as re:
-            natural_response = f"API error: {str(re)}. Please check your connection or try again later."
-            logging.error(natural_response)
-            if st.session_state.debug_mode:
-                with st.expander("Debug Info", expanded=False):
-                    st.markdown("### Debug Info")
-                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
-                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
-                    st.write(f"**API Response**: {str(re)}")
-                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
-                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
         except Exception as e:
             natural_response = f"An unexpected error occurred: {str(e)}. Please contact support."
             logging.error(natural_response)
-            if st.session_state.debug_mode:
-                with st.expander("Debug Info", expanded=False):
-                    st.markdown("### Debug Info")
-                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
-                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
-                    st.write(f"**API Response**: {str(e)}")
-                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
-                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
         st.session_state.chat_history.append(AIMessage(content=natural_response))
         with st.chat_message("AI", avatar="dist/img/ai.png"):
             st.markdown(natural_response)
@@ -460,10 +407,6 @@ if "chat_history" not in st.session_state:
     ]
 if "debug_mode" not in st.session_state:
     st.session_state.debug_mode = st.secrets.get("DEBUG_MODE", "true").lower() == "true"
-if "debug_sql" not in st.session_state:
-    st.session_state.debug_sql = st.secrets.get("DEBUG_SQL", "true").lower() == "true"
-if "debug_api" not in st.session_state:
-    st.session_state.debug_api = st.secrets.get("DEBUG_API", "true").lower() == "true"
 
 # Authentication function
 def authenticate(email, password):
@@ -558,8 +501,6 @@ def main():
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as **{st.session_state.user['first_name']} {st.session_state.user['last_name']}** ({st.session_state.user['role']})")
                 st.checkbox("Debug Mode", key="debug_mode", value=st.session_state.debug_mode)
-                st.checkbox("Debug SQL Queries", key="debug_sql", value=st.session_state.debug_sql)
-                st.checkbox("Debug API Responses", key="debug_api", value=st.session_state.debug_api)
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
@@ -615,16 +556,6 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
-                            handle_query(q, agent)
-                with st.expander("🔍 Admin Logs"):
-                    queries = [
-                        "What are the pending admin requests?",
-                        "Which admin actions were approved this month?",
-                        "What are the details of the latest admin logs?",
-                        "Which products were updated by admins this week?"
-                    ]
-                    for q in queries:
-                        if st.button(q, key=f"admin_{uuid.uuid4()}"):
                             handle_query(q, agent)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
