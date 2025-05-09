@@ -38,7 +38,7 @@ class AISQLAgent:
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
-        # Extract date from user query (e.g., "May 3, 2025" -> '2025-05-03')
+        # Extract date from user query (e.g., "April 18, 2025" -> '2025-04-18')
         date_pattern = r'on (\w+ \d{1,2}, \d{4})'
         match = re.search(date_pattern, user_query.lower())
         if match:
@@ -69,25 +69,29 @@ class AISQLAgent:
         - For total revenue on a specific date:
           SELECT SUM(total) AS total_revenue
           FROM invoices
-          WHERE order_date = '{specific_date}';
+          WHERE total > 0
+          AND CONCAT(order_date, ' ', order_time) BETWEEN '{specific_date} 00:00:00' AND '{specific_date} 23:59:59';
         - For total cost on a specific date:
           SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
-          FROM invoice_details id
-          JOIN invoices i ON id.invoice_id = i.invoice_id
+          FROM invoices i
+          JOIN invoice_details id ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          WHERE i.total > 0
+          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{specific_date} 00:00:00' AND '{specific_date} 23:59:59';
         - For profit on a specific date:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
-        - Example: For the question "what is the total profit on May 3, 2025?", generate:
+          WHERE i.total > 0
+          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{specific_date} 00:00:00' AND '{specific_date} 23:59:59';
+        - Example: For the question "what is the total profit on April 18, 2025?", generate:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '2025-05-03';
+          WHERE i.total > 0
+          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '2025-04-18 00:00:00' AND '2025-04-18 23:59:59';
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -96,7 +100,8 @@ class AISQLAgent:
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          WHERE i.total > 0
+          AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{specific_date} 00:00:00' AND '{specific_date} 23:59:59';
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
