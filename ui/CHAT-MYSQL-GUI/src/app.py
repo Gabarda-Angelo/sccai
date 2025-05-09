@@ -69,25 +69,25 @@ class AISQLAgent:
         - For total revenue on a specific date:
           SELECT SUM(total) AS total_revenue
           FROM invoices
-          WHERE order_date = '{specific_date}' AND total > 0;
+          WHERE order_date = '{specific_date}';
         - For total cost on a specific date:
           SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
           FROM invoice_details id
           JOIN invoices i ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}' AND i.total > 0;
+          WHERE i.order_date = '{specific_date}';
         - For profit on a specific date:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}' AND i.total > 0;
+          WHERE i.order_date = '{specific_date}';
         - Example: For the question "what is the total profit on May 3, 2025?", generate:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '2025-05-03' AND i.total > 0;
+          WHERE i.order_date = '2025-05-03';
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -96,24 +96,23 @@ class AISQLAgent:
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}' AND i.total > 0;
+          WHERE i.order_date = '{specific_date}';
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
           INNER JOIN products p ON id.product_id = p.product_id
           INNER JOIN invoices i ON id.invoice_id = i.invoice_id
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
-          AND i.total > 0
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
           LIMIT 10;
         - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
         - For time periods:
-          - Today: WHERE i.order_date = '{current_sg_date}' AND i.total > 0
-          - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY) AND i.total > 0
-          - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH) AND i.total > 0
-          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR) AND i.total > 0
-          - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND i.total > 0
+          - Today: WHERE i.order_date = '{current_sg_date}'
+          - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
+          - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
+          - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
         - For low stock:
           SELECT product_name, stock, reorder_level
           FROM products
@@ -148,7 +147,7 @@ class AISQLAgent:
                 sql_query += ";"
             if sql_query.count("SELECT") > 3:
                 raise ValueError("Query too complex: Too many subqueries")
-            return sql_query, raw_response
+            return sql_query, raw_response, specific_date
         except Exception as e:
             logging.error(f"SQL generation error: {str(e)}")
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
@@ -264,7 +263,7 @@ def handle_query(query: str, agent: AISQLAgent):
                         product_name = words[i + 1]
                         break
 
-            sql_query, raw_response = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime, product_name)
+            sql_query, raw_response, specific_date = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime, product_name)
             agent.validate_query(sql_query)
 
             data, api_response, status_code = agent.execute_query(sql_query)
@@ -298,7 +297,8 @@ def handle_query(query: str, agent: AISQLAgent):
                     if 'total_revenue' in df.columns and 'profit' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
                         profit = float(df['profit'].iloc[0])
-                        natural_response = f"For May 3, 2025, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
+                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                        natural_response = f"For {readable_date}, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
                         st.markdown("### Financial Summary")
                         st.write(f"**Total Revenue**: ₱{total_revenue:,.2f}")
                         st.write(f"**Profit**: ₱{profit:,.2f}")
@@ -306,14 +306,16 @@ def handle_query(query: str, agent: AISQLAgent):
                 elif "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        natural_response = f"The total revenue on May 3, 2025, was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
+                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                        natural_response = f"The total revenue on {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
                 elif "profit" in query_lower:
                     if 'profit' in df.columns:
                         profit = float(df['profit'].iloc[0])
-                        natural_response = f"The profit on May 3, 2025, was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
+                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                        natural_response = f"The profit on {readable_date} was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
                         st.markdown("### Profit")
                         st.write(f"**₱{profit:,.2f}**")
                         st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
