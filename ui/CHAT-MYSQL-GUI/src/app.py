@@ -82,6 +82,12 @@ class AISQLAgent:
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
+        - Example: For the question "what is the total profit on May 3, 2025?", generate:
+          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '2025-05-03';
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -215,8 +221,6 @@ class AISQLAgent:
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
-        - To calculate the profit, first determine the revenue and base cost, then use the formula: profit = revenue - base cost.
-        - To calculate the profit margin , If the total revenue is greater than zero, calculate the profit margin by dividing the profit by the total revenue and multiplying the result by 100; otherwise, set the profit margin to zero.
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
