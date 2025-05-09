@@ -43,8 +43,10 @@ class AISQLAgent:
         match = re.search(date_pattern, user_query.lower())
         if match:
             specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
+            date_specified = True
         else:
             specific_date = current_sg_date  # Default to current date if not specified
+            date_specified = False
 
         template = """
         You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
@@ -82,12 +84,6 @@ class AISQLAgent:
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
-        - Example: For the question "what is the total profit on May 3, 2025?", generate:
-          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '2025-05-03';
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -147,7 +143,7 @@ class AISQLAgent:
                 sql_query += ";"
             if sql_query.count("SELECT") > 3:
                 raise ValueError("Query too complex: Too many subqueries")
-            return sql_query, raw_response
+            return sql_query, raw_response, specific_date, date_specified
         except Exception as e:
             logging.error(f"SQL generation error: {str(e)}")
             raise ValueError(f"Failed to generate SQL query: {str(e)}")
@@ -221,8 +217,6 @@ class AISQLAgent:
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
-        - For May 3, 2025, total revenue should be ₱10,582.00, total cost should be ₱8,045.00, and profit should be ₱2,537.00.
-        - If the calculated profit does not match ₱2,537.00 for May 3, 2025, append: "Note: The calculated profit may indicate a data inconsistency."
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
@@ -263,7 +257,7 @@ def handle_query(query: str, agent: AISQLAgent):
                         product_name = words[i + 1]
                         break
 
-            sql_query, raw_response = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime, product_name)
+            sql_query, raw_response, specific_date, date_specified = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime, product_name)
             agent.validate_query(sql_query)
 
             data, api_response, status_code = agent.execute_query(sql_query)
@@ -293,11 +287,19 @@ def handle_query(query: str, agent: AISQLAgent):
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
 
+                # Format the date for response
+                if date_specified:
+                    date_obj = datetime.datetime.strptime(specific_date, '%Y-%m-%d')
+                    formatted_date = date_obj.strftime('%B %d, %Y')
+                    date_str = f"on {formatted_date}"
+                else:
+                    date_str = "for today"
+
                 if "total revenue" in query_lower and "profit" in query_lower:
                     if 'total_revenue' in df.columns and 'profit' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
                         profit = float(df['profit'].iloc[0])
-                        natural_response = f"For May 3, 2025, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
+                        natural_response = f"For {date_str}, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
                         st.markdown("### Financial Summary")
                         st.write(f"**Total Revenue**: ₱{total_revenue:,.2f}")
                         st.write(f"**Profit**: ₱{profit:,.2f}")
@@ -305,14 +307,14 @@ def handle_query(query: str, agent: AISQLAgent):
                 elif "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        natural_response = f"The total revenue on May 3, 2025, was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
+                        natural_response = f"The total revenue {date_str}, was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
                 elif "profit" in query_lower:
                     if 'profit' in df.columns:
                         profit = float(df['profit'].iloc[0])
-                        natural_response = f"The profit on May 3, 2025, was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
+                        natural_response = f"The profit {date_str}, was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
                         st.markdown("### Profit")
                         st.write(f"**₱{profit:,.2f}**")
                         st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
