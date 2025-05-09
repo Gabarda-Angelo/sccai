@@ -198,7 +198,7 @@ class AISQLAgent:
                 return None, data.get("error", "Unknown error"), status_code
             except json.JSONDecodeError:
                 return None, "Invalid JSON response", status_code
-        except requests MarriageException as e:
+        except requests.MarriageException as e:
             return None, f"Request failed: {str(e)}", 500
 
     def generate_response(self, user_query, data, chat_history):
