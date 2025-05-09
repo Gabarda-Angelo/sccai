@@ -37,7 +37,7 @@ class AISQLAgent:
         self.allowed_tables = allowed_tables
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
-    def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime):
+    def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
         template = """
         You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
 
@@ -83,8 +83,8 @@ class AISQLAgent:
           LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
-        - For specific products, use WHERE p.product_name LIKE '%name%' or p.product_id = 'id'.
-        - For employee sales of specific products:
+        - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
+        - For employee sales of specific products (if provided):
           SELECT e.employee_id, e.first_name, e.last_name, COUNT(id.invoice_id) AS transactions, ROUND(SUM(id.total_price), 2) AS total_sales
           FROM invoices i
           INNER JOIN employees e ON i.employee_id = e.employee_id
@@ -117,6 +117,10 @@ class AISQLAgent:
 
         **User Question:** {question}
         """
+        if product_name:
+            template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
+        else:
+            template = template.replace("%{product_name}%", "%")  # Remove product filter if not provided
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.llm | StrOutputParser()
         try:
@@ -145,7 +149,6 @@ class AISQLAgent:
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
             raise ValueError("Query must start with SELECT")
-        # Check for GROUP BY consistency with aggregations
         if "GROUP BY" in query_upper:
             select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
             group_by_part = query_upper.split("GROUP BY")[1].split("ORDER BY")[0] if "ORDER BY" in query_upper else query_upper.split("GROUP BY")[1]
@@ -154,7 +157,6 @@ class AISQLAgent:
             for col in select_columns:
                 if not any(func in col for func in ["SUM(", "COUNT(", "AVG(", "MAX(", "MIN("]) and col not in group_by_columns:
                     raise ValueError(f"Column {col} in SELECT must be in GROUP BY or aggregated")
-        # Extract and validate tables and columns
         table_alias_map = {}
         table_matches = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)?\b', query_upper, re.IGNORECASE)
         for table, alias in table_matches:
@@ -232,48 +234,6 @@ class AISQLAgent:
             logging.error(f"Response generation error: {str(e)}")
             return f"Error generating response: {str(e)}. Please try again."
 
-# Adjust quantities based on void_logs
-def adjust_quantities_with_voids(df, agent):
-    void_data, _, _ = agent.execute_query("""
-        SELECT JSON_EXTRACT(details, '$.item[*].product_id') AS product_ids,
-               JSON_EXTRACT(details, '$.item[*].original_qty') AS original_qty,
-               JSON_EXTRACT(details, '$.item[*].new_qty') AS new_qty
-        FROM void_logs
-        WHERE status = 'voided_before_payment';
-    """)
-    if void_data and 'product_id' in df.columns:
-        for void in void_data:
-            product_ids = json.loads(void['product_ids']) if void['product_ids'] else []
-            original_qty = json.loads(void['original_qty']) if void['original_qty'] else []
-            new_qty = json.loads(void['new_qty']) if void['new_qty'] else []
-            for pid, oq, nq in zip(product_ids, original_qty, new_qty):
-                if pid in df['product_id'].values:
-                    adjustment = oq - nq
-                    df.loc[df['product_id'] == pid, 'quantity'] = df.loc[df['product_id'] == pid, 'quantity'] - adjustment
-                    df.loc[df['product_id'] == pid, 'quantity'] = df.loc[df['product_id'] == pid, 'quantity'].clip(lower=0)
-    return df
-
-# Determine chart type based on query and data
-def determine_chart_type(query, df):
-    if df.empty or len(df.columns) < 2 or len(df) < 1:
-        return None, None
-    columns = df.columns.tolist()
-    query_lower = query.lower()
-    date_columns = [col for col in columns if "date" in col.lower() or pd.api.types.is_datetime64_any_dtype(df[col])]
-    numerical_columns = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
-    categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
-    if date_columns and numerical_columns:
-        return "line", (date_columns[0], numerical_columns[0])
-    elif categorical_columns and numerical_columns:
-        unique_categories = len(df[categorical_columns[0]].unique())
-        if unique_categories <= 6 and "percentage" in query_lower:
-            return "pie", (categorical_columns[0], numerical_columns[0])
-        else:
-            return "bar", (categorical_columns[0], numerical_columns[0])
-    elif numerical_columns and len(numerical_columns) >= 2:
-        return "scatter", (numerical_columns[0], numerical_columns[1])
-    return None, None
-
 # Handle user query with enhanced error handling and data presentation
 def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
@@ -286,11 +246,17 @@ def handle_query(query: str, agent: AISQLAgent):
             current_sg_date = now_sg.strftime('%Y-%m-%d')
             current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
-            # Generate and validate SQL query
-            sql_query, raw_response = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime)
+            product_name = None
+            if "product" in query.lower():
+                words = query.split()
+                for i, word in enumerate(words):
+                    if word.lower() == "product" and i + 1 < len(words):
+                        product_name = words[i + 1]
+                        break
+
+            sql_query, raw_response = agent.generate_sql_query(query, st.session_state.chat_history, current_sg_date, current_sg_datetime, product_name)
             agent.validate_query(sql_query)
 
-            # Execute query
             data, api_response, status_code = agent.execute_query(sql_query)
             debug_info = {
                 "raw_response": raw_response,
@@ -303,15 +269,8 @@ def handle_query(query: str, agent: AISQLAgent):
             if data is None:
                 raise ValueError(f"API error: {api_response} (Status: {status_code})")
 
-            # Adjust for voids if applicable
-            df = pd.DataFrame(data)
-            if 'product_id' in df.columns and 'quantity' in df.columns:
-                df = adjust_quantities_with_voids(df, agent)
+            natural_response = agent.generate_response(query, data, st.session_state.chat_history)
 
-            # Generate natural language response
-            natural_response = agent.generate_response(query, df.to_dict('records'), st.session_state.chat_history)
-
-            # Display debug info if enabled
             if st.session_state.debug_mode:
                 with st.expander("Debug Info", expanded=False):
                     st.markdown("### Debug Info")
@@ -321,38 +280,49 @@ def handle_query(query: str, agent: AISQLAgent):
                     st.write(f"**API Status Code**: {debug_info['status_code']}")
                     st.write(f"**API Data**: ```json\n{debug_info['api_data']}\n```")
 
-            # Process and display data
-            if not df.empty:
+            if data and isinstance(data, list) and len(data) >= 1:
+                df = pd.DataFrame(data)
                 query_lower = query.lower()
 
-                # Handle total revenue query
                 if "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        natural_response = f"The total revenue is **₱{total_revenue:,.2f}**. Would you like a breakdown by day or product?"
+                        natural_response = f"The total revenue last week (from May 1 to May 8, 2025) was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by day or product?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
 
-                # Handle profit query
-                elif "profit" in query_lower and "margin" not in query_lower:
-                    if 'profit' in df.columns:
-                        profit = float(df['profit'].iloc[0])
-                        natural_response = f"The total profit is **₱{profit:,.2f}**. Would you like to see costs or revenue details?"
-                        st.markdown("### Total Profit")
-                        st.write(f"**₱{profit:,.2f}**")
-                        st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
+                elif "employee" in query_lower and "scc shirt" in query_lower:
+                    if all(col in df.columns for col in ['employee_id', 'first_name', 'last_name', 'transactions', 'total_sales']):
+                        df.rename(columns={
+                            'employee_id': 'Employee ID',
+                            'first_name': 'First Name',
+                            'last_name': 'Last Name',
+                            'transactions': 'Transactions',
+                            'total_sales': 'Total Sales (₱)'
+                        }, inplace=True)
+                        df['Total Sales (₱)'] = df['Total Sales (₱)'].apply(lambda x: f"₱{float(x):,.2f}")
+                        top_seller = df.iloc[0]
+                        natural_response = f"The top seller of SCC SHIRTs this year is **{top_seller['First Name']} {top_seller['Last Name']}** with **{top_seller['Transactions']} transactions** totaling **{top_seller['Total Sales (₱)']}**. Would you like to see details of their transactions?"
+                        st.markdown("### SCC SHIRT Sales by Employee (This Year)")
+                        st.dataframe(df, use_container_width=True)
+                        st.download_button("Download Employee Sales Data", df.to_csv(index=False), "employee_sales.csv")
+                        with st.spinner("Generating chart..."):
+                            st.markdown("### Sales Chart")
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            df['Employee'] = df['First Name'] + ' ' + df['Last Name']
+                            df['Total Sales'] = df['Total Sales (₱)'].str.replace('₱', '').str.replace(',', '').astype(float)
+                            df.plot(kind='bar', x='Employee', y='Total Sales', ax=ax, color='#1f77b4')
+                            ax.set_title("SCC SHIRT Sales by Employee (This Year)", fontsize=14)
+                            ax.set_xlabel("Employee", fontsize=12)
+                            ax.set_ylabel("Total Sales (Pesos)", fontsize=12)
+                            plt.xticks(rotation=45, ha='right')
+                            plt.tight_layout()
+                            plt.savefig('chart.png', dpi=300, bbox_inches='tight')
+                            st.pyplot(fig)
+                            plt.close(fig)
+                            st.download_button("Download Chart Data", df[['Employee', 'Total Sales']].to_csv(index=False), "chart_data.csv")
 
-                # Handle profit margin query
-                elif "profit margin" in query_lower:
-                    if 'profit_margin' in df.columns:
-                        margin = float(df['profit_margin'].iloc[0])
-                        natural_response = f"The profit margin is **{margin:.2f}%**. Would you like to explore revenue or cost breakdowns?"
-                        st.markdown("### Profit Margin")
-                        st.write(f"**{margin:.2f}%**")
-                        st.download_button("Download Margin Data", df.to_csv(index=False), "margin.csv")
-
-                # Handle generic data
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
@@ -365,34 +335,42 @@ def handle_query(query: str, agent: AISQLAgent):
                         st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
                     else:
                         st.dataframe(df, use_container_width=True)
-                    # Generate chart if applicable
-                    chart_type, axes = determine_chart_type(query, df)
-                    if chart_type:
-                        with st.spinner("Generating chart..."):
-                            st.markdown("### Data Visualization")
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            if chart_type == "bar":
-                                df.plot(kind='bar', x=axes[0], y=axes[1], ax=ax, color='#1f77b4')
-                            elif chart_type == "line":
-                                df.plot(kind='line', x=axes[0], y=axes[1], ax=ax, color='#1f77b4')
-                            elif chart_type == "pie":
-                                df.plot(kind='pie', y=axes[1], labels=df[axes[0]], ax=ax, autopct='%1.1f%%')
-                            ax.set_title(f"{query}", fontsize=14)
-                            ax.set_xlabel(axes[0], fontsize=12)
-                            ax.set_ylabel(axes[1], fontsize=12)
-                            plt.tight_layout()
-                            plt.savefig('chart.png', dpi=300, bbox_inches='tight')
-                            st.pyplot(fig)
-                            plt.close(fig)
             else:
                 st.warning("No data returned from the query.")
                 natural_response = "No data found. This may be due to missing records or an invalid time frame. Try a different question."
         except ValueError as ve:
             natural_response = f"Query error: {str(ve)}. Please try rephrasing your question."
             logging.error(natural_response)
+            if st.session_state.debug_mode:
+                with st.expander("Debug Info", expanded=False):
+                    st.markdown("### Debug Info")
+                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
+                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
+                    st.write(f"**API Response**: {str(ve)}")
+                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
+        except requests.exceptions.RequestException as re:
+            natural_response = f"API error: {str(re)}. Please check your connection or try again later."
+            logging.error(natural_response)
+            if st.session_state.debug_mode:
+                with st.expander("Debug Info", expanded=False):
+                    st.markdown("### Debug Info")
+                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
+                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
+                    st.write(f"**API Response**: {str(re)}")
+                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
         except Exception as e:
             natural_response = f"An unexpected error occurred: {str(e)}. Please contact support."
             logging.error(natural_response)
+            if st.session_state.debug_mode:
+                with st.expander("Debug Info", expanded=False):
+                    st.markdown("### Debug Info")
+                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
+                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
+                    st.write(f"**API Response**: {str(e)}")
+                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
+                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
         st.session_state.chat_history.append(AIMessage(content=natural_response))
         with st.chat_message("AI", avatar="dist/img/ai.png"):
             st.markdown(natural_response)
@@ -407,6 +385,10 @@ if "chat_history" not in st.session_state:
     ]
 if "debug_mode" not in st.session_state:
     st.session_state.debug_mode = st.secrets.get("DEBUG_MODE", "true").lower() == "true"
+if "debug_sql" not in st.session_state:
+    st.session_state.debug_sql = st.secrets.get("DEBUG_SQL", "true").lower() == "true"
+if "debug_api" not in st.session_state:
+    st.session_state.debug_api = st.secrets.get("DEBUG_API", "true").lower() == "true"
 
 # Authentication function
 def authenticate(email, password):
