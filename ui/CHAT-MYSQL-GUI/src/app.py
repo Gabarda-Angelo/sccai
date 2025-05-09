@@ -84,6 +84,15 @@ class AISQLAgent:
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
         - For specific products, use WHERE p.product_name LIKE '%name%' or p.product_id = id.
+        - For employee sales of specific products:
+          SELECT e.employee_id, e.first_name, e.last_name, COUNT(id.invoice_id) AS transactions, ROUND(SUM(id.total_price), 2) AS total_sales
+          FROM invoices i
+          INNER JOIN employees e ON i.employee_id = e.employee_id
+          INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          INNER JOIN products p ON id.product_id = p.product_id
+          WHERE p.product_name LIKE '%{product_name}%' AND i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
+          GROUP BY e.employee_id, e.first_name, e.last_name
+          ORDER BY total_sales DESC;
         - For time periods:
           - Today: WHERE i.order_date = '{current_sg_date}'
           - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
@@ -161,21 +170,30 @@ class AISQLAgent:
         query_upper = query.upper().strip()
         if not query_upper.startswith("SELECT"):
             raise ValueError("Query must start with SELECT")
-        # Improved regex to extract table names, handling aliases and complex queries
-        table_names = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:[a-zA-Z_][a-zA-Z0-9_]*|\b)', query_upper, re.IGNORECASE)
-        for table in table_names:
+        # Extract table names and their aliases
+        table_alias_map = {}
+        table_matches = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)?\b', query_upper, re.IGNORECASE)
+        for table, alias in table_matches:
+            if alias:
+                table_alias_map[alias] = table
+            else:
+                table_alias_map[table] = table
+        # Validate tables
+        for alias, table in table_alias_map.items():
             if table not in [t.upper() for t in self.allowed_tables.keys()]:
                 raise ValueError(f"Unauthorized table: {table}")
-        # Validate columns
+        # Validate columns, skipping computed expressions
         try:
             select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
             columns = [col.strip() for col in select_part.split(",")]
             for col in columns:
-                if "." in col and not col.startswith("(") and not col.endswith(")"):
+                # Skip computed columns (e.g., ROUND(SUM(...)), COUNT(...))
+                if col.startswith("(") or " AS " in col or any(func in col for func in ["SUM(", "COUNT(", "ROUND(", "COALESCE("]):
+                    continue
+                if "." in col:
                     table_alias, col_name = col.split(".")
-                    table_match = re.search(rf'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+{table_alias}\b', query_upper, re.IGNORECASE)
-                    if table_match:
-                        table_name = table_match.group(1).lower()
+                    if table_alias in table_alias_map:
+                        table_name = table_alias_map[table_alias].lower()
                         if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
                             raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
         except Exception as e:
