@@ -90,13 +90,13 @@ class AISQLAgent:
         - For profit on a specific date:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN invoice_details id ON i.invoice_id = i.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - Example: For the question "what is the total profit on April 18, 2025?", generate:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN invoice_details id ON i.invoice_id = i.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '2025-04-18' AND i.total > 0;
         - For combined financial metrics on a specific date:
@@ -105,7 +105,7 @@ class AISQLAgent:
               COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost,
               SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN invoice_details id ON i.invoice_id = i.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - For best-selling products:
@@ -248,8 +248,8 @@ class AISQLAgent:
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
-        - For April 18, 2025, total revenue should be ₱1,240.00, total cost should be ₱1,020.00, and profit should be ₱220.00.
-        - If the calculated profit does not match expected values, append: "Note: The calculated profit may indicate a data inconsistency."
+        - For May 3, 2025, total revenue should be ₱10,582.00, total cost should be ₱8,045.00, and profit should be ₱2,537.00.
+        - If the calculated profit does not match ₱2,537.00 for May 3, 2025, append: "Note: The calculated profit may indicate a data inconsistency."
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
