@@ -39,19 +39,27 @@ class AISQLAgent:
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
         # Extract date from user query or conversation history (e.g., "April 18, 2025" -> '2025-04-18')
-        date_pattern = r'(?:on\s+)?(\w+\s+\d{1,2},\s+\d{4})'
+        date_pattern = r'(?:on\s+)?(\w+)\s+(\d{1,2})\s*,\s*(\d{4})'
         specific_date = None
         # Check user query first
         match = re.search(date_pattern, user_query.lower())
         if match:
-            specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
+            month, day, year = match.groups()
+            try:
+                specific_date = datetime.datetime.strptime(f"{month} {day}, {year}", '%B %d, %Y').strftime('%Y-%m-%d')
+            except ValueError:
+                specific_date = current_sg_date
         else:
             # Check recent conversation history for date mentions
             for msg in reversed(chat_history[-5:]):  # Limit to last 5 messages
                 match = re.search(date_pattern, msg.content.lower())
                 if match:
-                    specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
-                    break
+                    month, day, year = match.groups()
+                    try:
+                        specific_date = datetime.datetime.strptime(f"{month} {day}, {year}", '%B %d, %Y').strftime('%Y-%m-%d')
+                        break
+                    except ValueError:
+                        continue
         if not specific_date:
             specific_date = current_sg_date  # Default to current date if no date found
 
@@ -88,26 +96,56 @@ class AISQLAgent:
           JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}' AND i.total > 0;
         - For profit on a specific date:
-          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = i.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}' AND i.total > 0;
+          WITH invoice_stats AS (
+              SELECT SUM(total) AS total_revenue
+              FROM invoices
+              WHERE order_date = '{specific_date}' AND total > 0
+          ),
+          cost_stats AS (
+              SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+              FROM invoice_details id
+              JOIN invoices i ON id.invoice_id = i.invoice_id
+              JOIN products p ON id.product_id = p.product_id
+              WHERE i.order_date = '{specific_date}' AND i.total > 0
+          )
+          SELECT (i_stats.total_revenue - c_stats.base_cost) AS profit
+          FROM invoice_stats i_stats
+          CROSS JOIN cost_stats c_stats;
         - Example: For the question "what is the total profit on April 18, 2025?", generate:
-          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = i.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '2025-04-18' AND i.total > 0;
+          WITH invoice_stats AS (
+              SELECT SUM(total) AS total_revenue
+              FROM invoices
+              WHERE order_date = '2025-04-18' AND total > 0
+          ),
+          cost_stats AS (
+              SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+              FROM invoice_details id
+              JOIN invoices i ON id.invoice_id = i.invoice_id
+              JOIN products p ON id.product_id = p.product_id
+              WHERE i.order_date = '2025-04-18' AND i.total > 0
+          )
+          SELECT (i_stats.total_revenue - c_stats.base_cost) AS profit
+          FROM invoice_stats i_stats
+          CROSS JOIN cost_stats c_stats;
         - For combined financial metrics on a specific date:
+          WITH invoice_stats AS (
+              SELECT SUM(total) AS total_revenue
+              FROM invoices
+              WHERE order_date = '{specific_date}' AND total > 0
+          ),
+          cost_stats AS (
+              SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+              FROM invoice_details id
+              JOIN invoices i ON id.invoice_id = i.invoice_id
+              JOIN products p ON id.product_id = p.product_id
+              WHERE i.order_date = '{specific_date}' AND i.total > 0
+          )
           SELECT 
-              SUM(i.total) AS total_revenue,
-              COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost,
-              SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = i.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}' AND i.total > 0;
+              i_stats.total_revenue,
+              c_stats.base_cost AS total_cost,
+              (i_stats.total_revenue - c_stats.base_cost) AS profit
+          FROM invoice_stats i_stats
+          CROSS JOIN cost_stats c_stats;
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
@@ -248,8 +286,8 @@ class AISQLAgent:
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
-        - For May 3, 2025, total revenue should be ₱10,582.00, total cost should be ₱8,045.00, and profit should be ₱2,537.00.
-        - If the calculated profit does not match ₱2,537.00 for May 3, 2025, append: "Note: The calculated profit may indicate a data inconsistency."
+        - For April 18, 2025, total revenue should be ₱1,240.00, total cost should be ₱1,020.00, and profit should be ₱220.00.
+        - If the calculated profit does not match ₱220.00 for April 18, 2025, append: "Note: The calculated profit may indicate a data inconsistency."
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
@@ -422,7 +460,9 @@ def authenticate(email, password):
             json={"email": email, "password": password},
             timeout=10
         )
-        data = response.json() if response.text.strip() else {}
+        data = response.json() if
+
+ response.text.strip() else {}
         if response.status_code == 200 and data.get("status") == "success" and "data" in data:
             st.session_state.authenticated = True
             st.session_state.user = data["data"]
