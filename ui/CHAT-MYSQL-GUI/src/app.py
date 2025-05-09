@@ -38,6 +38,14 @@ class AISQLAgent:
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
+        # Extract date from user query (e.g., "May 3, 2025" -> '2025-05-03')
+        date_pattern = r'on (\w+ \d{1,2}, \d{4})'
+        match = re.search(date_pattern, user_query.lower())
+        if match:
+            specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
+        else:
+            specific_date = current_sg_date  # Default to current date if not specified
+
         template = """
         You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
 
@@ -51,13 +59,44 @@ class AISQLAgent:
 
         **Instructions:**
         - Generate SQL queries valid for MariaDB 10.6.21, optimized for performance.
-        - Use 'today' as '{current_sg_date}' for daily queries.
+        - Use 'today' as '{current_sg_date}' for daily queries unless a specific date is provided.
         - For datetime filtering, use CONCAT(i.order_date, ' ', i.order_time) for invoices.
         - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
         - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
         - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
         - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
         - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
+        - For total revenue on a specific date:
+          SELECT SUM(total) AS total_revenue
+          FROM invoices
+          WHERE order_date = '{specific_date}';
+        - For total profit on a specific date:
+          SELECT (SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) AS profit
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '{specific_date}';
+        - For average sales value on a specific date:
+          SELECT AVG(total) AS average_sales_value
+          FROM invoices
+          WHERE order_date = '{specific_date}';
+        - For base cost (total COGS) on a specific date:
+          SELECT SUM(id.quantity * p.purchase_price) AS base_cost
+          FROM invoice_details id
+          JOIN invoices i ON id.invoice_id = i.invoice_id
+          JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '{specific_date}';
+        - For profit margin on a specific date:
+          SELECT 
+            CASE 
+              WHEN SUM(i.total) > 0 
+              THEN ROUND(((SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total)) * 100, 2)
+              ELSE 0
+            END AS profit_margin
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '{specific_date}';
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
@@ -67,32 +106,7 @@ class AISQLAgent:
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
           LIMIT 10;
-        - For profit calculations:
-          SELECT ROUND(SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0), 2) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
-        - For profit margin:
-          SELECT ROUND(
-            CASE WHEN SUM(i.total) > 0
-                 THEN ((SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total) * 100)
-                 ELSE 0
-            END, 2) AS profit_margin
-          FROM invoices i
-          LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date';
         - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
-        - For employee sales of specific products (if provided):
-          SELECT e.employee_id, e.first_name, e.last_name, COUNT(id.invoice_id) AS transactions, ROUND(SUM(id.total_price), 2) AS total_sales
-          FROM invoices i
-          INNER JOIN employees e ON i.employee_id = e.employee_id
-          INNER JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          INNER JOIN products p ON id.product_id = p.product_id
-          WHERE p.product_name LIKE '%{product_name}%' AND i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
-          GROUP BY e.employee_id, e.first_name, e.last_name
-          ORDER BY total_sales DESC;
         - For time periods:
           - Today: WHERE i.order_date = '{current_sg_date}'
           - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
@@ -103,14 +117,6 @@ class AISQLAgent:
           SELECT product_name, stock, reorder_level
           FROM products
           WHERE stock <= reorder_level;
-        - For employee performance:
-          SELECT e.employee_id, e.first_name, e.last_name, COUNT(i.invoice_id) AS transactions, ROUND(SUM(i.total), 2) AS total_sales
-          FROM invoices i
-          INNER JOIN employees e ON i.employee_id = e.employee_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN 'start_date' AND 'end_date'
-          GROUP BY e.employee_id, e.first_name, e.last_name
-          ORDER BY total_sales DESC;
-        - Adjust for voids by joining void_logs where status = 'voided_before_payment' and parsing JSON details.
         - Ensure calculations (e.g., SUM, AVG) are accurate, handling edge cases like division by zero.
         - Optimize with LIMIT for large datasets and use indexes where possible.
         - Return only the SQL query, no explanations, no markdown, no backticks.
@@ -118,7 +124,7 @@ class AISQLAgent:
         **User Question:** {question}
         """
         if product_name:
-            template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
+            template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, specific_date=specific_date, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
         else:
             template = template.replace("%{product_name}%", "%")  # Remove product filter if not provided
         prompt = ChatPromptTemplate.from_template(template)
@@ -129,7 +135,8 @@ class AISQLAgent:
                 "chat_history": " ".join([msg.content for msg in chat_history[-10:]]),
                 "schema": self.schema,
                 "current_sg_date": current_sg_date,
-                "current_sg_datetime": current_sg_datetime
+                "current_sg_datetime": current_sg_datetime,
+                "specific_date": specific_date
             })
             sql_query_match = re.search(r'(?is)(SELECT.*?;)', raw_response)
             if sql_query_match:
@@ -287,7 +294,7 @@ def handle_query(query: str, agent: AISQLAgent):
                 if "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        natural_response = f"The total revenue last week (from May 1 to May 8, 2025) was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by day or product?"
+                        natural_response = f"The total revenue on May 3, 2025, was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
