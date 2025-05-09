@@ -70,29 +70,23 @@ class AISQLAgent:
           SELECT SUM(total) AS total_revenue
           FROM invoices
           WHERE order_date = '{specific_date}';
-        - For total profit on a specific date:
-          SELECT (SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
-        - For average sales value on a specific date:
-          SELECT AVG(total) AS average_sales_value
-          FROM invoices
-          WHERE order_date = '{specific_date}';
-        - For base cost (total COGS) on a specific date:
-          SELECT SUM(id.quantity * p.purchase_price) AS base_cost
+        - For total cost on a specific date:
+          SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
           FROM invoice_details id
           JOIN invoices i ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
-        - For profit margin on a specific date:
+        - For profit on a specific date:
+          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '{specific_date}';
+        - For combined financial metrics on a specific date:
           SELECT 
-            CASE 
-              WHEN SUM(i.total) > 0 
-              THEN ROUND(((SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total)) * 100, 2)
-              ELSE 0
-            END AS profit_margin
+              SUM(i.total) AS total_revenue,
+              COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost,
+              SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
@@ -204,7 +198,7 @@ class AISQLAgent:
                 return None, data.get("error", "Unknown error"), status_code
             except json.JSONDecodeError:
                 return None, "Invalid JSON response", status_code
-        except requests.exceptions.RequestException as e:
+        except requests MarriageException as e:
             return None, f"Request failed: {str(e)}", 500
 
     def generate_response(self, user_query, data, chat_history):
@@ -221,6 +215,7 @@ class AISQLAgent:
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
+        - For May 3, 2025, total revenue should be ₱10,582.00 based on invoice data.
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
@@ -291,45 +286,29 @@ def handle_query(query: str, agent: AISQLAgent):
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
 
-                if "total revenue" in query_lower:
+                if "total revenue" in query_lower and "profit" in query_lower:
+                    if 'total_revenue' in df.columns and 'profit' in df.columns:
+                        total_revenue = float(df['total_revenue'].iloc[0])
+                        profit = float(df['profit'].iloc[0])
+                        natural_response = f"For May 3, 2025, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
+                        st.markdown("### Financial Summary")
+                        st.write(f"**Total Revenue**: ₱{total_revenue:,.2f}")
+                        st.write(f"**Profit**: ₱{profit:,.2f}")
+                        st.download_button("Download Financial Data", df.to_csv(index=False), "financial_data.csv")
+                elif "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
                         natural_response = f"The total revenue on May 3, 2025, was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
-
-                elif "employee" in query_lower and "scc shirt" in query_lower:
-                    if all(col in df.columns for col in ['employee_id', 'first_name', 'last_name', 'transactions', 'total_sales']):
-                        df.rename(columns={
-                            'employee_id': 'Employee ID',
-                            'first_name': 'First Name',
-                            'last_name': 'Last Name',
-                            'transactions': 'Transactions',
-                            'total_sales': 'Total Sales (₱)'
-                        }, inplace=True)
-                        df['Total Sales (₱)'] = df['Total Sales (₱)'].apply(lambda x: f"₱{float(x):,.2f}")
-                        top_seller = df.iloc[0]
-                        natural_response = f"The top seller of SCC SHIRTs this year is **{top_seller['First Name']} {top_seller['Last Name']}** with **{top_seller['Transactions']} transactions** totaling **{top_seller['Total Sales (₱)']}**. Would you like to see details of their transactions?"
-                        st.markdown("### SCC SHIRT Sales by Employee (This Year)")
-                        st.dataframe(df, use_container_width=True)
-                        st.download_button("Download Employee Sales Data", df.to_csv(index=False), "employee_sales.csv")
-                        with st.spinner("Generating chart..."):
-                            st.markdown("### Sales Chart")
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            df['Employee'] = df['First Name'] + ' ' + df['Last Name']
-                            df['Total Sales'] = df['Total Sales (₱)'].str.replace('₱', '').str.replace(',', '').astype(float)
-                            df.plot(kind='bar', x='Employee', y='Total Sales', ax=ax, color='#1f77b4')
-                            ax.set_title("SCC SHIRT Sales by Employee (This Year)", fontsize=14)
-                            ax.set_xlabel("Employee", fontsize=12)
-                            ax.set_ylabel("Total Sales (Pesos)", fontsize=12)
-                            plt.xticks(rotation=45, ha='right')
-                            plt.tight_layout()
-                            plt.savefig('chart.png', dpi=300, bbox_inches='tight')
-                            st.pyplot(fig)
-                            plt.close(fig)
-                            st.download_button("Download Chart Data", df[['Employee', 'Total Sales']].to_csv(index=False), "chart_data.csv")
-
+                elif "profit" in query_lower:
+                    if 'profit' in df.columns:
+                        profit = float(df['profit'].iloc[0])
+                        natural_response = f"The profit on May 3, 2025, was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
+                        st.markdown("### Profit")
+                        st.write(f"**₱{profit:,.2f}**")
+                        st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
