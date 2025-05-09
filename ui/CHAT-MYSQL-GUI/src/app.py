@@ -67,27 +67,35 @@ class AISQLAgent:
         - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
         - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
         - For total revenue on a specific date:
-          SELECT SUM(total) AS total_revenue
-          FROM invoices
-          WHERE order_date = '{specific_date}';
+          SELECT SUM(i.total) AS total_revenue
+          FROM invoices i
+          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id AND vl.status = 'approved'
+          WHERE i.order_date = '{specific_date}'
+          AND vl.void_id IS NULL;
         - For total cost on a specific date:
           SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
           FROM invoice_details id
           JOIN invoices i ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id AND vl.status = 'approved'
+          WHERE i.order_date = '{specific_date}'
+          AND vl.void_id IS NULL;
         - For profit on a specific date:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id AND vl.status = 'approved'
+          WHERE i.order_date = '{specific_date}'
+          AND vl.void_id IS NULL;
         - Example: For the question "what is the total profit on May 3, 2025?", generate:
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '2025-05-03';
+          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id AND vl.status = 'approved'
+          WHERE i.order_date = '2025-05-03'
+          AND vl.void_id IS NULL;
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -96,7 +104,9 @@ class AISQLAgent:
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+          LEFT JOIN void_logs vl ON i.invoice_id = vl.invoice_id AND vl.status = 'approved'
+          WHERE i.order_date = '{specific_date}'
+          AND vl.void_id IS NULL;
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
