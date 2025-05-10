@@ -460,9 +460,7 @@ def authenticate(email, password):
             json={"email": email, "password": password},
             timeout=10
         )
-        data = response.json() if
-
- response.text.strip() else {}
+        data = response.json() if response.text.strip() else {}
         if response.status_code == 200 and data.get("status") == "success" and "data" in data:
             st.session_state.authenticated = True
             st.session_state.user = data["data"]
@@ -487,7 +485,9 @@ def display_chat_history():
 # Clear chat history
 def clear_chat():
     st.session_state.chat_history = [
-        AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
+        AIMessage(
+            content="Hello! I'm AcaSquad AI. Tertiary\nAsk me anything about your SCC School Store."
+        )
     ]
     st.success("Chat history cleared. Starting a new conversation!")
 
