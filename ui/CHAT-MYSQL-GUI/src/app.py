@@ -195,8 +195,9 @@ class AISQLAgent:
 
     def validate_query(self, query):
         query_upper = query.upper().strip()
-        if not query_upper.startswith("SELECT"):
-            raise ValueError("Query must start with SELECT")
+        if not (query_upper.startswith("SELECT") or query_upper.startswith("WITH")):
+            raise ValueError("Query must start with SELECT or WITH")
+    # Additional validation checks can remain here
         if "GROUP BY" in query_upper:
             select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
             group_by_part = query_upper.split("GROUP BY")[1].split("ORDER BY")[0] if "ORDER BY" in query_upper else query_upper.split("GROUP BY")[1]
