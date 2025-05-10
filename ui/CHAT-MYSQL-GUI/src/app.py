@@ -50,14 +50,14 @@ class AISQLAgent:
             date_from = f"{current_sg_date} 00:00:00"
             date_to = current_sg_datetime
 
-        # Detect specific metrics in the user query
+        # Detect financial metrics in the query
         query_lower = user_query.lower()
         is_financial_query = any(keyword in query_lower for keyword in [
             "average sales value", "total revenue", "base cost", "profit", "profit margin"
         ])
 
         if is_financial_query:
-            # Replicate tablereport.php logic for financial metrics
+            # SQL query from tablereport.php for financial metrics
             sql_query = """
             WITH invoice_stats AS (
                 SELECT 
@@ -90,9 +90,9 @@ class AISQLAgent:
             FROM invoice_stats i_stats
             CROSS JOIN cost_stats c_stats;
             """.format(date_from=date_from, date_to=date_to)
-            raw_response = sql_query  # For debugging
+            raw_response = sql_query
         else:
-            # Existing logic for other queries
+            # Template for other queries
             template = """
             You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
 
@@ -248,7 +248,7 @@ class AISQLAgent:
         except requests.exceptions.RequestException as e:
             return None, f"Request failed: {str(e)}", 500
 
-    def generate_response(self, user_query, data, chat_history):
+    def generate_response(self, user_query, data, chat_history, specific_date):
         response_template = """
         Generate a natural language response based on:
         - **Question:** {question}
@@ -279,6 +279,10 @@ class AISQLAgent:
                 "response": json.dumps(data, indent=2),
                 "chat_history": " ".join([msg.content for msg in chat_history[-10:]])
             })
+            if specific_date == '2025-05-03' and data and isinstance(data, list) and len(data) > 0:
+                profit = float(data[0].get('profit', 0))
+                if abs(profit - 2537.00) > 0.01:
+                    response += "\nNote: The calculated profit may indicate a data inconsistency."
             return response
         except Exception as e:
             logging.error(f"Response generation error: {str(e)}")
@@ -291,10 +295,10 @@ def handle_query(query: str, agent: AISQLAgent):
         st.markdown(query)
     with st.spinner("Analyzing your query..."):
         try:
-            singapore_tz = pytz.timezone('Asia/Singapore')
-            now_sg = datetime.datetime.now(singapore_tz)
-            current_sg_date = now_sg.strftime('%Y-%m-%d')
-            current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
+            manila_tz = pytz.timezone('Asia/Manila')  # Align with tablereport.php
+            now_manila = datetime.datetime.now(manila_tz)
+            current_sg_date = now_manila.strftime('%Y-%m-%d')
+            current_sg_datetime = now_manila.strftime('%Y-%m-%d %H:%M:%S')
 
             product_name = None
             if "product" in query.lower():
@@ -319,7 +323,7 @@ def handle_query(query: str, agent: AISQLAgent):
             if data is None:
                 raise ValueError(f"API error: {api_response} (Status: {status_code})")
 
-            natural_response = agent.generate_response(query, data, st.session_state.chat_history)
+            natural_response = agent.generate_response(query, data, st.session_state.chat_history, specific_date)
 
             if st.session_state.debug_mode:
                 with st.expander("Debug Info", expanded=False):
@@ -349,8 +353,6 @@ def handle_query(query: str, agent: AISQLAgent):
                     if 'profit' in df.columns:
                         profit = float(df['profit'].iloc[0])
                         response_lines.append(f"- **Profit**: ₱{profit:,.2f}")
-                        if specific_date == '2025-05-03' and abs(profit - 2537.00) > 0.01:
-                            response_lines.append("Note: The calculated profit may indicate a data inconsistency.")
                     if 'profit_margin' in df.columns:
                         profit_margin = float(df['profit_margin'].iloc[0])
                         response_lines.append(f"- **Profit Margin**: {profit_margin:,.1f}%")
@@ -362,7 +364,10 @@ def handle_query(query: str, agent: AISQLAgent):
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
-                            df[col] = df[col].apply(lambda x: f"₱{x:,.2f}" if 'price' in col.lower() or 'total' in col.lower() or 'revenue' in col.lower() or 'cost' in col.lower() or 'profit' in col.lower() or 'avg_sales_value' in col.lower() else x)
+                            if any(kw in col.lower() for kw in ['price', 'total', 'revenue', 'cost', 'profit', 'avg_sales_value']):
+                                df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
+                            elif 'margin' in col.lower():
+                                df[col] = df[col].apply(lambda x: f"{x:,.1f}%")
                         elif "date" in col.lower():
                             df[col] = pd.to_datetime(df[col], errors='coerce')
                     if len(df) > 100:
@@ -469,7 +474,7 @@ def main():
     schema = """
     Database Schema:
     - invoices: invoice_id (PK, int), employee_id (FK to employees, int), order_date (date), order_time (time), subtotal (decimal), discount (decimal), total (decimal), paid (decimal), due (decimal), payment_type (varchar, Cash/Card/Check), created_at (datetime), updated_at (datetime)
-    - invoice_details: detail_id (PK, int), invoice_id (FK to invoices/it, int), product_id (FK to products, int), quantity (int), unit_price (decimal), total_price (decimal), created_at (datetime), updated_at (datetime)
+    - invoice_details: detail_id (PK, int), invoice_id (FK to invoices, int), product_id (FK to products, int), quantity (int), unit_price (decimal), total_price (decimal), created_at (datetime), updated_at (datetime)
     - products: product_id (PK, int), barcode (varchar), product_name (varchar), category_id (FK to categories, int), description (text), stock (int), reorder_level (int), purchase_price (decimal), sale_price (decimal), image (varchar), created_at (datetime), updated_at (datetime)
     - categories: category_id (PK, int), category_name (varchar), created_at (datetime), updated_at (datetime)
     - employees: employee_id (PK, int), first_name (varchar), last_name (varchar), email (varchar), password_hash (varchar), role (varchar, Owner/Admin/Cashier), created_at (datetime), updated_at (datetime)
