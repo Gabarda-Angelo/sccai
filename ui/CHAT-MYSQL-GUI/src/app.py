@@ -38,7 +38,6 @@ class AISQLAgent:
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
-        # Extract specific date from query (e.g., "on May 11, 2025")
         date_pattern = r'on (\w+ \d{1,2}, \d{4})'
         match = re.search(date_pattern, user_query.lower())
         if match:
@@ -80,25 +79,13 @@ class AISQLAgent:
             sql_query = f"""
             SELECT 
                 CASE 
-                    WHEN (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') = 0 THEN 0 
-                    ELSE ((SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
-                          COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
-                                    FROM invoice_details id 
-                                    JOIN invoices i ON id.invoice_id = i.invoice_id 
-                                    JOIN products p ON id.product_id = p.product_id 
-                                    WHERE i.order_date = '{specific_date}'), 0)) / 
-                         (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') * 100 
-                END AS profit_margin;
-            """
-        elif "sales invoice details" in query_lower:
-            sql_query = f"""
-            SELECT i.invoice_id, i.order_date, i.order_time, i.total AS invoice_total,
-                   id.quantity, id.unit_price, id.total_price, p.product_name
+                    WHEN SUM(i.total) = 0 THEN 0 
+                    ELSE (SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total) * 100 
+                END AS profit_margin
             FROM invoices i
-            JOIN invoice_details id ON i.invoice_id = i.invoice_id
-            JOIN products p ON id.product_id = p.product_id
-            WHERE i.order_date = '{specific_date}'
-            ORDER BY i.invoice_id, p.product_name;
+            LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+            LEFT JOIN products p ON id.product_id = p.product_id
+            WHERE i.order_date = '{specific_date}';
             """
         else:
             template = """
@@ -109,13 +96,12 @@ class AISQLAgent:
 
             **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
             **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
-            **Specific date (if provided):** {specific_date} (YYYY-MM-DD)
 
             **Conversation History:** {chat_history}
 
             **Instructions:**
             - Generate SQL queries valid for MariaDB 10.6.21, optimized for performance.
-            - Use '{specific_date}' for date-specific queries unless otherwise specified.
+            - Use 'today' as '{current_sg_date}' for daily queries unless a specific date is provided.
             - For datetime filtering, use CONCAT(i.order_date, ' ', i.order_time) for invoices.
             - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
             - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
@@ -125,12 +111,11 @@ class AISQLAgent:
             - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%'.
             - Ensure calculations (e.g., SUM, AVG) are accurate, handling edge cases like division by zero.
             - Return only the SQL query, no explanations, no markdown, no backticks.
-            - If no specific query can be generated, return an empty string to trigger fallback.
 
             **User Question:** {question}
             """
             if product_name:
-                template = template.replace("%{product_name}%", product_name)
+                template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, specific_date=specific_date, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
             else:
                 template = template.replace("%{product_name}%", "%")
             prompt = ChatPromptTemplate.from_template(template)
@@ -144,32 +129,19 @@ class AISQLAgent:
                     "current_sg_datetime": current_sg_datetime,
                     "specific_date": specific_date
                 })
-                # More flexible regex to capture SQL query
-                sql_query_match = re.search(r'(?is)(SELECT.*?;|\Z)', raw_response)
+                sql_query_match = re.search(r'(?is)(SELECT.*?;)', raw_response)
                 if sql_query_match:
                     sql_query = sql_query_match.group(1).strip()
-                    if sql_query.endswith(';'):
-                        sql_query = sql_query[:-1]  # Remove trailing semicolon for consistency
                 else:
-                    # Fallback query for generic questions
-                    sql_query = f"""
-                    SELECT i.invoice_id, i.order_date, i.total
-                    FROM invoices i
-                    WHERE i.order_date = '{specific_date}';
-                    """
+                    raise ValueError("No SQL query found in the response")
                 if not sql_query.endswith(";"):
                     sql_query += ";"
                 if sql_query.count("SELECT") > 3:
                     raise ValueError("Query too complex: Too many subqueries")
             except Exception as e:
                 logging.error(f"SQL generation error: {str(e)}")
-                # Fallback to a simple query
-                sql_query = f"""
-                SELECT i.invoice_id, i.order_date, i.total
-                FROM invoices i
-                WHERE i.order_date = '{specific_date}';
-                """
-        return sql_query, raw_response, specific_date
+                raise ValueError(f"Failed to generate SQL query: {str(e)}")
+        return sql_query, "", specific_date
 
     def validate_query(self, query):
         query_upper = query.upper().strip()
@@ -331,23 +303,6 @@ def handle_query(query: str, agent: AISQLAgent):
                         natural_response = f"The profit margin on {readable_date} was **{profit_margin:.2f}%**. Would you like more details?"
                         st.markdown("### Profit Margin")
                         st.write(f"**{profit_margin:.2f}%**")
-                elif "sales invoice details" in query_lower:
-                    if 'invoice_id' in df.columns:
-                        invoice_groups = df.groupby('invoice_id')
-                        response_lines = [f"On {readable_date}, there were **{len(invoice_groups)} invoices** with a total sales value of **₱{df['invoice_total'].sum():,.2f}**.\n"]
-                        for invoice_id, group in invoice_groups:
-                            invoice_total = float(group['invoice_total'].iloc[0])
-                            order_time = group['order_time'].iloc[0]
-                            response_lines.append(f"**Invoice {invoice_id}** at {order_time}, total **₱{invoice_total:,.2f}**, includes:")
-                            for _, row in group.iterrows():
-                                qty = int(row['quantity'])
-                                unit_price = float(row['unit_price'])
-                                product_name = row['product_name']
-                                response_lines.append(f"- {qty} units of {product_name} at ₱{unit_price:,.2f} each, totaling ₱{row['total_price']:,.2f}")
-                        natural_response = "\n".join(response_lines) + "\n\nWould you like more details or to explore another aspect?"
-                        st.markdown("### Sales Invoice Details")
-                        st.dataframe(df, use_container_width=True)
-                        st.download_button("Download Invoice Details", df.to_csv(index=False), "invoice_details.csv")
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
@@ -553,11 +508,11 @@ def main():
                             handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
-                        "What is the average sales value for today?",
-                        "What is the total revenue for today?",
-                        "What is the base cost for today?",
-                        "What is the profit for today?",
-                        "What is the profit margin for today?"
+                        "What is the average sales value on May 3, 2025?",
+                        "What is the total revenue on May 3, 2025?",
+                        "What is the base cost on May 3, 2025?",
+                        "What is the profit on May 3, 2025?",
+                        "What is the profit margin on May 3, 2025?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
