@@ -69,30 +69,33 @@ class AISQLAgent:
             """
         elif "profit" in query_lower:
             sql_query = f"""
-            SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-            FROM invoices i
-            LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-            LEFT JOIN products p ON id.product_id = p.product_id
-            WHERE i.order_date = '{specific_date}';
+            SELECT (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
+                   COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
+                             FROM invoice_details id 
+                             JOIN invoices i ON id.invoice_id = i.invoice_id 
+                             JOIN products p ON id.product_id = p.product_id 
+                             WHERE i.order_date = '{specific_date}'), 0) AS profit;
             """
         elif "profit margin" in query_lower:
             sql_query = f"""
             SELECT 
                 CASE 
-                    WHEN SUM(i.total) = 0 THEN 0 
-                    ELSE (SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total) * 100 
-                END AS profit_margin
-            FROM invoices i
-            LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-            LEFT JOIN products p ON id.product_id = p.product_id
-            WHERE i.order_date = '{specific_date}';
+                    WHEN (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') = 0 THEN 0 
+                    ELSE ((SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
+                          COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
+                                    FROM invoice_details id 
+                                    JOIN invoices i ON id.invoice_id = i.invoice_id 
+                                    JOIN products p ON id.product_id = p.product_id 
+                                    WHERE i.order_date = '{specific_date}'), 0)) / 
+                         (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') * 100 
+                END AS profit_margin;
             """
         elif "sales invoice details" in query_lower:
             sql_query = f"""
             SELECT i.invoice_id, i.order_date, i.order_time, i.total AS invoice_total,
                    id.quantity, id.unit_price, id.total_price, p.product_name
             FROM invoices i
-            JOIN invoice_details id ON i.invoice_id = id.invoice_id
+            JOIN invoice_details id ON i.invoice_id = i.invoice_id
             JOIN products p ON id.product_id = p.product_id
             WHERE i.order_date = '{specific_date}'
             ORDER BY i.invoice_id, p.product_name;
@@ -311,7 +314,7 @@ def handle_query(query: str, agent: AISQLAgent):
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
                 elif "base cost" in query_lower:
                     if 'base_cost' in df.columns:
-                        base_cost = float(df['base_cost'].イル[0])
+                        base_cost = float(df['base_cost'].iloc[0])
                         natural_response = f"The base cost on {readable_date} was **₱{base_cost:,.2f}**. Would you like more details?"
                         st.markdown("### Base Cost")
                         st.write(f"**₱{base_cost:,.2f}**")
