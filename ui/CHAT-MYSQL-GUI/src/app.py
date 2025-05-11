@@ -93,6 +93,25 @@ class AISQLAgent:
                 WHERE i.order_date = '<DATE>'), 
                 0
             ) AS profit;
+        -Example: For a question like "what is the total profit margin on a specific date?", use the following format, substituting the desired date in place of '<DATE>': generate:
+        SELECT 
+    CASE 
+        WHEN total_revenue > 0 
+        THEN ROUND(
+            ((total_revenue - COALESCE(total_base_cost, 0)) / total_revenue * 100), 
+            1
+        )
+        ELSE 0 
+    END AS profit_margin
+FROM (
+    SELECT 
+        (SELECT SUM(total) FROM invoices WHERE order_date = '2025-05-11') AS total_revenue,
+        (SELECT SUM(id.quantity * p.purchase_price) 
+         FROM invoice_details id 
+         JOIN invoices i ON id.invoice_id = i.invoice_id 
+         JOIN products p ON id.product_id = p.product_id 
+         WHERE i.order_date = '2025-05-11') AS total_base_cost
+) AS stats; 
         - For combined financial metrics on a specific date:
           SELECT 
               SUM(i.total) AS total_revenue,
