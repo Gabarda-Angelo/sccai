@@ -470,7 +470,7 @@ def main():
         "employees": ["employee_id", "first_name", "last_name", "email", "password_hash", "role", "created_at", "updated_at"],
         "void_logs": ["void_id", "invoice_id", "void_type", "details", "status", "created_at", "updated_at"],
         "inventory_logs": ["log_id", "product_id", "adjustment_type", "quantity", "created_at", "updated_at"],
-        "user_logins": ["log_id", "employee_id", "login_time", "logout_time", "created_at", "updated_at"],
+        "user_logins": ["log_id", "employee_id", "login_time", "logout_time", "created_at", "updated_at","ip_address"],
         "discount_logs": ["discount_id", "invoice_id", "discount_amount", "created_at", "updated_at"],
         "admin_logs": ["adminlogs_id", "admin_id", "action_type", "details", "approved_by_owner", "created_at", "updated_at"],
         "sync_log": ["log_id", "table_name", "record_id", "action", "timestamp", "synced"]
