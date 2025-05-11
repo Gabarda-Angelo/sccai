@@ -38,61 +38,55 @@ class AISQLAgent:
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
-        # Extract date from user query (e.g., "May 3, 2025" -> '2025-05-03')
         date_pattern = r'on (\w+ \d{1,2}, \d{4})'
         match = re.search(date_pattern, user_query.lower())
         if match:
             specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
-            date_from = f"{specific_date} 00:00:00"
-            date_to = f"{specific_date} 23:59:59"
         else:
             specific_date = current_sg_date
-            date_from = f"{current_sg_date} 00:00:00"
-            date_to = current_sg_datetime
 
-        # Detect financial metrics in the query
         query_lower = user_query.lower()
-        is_financial_query = any(keyword in query_lower for keyword in [
-            "average sales value", "total revenue", "base cost", "profit", "profit margin"
-        ])
-
-        if is_financial_query:
-            # SQL query from tablereport.php for financial metrics
-            sql_query = """
-            WITH invoice_stats AS (
-                SELECT 
-                    COUNT(invoice_id) AS total_invoices,
-                    ROUND(AVG(total), 2) AS avg_sales_value,
-                    SUM(total) AS total_revenue
-                FROM invoices
-                WHERE total > 0
-                AND CONCAT(order_date, ' ', order_time) BETWEEN '{date_from}' AND '{date_to}'
-            ),
-            cost_stats AS (
-                SELECT 
-                    COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-                FROM invoices i
-                LEFT JOIN invoice_details id ON id.invoice_id = i.invoice_id
-                LEFT JOIN products p ON id.product_id = p.product_id
-                WHERE i.total > 0
-                AND CONCAT(i.order_date, ' ', i.order_time) BETWEEN '{date_from}' AND '{date_to}'
-            )
+        if "average sales value" in query_lower:
+            sql_query = f"""
+            SELECT AVG(total) AS average_sales_value
+            FROM invoices
+            WHERE order_date = '{specific_date}';
+            """
+        elif "total revenue" in query_lower:
+            sql_query = f"""
+            SELECT SUM(total) AS total_revenue
+            FROM invoices
+            WHERE order_date = '{specific_date}';
+            """
+        elif "base cost" in query_lower:
+            sql_query = f"""
+            SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+            FROM invoice_details id
+            JOIN invoices i ON id.invoice_id = i.invoice_id
+            JOIN products p ON id.product_id = p.product_id
+            WHERE i.order_date = '{specific_date}';
+            """
+        elif "profit" in query_lower:
+            sql_query = f"""
+            SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+            FROM invoices i
+            LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+            LEFT JOIN products p ON id.product_id = p.product_id
+            WHERE i.order_date = '{specific_date}';
+            """
+        elif "profit margin" in query_lower:
+            sql_query = f"""
             SELECT 
-                i_stats.avg_sales_value,
-                i_stats.total_revenue,
-                c_stats.base_cost,
-                (i_stats.total_revenue - c_stats.base_cost) AS profit,
                 CASE 
-                    WHEN i_stats.total_revenue > 0 
-                    THEN ROUND(((i_stats.total_revenue - c_stats.base_cost) / i_stats.total_revenue * 100), 1) 
-                    ELSE 0 
+                    WHEN SUM(i.total) = 0 THEN 0 
+                    ELSE (SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total) * 100 
                 END AS profit_margin
-            FROM invoice_stats i_stats
-            CROSS JOIN cost_stats c_stats;
-            """.format(date_from=date_from, date_to=date_to)
-            raw_response = sql_query
+            FROM invoices i
+            LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+            LEFT JOIN products p ON id.product_id = p.product_id
+            WHERE i.order_date = '{specific_date}';
+            """
         else:
-            # Template for other queries
             template = """
             You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
 
@@ -113,58 +107,14 @@ class AISQLAgent:
             - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
             - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
             - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
-            - For total revenue on a specific date:
-              SELECT SUM(total) AS total_revenue
-              FROM invoices
-              WHERE order_date = '{specific_date}';
-            - For total cost on a specific date:
-              SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
-              FROM invoice_details id
-              JOIN invoices i ON id.invoice_id = i.invoice_id
-              JOIN products p ON id.product_id = p.product_id
-              WHERE i.order_date = '{specific_date}';
-            - For profit on a specific date:
-              SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-              FROM invoices i
-              LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-              LEFT JOIN products p ON id.product_id = p.product_id
-              WHERE i.order_date = '{specific_date}';
-            - For best-selling products:
-              SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
-              FROM invoice_details id
-              INNER JOIN products p ON id.product_id = p.product_id
-              INNER JOIN invoices i ON id.invoice_id = i.invoice_id
-              WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
-              GROUP BY p.product_id, p.product_name
-              ORDER BY total_sold DESC, p.product_id ASC
-              LIMIT 10;
-            - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
-            - For time periods:
-              - Today: WHERE i.order_date = '{current_sg_date}'
-              - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
-              - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
-              - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
-              - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
-            - For low stock:
-              SELECT product_name, stock, reorder_level
-              FROM products
-              WHERE stock <= reorder_level;
+            - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%'.
             - Ensure calculations (e.g., SUM, AVG) are accurate, handling edge cases like division by zero.
-            - Optimize with LIMIT for large datasets and use indexes where possible.
             - Return only the SQL query, no explanations, no markdown, no backticks.
 
             **User Question:** {question}
             """
             if product_name:
-                template = template.format(
-                    product_name=product_name,
-                    current_sg_date=current_sg_date,
-                    current_sg_datetime=current_sg_datetime,
-                    specific_date=specific_date,
-                    schema=self.schema,
-                    chat_history=" ".join([msg.content for msg in chat_history[-10:]]),
-                    question=user_query
-                )
+                template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, specific_date=specific_date, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
             else:
                 template = template.replace("%{product_name}%", "%")
             prompt = ChatPromptTemplate.from_template(template)
@@ -190,14 +140,12 @@ class AISQLAgent:
             except Exception as e:
                 logging.error(f"SQL generation error: {str(e)}")
                 raise ValueError(f"Failed to generate SQL query: {str(e)}")
-
-        return sql_query, raw_response, specific_date
+        return sql_query, "", specific_date
 
     def validate_query(self, query):
         query_upper = query.upper().strip()
-        if not (query_upper.startswith("SELECT") or query_upper.startswith("WITH")):
-            raise ValueError("Query must start with SELECT or WITH")
-    # Additional validation checks can remain here
+        if not query_upper.startswith("SELECT"):
+            raise ValueError("Query must start with SELECT")
         if "GROUP BY" in query_upper:
             select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
             group_by_part = query_upper.split("GROUP BY")[1].split("ORDER BY")[0] if "ORDER BY" in query_upper else query_upper.split("GROUP BY")[1]
@@ -216,17 +164,6 @@ class AISQLAgent:
         for alias, table in table_alias_map.items():
             if table not in [t.upper() for t in self.allowed_tables.keys()]:
                 raise ValueError(f"Unauthorized table: {table}")
-        select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
-        columns = [col.strip() for col in select_part.split(",")]
-        for col in columns:
-            if col.startswith("(") or " AS " in col or any(func in col for func in ["SUM(", "COUNT(", "ROUND(", "COALESCE("]):
-                continue
-            if "." in col:
-                table_alias, col_name = col.split(".")
-                if table_alias in table_alias_map:
-                    table_name = table_alias_map[table_alias].lower()
-                    if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
-                        raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
         if any(kw in query_upper for kw in ["DROP", "ALTER", "TRUNCATE", "INSERT", "UPDATE", "DELETE"]):
             raise ValueError("Query contains prohibited keywords")
         return True
@@ -249,7 +186,7 @@ class AISQLAgent:
         except requests.exceptions.RequestException as e:
             return None, f"Request failed: {str(e)}", 500
 
-    def generate_response(self, user_query, data, chat_history, specific_date):
+    def generate_response(self, user_query, data, chat_history):
         response_template = """
         Generate a natural language response based on:
         - **Question:** {question}
@@ -259,12 +196,10 @@ class AISQLAgent:
         **Guidelines:**
         - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try a different question."
         - Highlight key insights with **bold**.
-        - Use - for lists, ₱ for currency, % for percentages.
+        - Use ₱ for currency, % for percentages.
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
-        - Ensure calculations match the data exactly (e.g., revenue, profit).
-        - For May 3, 2025, total revenue should be ₱10,582.00, total cost should be ₱8,045.00, and profit should be ₱2,537.00.
-        - If the calculated profit does not match ₱2,537.00 for May 3, 2025, append: "Note: The calculated profit may indicate a data inconsistency."
+        - Ensure calculations match the data exactly.
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
@@ -280,26 +215,21 @@ class AISQLAgent:
                 "response": json.dumps(data, indent=2),
                 "chat_history": " ".join([msg.content for msg in chat_history[-10:]])
             })
-            if specific_date == '2025-05-03' and data and isinstance(data, list) and len(data) > 0:
-                profit = float(data[0].get('profit', 0))
-                if abs(profit - 2537.00) > 0.01:
-                    response += "\nNote: The calculated profit may indicate a data inconsistency."
             return response
         except Exception as e:
             logging.error(f"Response generation error: {str(e)}")
             return f"Error generating response: {str(e)}. Please try again."
 
-# Handle user query with enhanced error handling and data presentation
 def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
     with st.spinner("Analyzing your query..."):
         try:
-            manila_tz = pytz.timezone('Asia/Manila')  # Align with tablereport.php
-            now_manila = datetime.datetime.now(manila_tz)
-            current_sg_date = now_manila.strftime('%Y-%m-%d')
-            current_sg_datetime = now_manila.strftime('%Y-%m-%d %H:%M:%S')
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            now_sg = datetime.datetime.now(singapore_tz)
+            current_sg_date = now_sg.strftime('%Y-%m-%d')
+            current_sg_datetime = now_sg.strftime('%Y-%m-%d %H:%M:%S')
 
             product_name = None
             if "product" in query.lower():
@@ -324,7 +254,7 @@ def handle_query(query: str, agent: AISQLAgent):
             if data is None:
                 raise ValueError(f"API error: {api_response} (Status: {status_code})")
 
-            natural_response = agent.generate_response(query, data, st.session_state.chat_history, specific_date)
+            natural_response = agent.generate_response(query, data, st.session_state.chat_history)
 
             if st.session_state.debug_mode:
                 with st.expander("Debug Info", expanded=False):
@@ -338,37 +268,44 @@ def handle_query(query: str, agent: AISQLAgent):
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
+                readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
 
-                if any(keyword in query_lower for keyword in ["average sales value", "total revenue", "base cost", "profit", "profit margin"]):
-                    readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
-                    response_lines = [f"For {readable_date}:"]
-                    if 'avg_sales_value' in df.columns:
-                        avg_sales_value = float(df['avg_sales_value'].iloc[0])
-                        response_lines.append(f"- **Average Sales Value**: ₱{avg_sales_value:,.2f}")
+                if "average sales value" in query_lower:
+                    if 'average_sales_value' in df.columns:
+                        avg_sales = float(df['average_sales_value'].iloc[0])
+                        natural_response = f"The average sales value on {readable_date} was **₱{avg_sales:,.2f}**. Would you like more details?"
+                        st.markdown("### Average Sales Value")
+                        st.write(f"**₱{avg_sales:,.2f}**")
+                elif "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        response_lines.append(f"- **Total Revenue**: ₱{total_revenue:,.2f}")
+                        natural_response = f"The total revenue on {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown?"
+                        st.markdown("### Total Revenue")
+                        st.write(f"**₱{total_revenue:,.2f}**")
+                        st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
+                elif "base cost" in query_lower:
                     if 'base_cost' in df.columns:
                         base_cost = float(df['base_cost'].iloc[0])
-                        response_lines.append(f"- **Base Cost**: ₱{base_cost:,.2f}")
+                        natural_response = f"The base cost on {readable_date} was **₱{base_cost:,.2f}**. Would you like more details?"
+                        st.markdown("### Base Cost")
+                        st.write(f"**₱{base_cost:,.2f}**")
+                elif "profit" in query_lower:
                     if 'profit' in df.columns:
                         profit = float(df['profit'].iloc[0])
-                        response_lines.append(f"- **Profit**: ₱{profit:,.2f}")
+                        natural_response = f"The profit on {readable_date} was **₱{profit:,.2f}**. Would you like more details?"
+                        st.markdown("### Profit")
+                        st.write(f"**₱{profit:,.2f}**")
+                        st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
+                elif "profit margin" in query_lower:
                     if 'profit_margin' in df.columns:
                         profit_margin = float(df['profit_margin'].iloc[0])
-                        response_lines.append(f"- **Profit Margin**: {profit_margin:,.1f}%")
-                    response_lines.append("Would you like more details or to explore another aspect?")
-                    natural_response = "\n".join(response_lines)
-                    st.markdown("### Financial Metrics")
-                    st.write(natural_response)
-                    st.download_button("Download Financial Data", df.to_csv(index=False), "financial_metrics.csv")
+                        natural_response = f"The profit margin on {readable_date} was **{profit_margin:.2f}%**. Would you like more details?"
+                        st.markdown("### Profit Margin")
+                        st.write(f"**{profit_margin:.2f}%**")
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
-                            if any(kw in col.lower() for kw in ['price', 'total', 'revenue', 'cost', 'profit', 'avg_sales_value']):
-                                df[col] = df[col].apply(lambda x: f"₱{x:,.2f}")
-                            elif 'margin' in col.lower():
-                                df[col] = df[col].apply(lambda x: f"{x:,.1f}%")
+                            df[col] = df[col].apply(lambda x: f"₱{x:,.2f}" if 'price' in col.lower() or 'total' in col.lower() or 'revenue' in col.lower() else x)
                         elif "date" in col.lower():
                             df[col] = pd.to_datetime(df[col], errors='coerce')
                     if len(df) > 100:
@@ -539,7 +476,7 @@ def main():
                         "What is the daily sales trend for this month?",
                         "What is the revenue trend compared to last month?",
                         "What are the top 5 products by revenue this week?",
-                        "What is the average transaction value this month?"
+                        "What is the average sales value this month?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
@@ -570,13 +507,11 @@ def main():
                             handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
-                        "What are the admin overview metrics for this month?",
-                        "What is the total amount due from unpaid invoices?",
-                        "What is the total discount given this month?",
-                        "What is the profit margin for SCC SHIRT this year?",
-                        "What is the highest revenue day this month?",
-                        "What is the total profit for this month?",
-                        "What is the breakdown of payment types this month?"
+                        "What is the average sales value on May 3, 2025?",
+                        "What is the total revenue on May 3, 2025?",
+                        "What is the base cost on May 3, 2025?",
+                        "What is the profit on May 3, 2025?",
+                        "What is the profit margin on May 3, 2025?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
