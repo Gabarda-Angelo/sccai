@@ -38,15 +38,67 @@ class AISQLAgent:
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
+        query_lower = user_query.lower()
         date_pattern = r'on (\w+ \d{1,2}, \d{4})'
-        match = re.search(date_pattern, user_query.lower())
+        match = re.search(date_pattern, query_lower)
         if match:
             specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
         else:
             specific_date = current_sg_date
 
-        query_lower = user_query.lower()
-        if "average sales value" in query_lower:
+        # Handle "overall" queries without date filters
+        if "overall" in query_lower:
+            if "revenue" in query_lower:
+                sql_query = """
+                SELECT SUM(total) AS total_revenue
+                FROM invoices;
+                """
+                return sql_query, "", None
+            elif "base cost" in query_lower:
+                sql_query = """
+                SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
+                FROM invoice_details id
+                JOIN invoices i ON id.invoice_id = i.invoice_id
+                JOIN products p ON id.product_id = p.product_id;
+                """
+                return sql_query, "", None
+            elif "profit" in query_lower and not re.search(r'\bprofit margin\b', query_lower):
+                sql_query = """
+                SELECT (SELECT SUM(total) FROM invoices) - 
+                       COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
+                                 FROM invoice_details id 
+                                 JOIN invoices i ON id.invoice_id = i.invoice_id 
+                                 JOIN products p ON id.product_id = p.product_id), 0) AS profit;
+                """
+                return sql_query, "", None
+            elif re.search(r'\bprofit margin\b', query_lower):
+                sql_query = """
+                SELECT 
+                    CASE 
+                        WHEN (SELECT SUM(total) FROM invoices) = 0 THEN 0 
+                        ELSE ((SELECT SUM(total) FROM invoices) - 
+                              COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
+                                        FROM invoice_details id 
+                                        JOIN invoices i ON id.invoice_id = i.invoice_id 
+                                        JOIN products p ON id.product_id = p.product_id), 0)) / 
+                             (SELECT SUM(total) FROM invoices) * 100 
+                    END AS profit_margin;
+                """
+                return sql_query, "", None
+
+        # Date-specific queries
+        if "sales invoice details" in query_lower:
+            sql_query = f"""
+            SELECT i.invoice_id, e.first_name, e.last_name, i.order_time, i.total,
+                   GROUP_CONCAT(CONCAT(id.quantity, ' ', p.product_name, ' (₱', id.unit_price, ')')) AS items
+            FROM invoices i
+            JOIN employees e ON i.employee_id = e.employee_id
+            JOIN invoice_details id ON i.invoice_id = id.invoice_id
+            JOIN products p ON id.product_id = p.product_id
+            WHERE i.order_date = '{specific_date}'
+            GROUP BY i.invoice_id, e.first_name, e.last_name, i.order_time, i.total;
+            """
+        elif "average sales value" in query_lower:
             sql_query = f"""
             SELECT AVG(total) AS average_sales_value
             FROM invoices
@@ -66,7 +118,7 @@ class AISQLAgent:
             JOIN products p ON id.product_id = p.product_id
             WHERE i.order_date = '{specific_date}';
             """
-        elif "profit" in query_lower:
+        elif "profit" in query_lower and not re.search(r'\bprofit margin\b', query_lower):
             sql_query = f"""
             SELECT (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
                    COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
@@ -75,17 +127,19 @@ class AISQLAgent:
                              JOIN products p ON id.product_id = p.product_id 
                              WHERE i.order_date = '{specific_date}'), 0) AS profit;
             """
-        elif "profit margin" in query_lower:
+        elif re.search(r'\bprofit margin\b', query_lower):
             sql_query = f"""
             SELECT 
                 CASE 
-                    WHEN SUM(i.total) = 0 THEN 0 
-                    ELSE (SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total) * 100 
-                END AS profit_margin
-            FROM invoices i
-            LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-            LEFT JOIN products p ON id.product_id = p.product_id
-            WHERE i.order_date = '{specific_date}';
+                    WHEN (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') = 0 THEN 0 
+                    ELSE ((SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
+                          COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
+                                    FROM invoice_details id 
+                                    JOIN invoices i ON id.invoice_id = i.invoice_id 
+                                    JOIN products p ON id.product_id = p.product_id 
+                                    WHERE i.order_date = '{specific_date}'), 0)) / 
+                         (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') * 100 
+                END AS profit_margin;
             """
         else:
             template = """
@@ -222,6 +276,14 @@ class AISQLAgent:
             return f"Error generating response: {str(e)}. Please try again."
 
 def handle_query(query: str, agent: AISQLAgent):
+    # Reset chat history if it contains mismatched profit/profit margin or date-specific/overall responses
+    if any(("profit on" in msg.content.lower() and "profit margin" in query.lower()) or 
+           ("on May" in msg.content.lower() and "overall" in query.lower()) for msg in st.session_state.chat_history):
+        st.session_state.chat_history = [
+            AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
+        ]
+        logging.info("Reset chat history due to profit/profit margin or date/overall mismatch")
+
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
@@ -249,7 +311,8 @@ def handle_query(query: str, agent: AISQLAgent):
                 "cleaned_query": sql_query,
                 "api_response": api_response,
                 "status_code": status_code,
-                "api_data": json.dumps(data, indent=2) if data else "No data"
+                "api_data": json.dumps(data, indent=2) if data else "No data",
+                "query_type": "overall" if "overall" in query.lower() else "date-specific"
             }
 
             if data is None:
@@ -265,44 +328,64 @@ def handle_query(query: str, agent: AISQLAgent):
                     st.write(f"**API Response**: {debug_info['api_response']}")
                     st.write(f"**API Status Code**: {debug_info['status_code']}")
                     st.write(f"**API Data**: ```json\n{debug_info['api_data']}\n```")
+                    st.write(f"**Query Type**: {debug_info['query_type']}")
 
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
-                readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                readable_date = (datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y') 
+                                if specific_date else "all time")
 
-                if "average sales value" in query_lower:
+                if st.session_state.debug_mode:
+                    st.write(f"**Debug**: Query type: {debug_info['query_type']}, DataFrame columns: {list(df.columns)}")
+
+                if "sales invoice details" in query_lower:
+                    total_sales = df['total'].sum()
+                    num_invoices = len(df)
+                    avg_sales = total_sales / num_invoices if num_invoices > 0 else 0
+                    natural_response = f"On {readable_date}, there were **{num_invoices} sales invoices** totaling **₱{total_sales:,.2f}** (average: **₱{avg_sales:,.2f}** per invoice).\n\n"
+                    natural_response += "Invoice details:\n"
+                    for _, row in df.iterrows():
+                        natural_response += f"- **Invoice {row['invoice_id']}**: Processed by {row['first_name']} {row['last_name']} at {row['order_time']}, total **₱{row['total']:,.2f}**. Items: {row['items'].replace(',', '; ')}\n"
+                    natural_response += "\nWould you like more details or to explore another aspect?"
+                    st.markdown("### Sales Invoice Details")
+                    st.markdown(natural_response)
+                elif "average sales value" in query_lower:
                     if 'average_sales_value' in df.columns:
                         avg_sales = float(df['average_sales_value'].iloc[0])
                         natural_response = f"The average sales value on {readable_date} was **₱{avg_sales:,.2f}**. Would you like more details?"
                         st.markdown("### Average Sales Value")
                         st.write(f"**₱{avg_sales:,.2f}**")
+                        if st.session_state.debug_mode:
+                            st.write(f"**Debug**: Calculated average sales value: ₱{avg_sales:,.2f}")
                 elif "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        natural_response = f"The total revenue on {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown?"
+                        natural_response = f"The total revenue for {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
                 elif "base cost" in query_lower:
                     if 'base_cost' in df.columns:
                         base_cost = float(df['base_cost'].iloc[0])
-                        natural_response = f"The base cost on {readable_date} was **₱{base_cost:,.2f}**. Would you like more details?"
+                        natural_response = f"The base cost for {readable_date} was **₱{base_cost:,.2f}**. Would you like more details?"
                         st.markdown("### Base Cost")
                         st.write(f"**₱{base_cost:,.2f}**")
-                elif "profit" in query_lower:
+                elif "profit" in query_lower and not re.search(r'\bprofit margin\b', query_lower):
                     if 'profit' in df.columns:
                         profit = float(df['profit'].iloc[0])
-                        natural_response = f"The profit on {readable_date} was **₱{profit:,.2f}**. Would you like more details?"
+                        natural_response = f"The profit for {readable_date} was **₱{profit:,.2f}**. Would you like more details?"
                         st.markdown("### Profit")
                         st.write(f"**₱{profit:,.2f}**")
                         st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
-                elif "profit margin" in query_lower:
+                elif re.search(r'\bprofit margin\b', query_lower):
                     if 'profit_margin' in df.columns:
                         profit_margin = float(df['profit_margin'].iloc[0])
-                        natural_response = f"The profit margin on {readable_date} was **{profit_margin:.2f}%**. Would you like more details?"
+                        natural_response = f"The profit margin for {readable_date} was **{profit_margin:.2f}%**. Would you like more details?"
                         st.markdown("### Profit Margin")
                         st.write(f"**{profit_margin:.2f}%**")
+                    else:
+                        raise ValueError("Profit margin column missing in query result")
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
@@ -404,7 +487,7 @@ def display_chat_history():
 # Clear chat history
 def clear_chat():
     st.session_state.chat_history = [
-        AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
+        AIMessage(content="Hello! I'm AcaSquad AI. Ask me about your SCC School Store.")
     ]
     st.success("Chat history cleared. Starting a new conversation!")
 
