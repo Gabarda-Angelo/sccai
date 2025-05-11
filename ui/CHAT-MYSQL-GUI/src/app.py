@@ -38,123 +38,119 @@ class AISQLAgent:
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
+        # Extract date from user query (e.g., "May 3, 2025" -> '2025-05-03')
         date_pattern = r'on (\w+ \d{1,2}, \d{4})'
         match = re.search(date_pattern, user_query.lower())
         if match:
             specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
         else:
-            specific_date = current_sg_date
+            specific_date = current_sg_date  # Default to current date if not specified
 
-        query_lower = user_query.lower()
-        if "sales invoice details" in query_lower:
-            sql_query = f"""
-            SELECT i.invoice_id, e.first_name, e.last_name, i.order_time, i.total,
-                   GROUP_CONCAT(CONCAT(id.quantity, ' ', p.product_name, ' (₱', id.unit_price, ')')) AS items
-            FROM invoices i
-            JOIN employees e ON i.employee_id = e.employee_id
-            JOIN invoice_details id ON i.invoice_id = id.invoice_id
-            JOIN products p ON id.product_id = p.product_id
-            WHERE i.order_date = '{specific_date}'
-            GROUP BY i.invoice_id, e.first_name, e.last_name, i.order_time, i.total;
-            """
-        elif "average sales value" in query_lower:
-            sql_query = f"""
-            SELECT AVG(total) AS average_sales_value
-            FROM invoices
-            WHERE order_date = '{specific_date}';
-            """
-        elif "total revenue" in query_lower:
-            sql_query = f"""
-            SELECT SUM(total) AS total_revenue
-            FROM invoices
-            WHERE order_date = '{specific_date}';
-            """
-        elif "base cost" in query_lower:
-            sql_query = f"""
-            SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS base_cost
-            FROM invoice_details id
-            JOIN invoices i ON id.invoice_id = i.invoice_id
-            JOIN products p ON id.product_id = p.product_id
-            WHERE i.order_date = '{specific_date}';
-            """
-        elif "profit" in query_lower and not re.search(r'\bprofit margin\b', query_lower):
-            sql_query = f"""
-            SELECT (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
-                   COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
-                             FROM invoice_details id 
-                             JOIN invoices i ON id.invoice_id = i.invoice_id 
-                             JOIN products p ON id.product_id = p.product_id 
-                             WHERE i.order_date = '{specific_date}'), 0) AS profit;
-            """
-        elif re.search(r'\bprofit margin\b', query_lower):
-            sql_query = f"""
-            SELECT 
-                CASE 
-                    WHEN (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') = 0 THEN 0 
-                    ELSE ((SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
-                          COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
-                                    FROM invoice_details id 
-                                    JOIN invoices i ON id.invoice_id = i.invoice_id 
-                                    JOIN products p ON id.product_id = p.product_id 
-                                    WHERE i.order_date = '{specific_date}'), 0)) / 
-                         (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') * 100 
-                END AS profit_margin;
-            """
+        template = """
+        You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
+
+        **Database Schema:**
+        {schema}
+
+        **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
+        **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
+
+        **Conversation History:** {chat_history}
+
+        **Instructions:**
+        - Generate SQL queries valid for MariaDB 10.6.21, optimized for performance.
+        - Use 'today' as '{current_sg_date}' for daily queries unless a specific date is provided.
+        - For datetime filtering, use CONCAT(i.order_date, ' ', i.order_time) for invoices.
+        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
+        - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
+        - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
+        - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
+        - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
+        - For total revenue on a specific date:
+          SELECT SUM(total) AS total_revenue
+          FROM invoices
+          WHERE order_date = '{specific_date}';
+        - For total cost on a specific date:
+          SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
+          FROM invoice_details id
+          JOIN invoices i ON id.invoice_id = i.invoice_id
+          JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '{specific_date}';
+        - For profit on a specific date:
+          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '{specific_date}';
+        - Example: For the question "what is the total profit on May 3, 2025?", generate:
+          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '2025-05-03';
+        - For combined financial metrics on a specific date:
+          SELECT 
+              SUM(i.total) AS total_revenue,
+              COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost,
+              SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
+          FROM invoices i
+          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
+          LEFT JOIN products p ON id.product_id = p.product_id
+          WHERE i.order_date = '{specific_date}';
+        - For best-selling products:
+          SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
+          FROM invoice_details id
+          INNER JOIN products p ON id.product_id = p.product_id
+          INNER JOIN invoices i ON id.invoice_id = i.invoice_id
+          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
+          GROUP BY p.product_id, p.product_name
+          ORDER BY total_sold DESC, p.product_id ASC
+          LIMIT 10;
+        - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
+        - For time periods:
+          - Today: WHERE i.order_date = '{current_sg_date}'
+          - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
+          - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
+          - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
+        - For low stock:
+          SELECT product_name, stock, reorder_level
+          FROM products
+          WHERE stock <= reorder_level;
+        - Ensure calculations (e.g., SUM, AVG) are accurate, handling edge cases like division by zero.
+        - Optimize with LIMIT for large datasets and use indexes where possible.
+        - Return only the SQL query, no explanations, no markdown, no backticks.
+
+        **User Question:** {question}
+        """
+        if product_name:
+            template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, specific_date=specific_date, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
         else:
-            template = """
-            You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
-
-            **Database Schema:**
-            {schema}
-
-            **Current date in Singapore:** {current_sg_date} (YYYY-MM-DD)
-            **Current datetime in Singapore:** {current_sg_datetime} (YYYY-MM-DD HH:MM:SS)
-
-            **Conversation History:** {chat_history}
-
-            **Instructions:**
-            - Generate SQL queries valid for MariaDB 10.6.21, optimized for performance.
-            - Use 'today' as '{current_sg_date}' for daily queries unless a specific date is provided.
-            - For datetime filtering, use CONCAT(i.order_date, ' ', i.order_time) for invoices.
-            - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
-            - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
-            - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
-            - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
-            - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
-            - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%'.
-            - Ensure calculations (e.g., SUM, AVG) are accurate, handling edge cases like division by zero.
-            - Return only the SQL query, no explanations, no markdown, no backticks.
-
-            **User Question:** {question}
-            """
-            if product_name:
-                template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, specific_date=specific_date, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
+            template = template.replace("%{product_name}%", "%")  # Remove product filter if not provided
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.llm | StrOutputParser()
+        try:
+            raw_response = chain.invoke({
+                "question": user_query,
+                "chat_history": " ".join([msg.content for msg in chat_history[-10:]]),
+                "schema": self.schema,
+                "current_sg_date": current_sg_date,
+                "current_sg_datetime": current_sg_datetime,
+                "specific_date": specific_date
+            })
+            sql_query_match = re.search(r'(?is)(SELECT.*?;)', raw_response)
+            if sql_query_match:
+                sql_query = sql_query_match.group(1).strip()
             else:
-                template = template.replace("%{product_name}%", "%")
-            prompt = ChatPromptTemplate.from_template(template)
-            chain = prompt | self.llm | StrOutputParser()
-            try:
-                raw_response = chain.invoke({
-                    "question": user_query,
-                    "chat_history": " ".join([msg.content for msg in chat_history[-10:]]),
-                    "schema": self.schema,
-                    "current_sg_date": current_sg_date,
-                    "current_sg_datetime": current_sg_datetime,
-                    "specific_date": specific_date
-                })
-                sql_query_match = re.search(r'(?is)(SELECT.*?;)', raw_response)
-                if sql_query_match:
-                    sql_query = sql_query_match.group(1).strip()
-                else:
-                    raise ValueError("No SQL query found in the response")
-                if not sql_query.endswith(";"):
-                    sql_query += ";"
-                if sql_query.count("SELECT") > 3:
-                    raise ValueError("Query too complex: Too many subqueries")
-            except Exception as e:
-                logging.error(f"SQL generation error: {str(e)}")
-                raise ValueError(f"Failed to generate SQL query: {str(e)}")
-        return sql_query, "", specific_date
+                raise ValueError("No SQL query found in the response")
+            if not sql_query.endswith(";"):
+                sql_query += ";"
+            if sql_query.count("SELECT") > 3:
+                raise ValueError("Query too complex: Too many subqueries")
+            return sql_query, raw_response, specific_date
+        except Exception as e:
+            logging.error(f"SQL generation error: {str(e)}")
+            raise ValueError(f"Failed to generate SQL query: {str(e)}")
 
     def validate_query(self, query):
         query_upper = query.upper().strip()
@@ -178,6 +174,17 @@ class AISQLAgent:
         for alias, table in table_alias_map.items():
             if table not in [t.upper() for t in self.allowed_tables.keys()]:
                 raise ValueError(f"Unauthorized table: {table}")
+        select_part = query_upper.split("FROM")[0].replace("SELECT", "").strip()
+        columns = [col.strip() for col in select_part.split(",")]
+        for col in columns:
+            if col.startswith("(") or " AS " in col or any(func in col for func in ["SUM(", "COUNT(", "ROUND(", "COALESCE("]):
+                continue
+            if "." in col:
+                table_alias, col_name = col.split(".")
+                if table_alias in table_alias_map:
+                    table_name = table_alias_map[table_alias].lower()
+                    if table_name in self.allowed_tables and col_name.upper() not in [c.upper() for c in self.allowed_tables[table_name]]:
+                        raise ValueError(f"Unauthorized column: {col_name} in table {table_name}")
         if any(kw in query_upper for kw in ["DROP", "ALTER", "TRUNCATE", "INSERT", "UPDATE", "DELETE"]):
             raise ValueError("Query contains prohibited keywords")
         return True
@@ -210,10 +217,10 @@ class AISQLAgent:
         **Guidelines:**
         - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try a different question."
         - Highlight key insights with **bold**.
-        - Use ₱ for currency, % for percentages.
+        - Use - for lists, ₱ for currency, % for percentages.
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - Parse JSON fields into readable format.
-        - Ensure calculations match the data exactly.
+        - Ensure calculations match the data exactly (e.g., revenue, profit).
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
@@ -234,6 +241,7 @@ class AISQLAgent:
             logging.error(f"Response generation error: {str(e)}")
             return f"Error generating response: {str(e)}. Please try again."
 
+# Handle user query with enhanced error handling and data presentation
 def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
@@ -282,53 +290,33 @@ def handle_query(query: str, agent: AISQLAgent):
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
-                readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
 
-                if "sales invoice details" in query_lower:
-                    total_sales = df['total'].sum()
-                    num_invoices = len(df)
-                    avg_sales = total_sales / num_invoices if num_invoices > 0 else 0
-                    natural_response = f"On {readable_date}, there were **{num_invoices} sales invoices** totaling **₱{total_sales:,.2f}** (average: **₱{avg_sales:,.2f}** per invoice).\n\n"
-                    natural_response += "Invoice details:\n"
-                    for _, row in df.iterrows():
-                        natural_response += f"- **Invoice {row['invoice_id']}**: Processed by {row['first_name']} {row['last_name']} at {row['order_time']}, total **₱{row['total']:,.2f}**. Items: {row['items'].replace(',', '; ')}\n"
-                    natural_response += "\nWould you like more details or to explore another aspect?"
-                    st.markdown("### Sales Invoice Details")
-                    st.markdown(natural_response)
-                elif "average sales value" in query_lower:
-                    if 'average_sales_value' in df.columns:
-                        avg_sales = float(df['average_sales_value'].iloc[0])
-                        natural_response = f"The average sales value on {readable_date} was **₱{avg_sales:,.2f}**. Would you like more details?"
-                        st.markdown("### Average Sales Value")
-                        st.write(f"**₱{avg_sales:,.2f}**")
-                        if st.session_state.debug_mode:
-                            st.write(f"**Debug**: Calculated average sales value: ₱{avg_sales:,.2f}")
+                if "total revenue" in query_lower and "profit" in query_lower:
+                    if 'total_revenue' in df.columns and 'profit' in df.columns:
+                        total_revenue = float(df['total_revenue'].iloc[0])
+                        profit = float(df['profit'].iloc[0])
+                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                        natural_response = f"For {readable_date}, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
+                        st.markdown("### Financial Summary")
+                        st.write(f"**Total Revenue**: ₱{total_revenue:,.2f}")
+                        st.write(f"**Profit**: ₱{profit:,.2f}")
+                        st.download_button("Download Financial Data", df.to_csv(index=False), "financial_data.csv")
                 elif "total revenue" in query_lower:
                     if 'total_revenue' in df.columns:
                         total_revenue = float(df['total_revenue'].iloc[0])
-                        natural_response = f"The total revenue on {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown?"
+                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                        natural_response = f"The total revenue on {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
                         st.markdown("### Total Revenue")
                         st.write(f"**₱{total_revenue:,.2f}**")
                         st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
-                elif "base cost" in query_lower:
-                    if 'base_cost' in df.columns:
-                        base_cost = float(df['base_cost'].iloc[0])
-                        natural_response = f"The base cost on {readable_date} was **₱{base_cost:,.2f}**. Would you like more details?"
-                        st.markdown("### Base Cost")
-                        st.write(f"**₱{base_cost:,.2f}**")
-                elif "profit" in query_lower and not re.search(r'\bprofit margin\b', query_lower):
+                elif "profit" in query_lower:
                     if 'profit' in df.columns:
                         profit = float(df['profit'].iloc[0])
-                        natural_response = f"The profit on {readable_date} was **₱{profit:,.2f}**. Would you like more details?"
+                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                        natural_response = f"The profit on {readable_date} was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
                         st.markdown("### Profit")
                         st.write(f"**₱{profit:,.2f}**")
                         st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
-                elif re.search(r'\bprofit margin\b', query_lower):
-                    if 'profit_margin' in df.columns:
-                        profit_margin = float(df['profit_margin'].iloc[0])
-                        natural_response = f"The profit margin on {readable_date} was **{profit_margin:.2f}%**. Would you like more details?"
-                        st.markdown("### Profit Margin")
-                        st.write(f"**{profit_margin:.2f}%**")
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
@@ -503,7 +491,7 @@ def main():
                         "What is the daily sales trend for this month?",
                         "What is the revenue trend compared to last month?",
                         "What are the top 5 products by revenue this week?",
-                        "What is the average sales value this month?"
+                        "What is the average transaction value this month?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
@@ -534,11 +522,13 @@ def main():
                             handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
-                        "What is the average sales value on May 3, 2025?",
-                        "What is the total revenue on May 3, 2025?",
-                        "What is the base cost on May 3, 2025?",
-                        "What is the profit on May 3, 2025?",
-                        "What is the profit margin on May 3, 2025?"
+                        "What are the admin overview metrics for this month?",
+                        "What is the total amount due from unpaid invoices?",
+                        "What is the total discount given this month?",
+                        "What is the profit margin for SCC SHIRT this year?",
+                        "What is the highest revenue day this month?",
+                        "What is the total profit for this month?",
+                        "What is the breakdown of payment types this month?"
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
