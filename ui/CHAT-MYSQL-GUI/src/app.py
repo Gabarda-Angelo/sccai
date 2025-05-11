@@ -79,13 +79,15 @@ class AISQLAgent:
             sql_query = f"""
             SELECT 
                 CASE 
-                    WHEN SUM(i.total) = 0 THEN 0 
-                    ELSE (SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0)) / SUM(i.total) * 100 
-                END AS profit_margin
-            FROM invoices i
-            LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-            LEFT JOIN products p ON id.product_id = p.product_id
-            WHERE i.order_date = '{specific_date}';
+                    WHEN (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') = 0 THEN 0 
+                    ELSE ((SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') - 
+                          COALESCE((SELECT SUM(id.quantity * p.purchase_price) 
+                                    FROM invoice_details id 
+                                    JOIN invoices i ON id.invoice_id = i.invoice_id 
+                                    JOIN products p ON id.product_id = p.product_id 
+                                    WHERE i.order_date = '{specific_date}'), 0)) / 
+                         (SELECT SUM(total) FROM invoices WHERE order_date = '{specific_date}') * 100 
+                END AS profit_margin;
             """
         else:
             template = """
