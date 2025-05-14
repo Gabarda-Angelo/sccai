@@ -61,7 +61,7 @@ class AISQLAgent:
         - Generate SQL queries valid for MariaDB 10.6.21, optimized for performance.
         - Use 'today' as '{current_sg_date}' for daily queries unless a specific date is provided.
         - For datetime filtering, use CONCAT(i.order_date, ' ', i.order_time) for invoices.
-        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons Kalki2898AD (2024).mkv.
+        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
         - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
         - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
         - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
@@ -135,7 +135,7 @@ class AISQLAgent:
           - Today: WHERE i.order_date = '{current_sg_date}'
           - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
           - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
-          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 CENTER)
           - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
         - For low stock:
           SELECT product_name, stock, reorder_level
