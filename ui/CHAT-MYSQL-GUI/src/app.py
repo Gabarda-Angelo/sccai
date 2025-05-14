@@ -61,7 +61,7 @@ class AISQLAgent:
         - Generate SQL queries valid for MariaDB 10.6.21, optimized for performance.
         - Use 'today' as '{current_sg_date}' for daily queries unless a specific date is provided.
         - For datetime filtering, use CONCAT(i.order_date, ' ', i.order_time) for invoices.
-        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons.
+        - For date ranges, use BETWEEN 'start_date' AND 'end_date' or explicit comparisons Kalki2898AD (2024).mkv.
         - Handle NULL values with COALESCE (e.g., COALESCE(p.purchase_price, 0)).
         - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
         - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
@@ -445,6 +445,7 @@ def clear_chat():
         AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
     ]
     st.success("Chat history cleared. Starting a new conversation!")
+    st.rerun()
 
 # Main application
 def main():
@@ -507,7 +508,6 @@ def main():
                     st.rerun()
                 if st.button("Clear Chat"):
                     clear_chat()
-                    st.rerun()
                 with st.expander("📈 Sales Performance", expanded=True):
                     queries = [
                         "What are the best-selling products this month?",
