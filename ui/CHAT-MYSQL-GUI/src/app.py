@@ -76,13 +76,13 @@ class AISQLAgent:
           JOIN invoices i ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
-        - For profit on a specific date:
+        - For profit on a '{specific_date}':
           SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
           FROM invoices i
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
-        - Example: For a question like "what is the total profit on a specific date?", use the following format, substituting the desired date in place of '<DATE>': generate:
+        - Example: For a question like "what is the total profit on a '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>': generate:
                     SELECT 
             (SELECT SUM(total) FROM invoices WHERE order_date = '<DATE>') - 
             COALESCE(
@@ -93,7 +93,7 @@ class AISQLAgent:
                 WHERE i.order_date = '<DATE>'), 
                 0
             ) AS profit;
-        -Example: For a question like "what is the total profit margin on a specific date?", use the following format, substituting the desired date in place of '<DATE>':
+        -Example: For a question like "what is the total profit margin on '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>':
             SELECT 
                 CASE 
                     WHEN SUM(total) > 0 
@@ -112,7 +112,7 @@ class AISQLAgent:
             FROM invoices
             WHERE order_date = '<DATE>';
 
-        - For combined financial metrics on a specific date:
+        - For combined financial metrics on a '{specific_date}':
           SELECT 
               SUM(i.total) AS total_revenue,
               COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost,
@@ -241,8 +241,10 @@ class AISQLAgent:
         **Guidelines:**
         - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try a different question."
         - Highlight key insights with **bold**.
-        - Use - for lists, ₱ for currency, % for percentages.
+        - Use - for lists, ₱ for currency, % for percentages. 
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
+        - There should be no customer name data included; only the employee's name should be provided in the output response.
+        - The row number should always start from 1, not 0.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
         - Keep concise (<250 words).
