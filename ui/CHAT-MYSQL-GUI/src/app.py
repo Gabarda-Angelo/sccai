@@ -135,7 +135,7 @@ class AISQLAgent:
           - Today: WHERE i.order_date = '{current_sg_date}'
           - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
           - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
-          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 CENTER)
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
           - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
         - For low stock:
           SELECT product_name, stock, reorder_level
@@ -251,6 +251,55 @@ class AISQLAgent:
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
+        query_lower = user_query.lower()
+        
+        # Handle invoice details queries
+        if "sales invoice details" in query_lower and data and isinstance(data, list) and 'invoice_id' in data[0]:
+            try:
+                # Extract date from query
+                date_pattern = r'on (\w+ \d{1,2}, \d{4})'
+                match = re.search(date_pattern, query_lower)
+                date_str = match.group(1) if match else "the specified date"
+
+                # Group data by invoice_id
+                invoice_totals = {}
+                for row in data:
+                    invoice_id = row['invoice_id']
+                    if invoice_id not in invoice_totals:
+                        invoice_totals[invoice_id] = {
+                            'total': float(row['total']),
+                            'subtotal': float(row['subtotal']),
+                            'discount': float(row['discount']),
+                            'items': []
+                        }
+                    invoice_totals[invoice_id]['items'].append({
+                        'product_name': row['product_name'],
+                        'quantity': int(row['quantity']),
+                        'unit_price': float(row['unit_price']),
+                        'total_price': float(row['total_price'])
+                    })
+
+                # Calculate total revenue
+                total_revenue = sum(invoice['total'] for invoice in invoice_totals.values())
+                
+                # Generate response
+                response = f"Sales Invoice Details on {date_str}\n\n"
+                response += f"On {date_str}, there were **{len(invoice_totals)}** sales invoices with a total revenue of **₱{total_revenue:,.2f}**.\n\n"
+                response += "Here are the details of each invoice:\n\n"
+                
+                for invoice_id, invoice in invoice_totals.items():
+                    response += f"**Invoice {invoice_id}**:\n"
+                    for item in invoice['items']:
+                        response += f"- {item['product_name']} ({item['quantity']} unit{'s' if item['quantity'] != 1 else ''}, ₱{item['unit_price']:,.2f} each) = ₱{item['total_price']:,.2f}\n"
+                    response += f"Subtotal: ₱{invoice['subtotal']:,.2f}, Discount: ₱{invoice['discount']:,.2f}, Total: ₱{invoice['total']:,.2f}\n\n"
+                
+                response += "Would you like more details or to explore another aspect?"
+                return response
+            except Exception as e:
+                logging.error(f"Invoice details response generation error: {str(e)}")
+                return f"Error processing invoice details: {str(e)}. Please try again."
+        
+        # Fallback to original LLM-based response for other queries
         chain = (
             RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
             | ChatPromptTemplate.from_template(response_template)
