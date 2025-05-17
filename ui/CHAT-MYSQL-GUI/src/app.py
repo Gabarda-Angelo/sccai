@@ -70,7 +70,7 @@ class AISQLAgent:
           SELECT SUM(total) AS total_revenue
           FROM invoices
           WHERE order_date = '{specific_date}';
-        - For total cost on a specific date:
+        - For total cost on a '{specific_date}':
           SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
           FROM invoice_details id
           JOIN invoices i ON id.invoice_id = i.invoice_id
@@ -240,6 +240,7 @@ class AISQLAgent:
 
         **Guidelines:**
         - If empty results, suggest: "No data found. This may be due to missing records or an invalid time frame. Try a different question."
+        - The key insights query calculations should be derived from the database schema or SQL schema template.
         - Highlight key insights with **bold**.
         - Use - for lists, ₱ for currency, % for percentages. 
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
