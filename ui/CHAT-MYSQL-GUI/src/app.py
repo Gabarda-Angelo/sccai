@@ -38,13 +38,12 @@ class AISQLAgent:
         self.llm = ChatGroq(model="llama3-70b-8192", temperature=0, api_key=self.groq_api_key)
 
     def generate_sql_query(self, user_query, chat_history, current_sg_date, current_sg_datetime, product_name=None):
-        # Extract date from user query (e.g., "May 3, 2025" -> '2025-05-03')
         date_pattern = r'on (\w+ \d{1,2}, \d{4})'
         match = re.search(date_pattern, user_query.lower())
         if match:
             specific_date = datetime.datetime.strptime(match.group(1), '%B %d, %Y').strftime('%Y-%m-%d')
         else:
-            specific_date = current_sg_date  # Default to current date if not specified
+            specific_date = current_sg_date
 
         template = """
         You are an AI SQL Agent for the SCC School Store Database, generating precise SQL queries for MariaDB 10.6.21.
@@ -78,7 +77,7 @@ class AISQLAgent:
           JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
 
-        - For profit on a '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>': generate:
+        - For profit on a '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>':
                     SELECT 
             (SELECT SUM(total) FROM invoices WHERE order_date = '<DATE>') - 
             COALESCE(
@@ -158,7 +157,7 @@ class AISQLAgent:
         if product_name:
             template = template.format(product_name=product_name, current_sg_date=current_sg_date, current_sg_datetime=current_sg_datetime, specific_date=specific_date, schema=self.schema, chat_history=" ".join([msg.content for msg in chat_history[-10:]]), question=user_query)
         else:
-            template = template.replace("%{product_name}%", "%")  # Remove product filter if not provided
+            template = template.replace("%{product_name}%", "%")
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.llm | StrOutputParser()
         try:
@@ -534,6 +533,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
+                            logging.info(f"Button clicked for query: {q}")
                             handle_query(q, agent)
                 with st.expander("📦 Inventory Management"):
                     queries = [
@@ -547,6 +547,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"inv_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
+                            logging.info(f"Button clicked for query: {q}")
                             handle_query(q, agent)
                 with st.expander("👥 Employee Performance"):
                     queries = [
@@ -560,6 +561,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"emp_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
+                            logging.info(f"Button clicked for query: {q}")
                             handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
@@ -574,14 +576,23 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
+                            logging.info(f"Button clicked for query: {q}")
                             handle_query(q, agent)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
                 st.session_state.selected_query = ""
                 handle_query(user_query, agent)
-            # Display the selected query as a placeholder in the chat input field
             st.markdown(f"**Selected Query:** {st.session_state.selected_query if st.session_state.selected_query else 'None'}")
+            if st.session_state.debug_mode:
+                with st.expander("Debug Logs", expanded=False):
+                    import os
+                    log_file = "app.log"
+                    if os.path.exists(log_file):
+                        with open(log_file, 'r') as f:
+                            st.text(f.read())
+                    else:
+                        st.write("No logs available yet.")
         else:
             st.error("Access restricted. Please contact an Admin.")
             if st.button("Logout"):
