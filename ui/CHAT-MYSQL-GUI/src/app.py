@@ -535,6 +535,13 @@ def main():
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
                             handle_query(q, agent)
+                            # Inject JavaScript to set the chat input value
+                            js_code = f"""
+                            <script>
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            </script>
+                            """
+                            components.html(js_code, height=0)
                 with st.expander("📦 Inventory Management"):
                     queries = [
                         "Which products are below the reorder level?",
@@ -548,6 +555,13 @@ def main():
                         if st.button(q, key=f"inv_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
                             handle_query(q, agent)
+                            # Inject JavaScript to set the chat input value
+                            js_code = f"""
+                            <script>
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            </script>
+                            """
+                            components.html(js_code, height=0)
                 with st.expander("👥 Employee Performance"):
                     queries = [
                         "Who is currently logged in?",
@@ -561,6 +575,13 @@ def main():
                         if st.button(q, key=f"emp_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
                             handle_query(q, agent)
+                            # Inject JavaScript to set the chat input value
+                            js_code = f"""
+                            <script>
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            </script>
+                            """
+                            components.html(js_code, height=0)
                 with st.expander("💰 Financial Insights"):
                     queries = [
                         "What are the admin overview metrics for this month?",
@@ -575,10 +596,24 @@ def main():
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
                             handle_query(q, agent)
+                            # Inject JavaScript to set the chat input value
+                            js_code = f"""
+                            <script>
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            </script>
+                            """
+                            components.html(js_code, height=0)
             display_chat_history()
-            user_query = st.chat_input("Ask about sales, inventory, employees, or financials...", value=st.session_state.selected_query)
+            user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
                 st.session_state.selected_query = ""  # Clear the selected query after submission
+                # Clear the chat input field using JavaScript
+                js_code = """
+                <script>
+                document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "";
+                </script>
+                """
+                components.html(js_code, height=0)
                 handle_query(user_query, agent)
         else:
             st.error("Access restricted. Please contact an Admin.")
