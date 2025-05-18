@@ -66,23 +66,19 @@ class AISQLAgent:
         - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
         - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
         - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
-        - For total revenue on a specific date:
+         - For total revenue on a '{specific_date}':
           SELECT SUM(total) AS total_revenue
           FROM invoices
           WHERE order_date = '{specific_date}';
+
         - For total cost on a '{specific_date}':
           SELECT COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost
           FROM invoice_details id
           JOIN invoices i ON id.invoice_id = i.invoice_id
           JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
-        - For profit on a '{specific_date}':
-          SELECT SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
-        - Example: For a question like "what is the total profit on a '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>': generate:
+
+        - For profit on a '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>': generate:
                     SELECT 
             (SELECT SUM(total) FROM invoices WHERE order_date = '<DATE>') - 
             COALESCE(
@@ -93,7 +89,7 @@ class AISQLAgent:
                 WHERE i.order_date = '<DATE>'), 
                 0
             ) AS profit;
-        -Example: For a question like "what is the total profit margin on '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>':
+        - For profit margin on '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>':
             SELECT 
                 CASE 
                     WHEN SUM(total) > 0 
@@ -112,6 +108,17 @@ class AISQLAgent:
             FROM invoices
             WHERE order_date = '<DATE>';
 
+        
+        - For best-selling products:
+          SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
+          FROM invoice_details id
+          INNER JOIN products p ON id.product_id = p.product_id
+          INNER JOIN invoices i ON id.invoice_id = i.invoice_id
+          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
+          GROUP BY p.product_id, p.product_name
+          ORDER BY total_sold DESC, p.product_id ASC
+          LIMIT 10;  
+        
         - For combined financial metrics on a '{specific_date}':
           SELECT 
               SUM(i.total) AS total_revenue,
@@ -121,15 +128,6 @@ class AISQLAgent:
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
-        - For best-selling products:
-          SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
-          FROM invoice_details id
-          INNER JOIN products p ON id.product_id = p.product_id
-          INNER JOIN invoices i ON id.invoice_id = i.invoice_id
-          WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
-          GROUP BY p.product_id, p.product_name
-          ORDER BY total_sold DESC, p.product_id ASC
-          LIMIT 10;
         - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
         - For time periods:
           - Today: WHERE i.order_date = '{current_sg_date}'
