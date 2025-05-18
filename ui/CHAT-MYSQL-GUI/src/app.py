@@ -120,14 +120,23 @@ class AISQLAgent:
           LIMIT 10;  
         
         - For combined financial metrics on a '{specific_date}':
-          SELECT 
-              SUM(i.total) AS total_revenue,
-              COALESCE(SUM(id.quantity * p.purchase_price), 0) AS total_cost,
-              SUM(i.total) - COALESCE(SUM(id.quantity * p.purchase_price), 0) AS profit
-          FROM invoices i
-          LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
-          LEFT JOIN products p ON id.product_id = p.product_id
-          WHERE i.order_date = '{specific_date}';
+            SELECT 
+                SUM(i.total) AS total_revenue,
+                COALESCE(SUM(costs.invoice_cost), 0) AS total_cost,
+                SUM(i.total) - COALESCE(SUM(costs.invoice_cost), 0) AS profit,
+                CASE 
+                    WHEN SUM(i.total) > 0 
+                    THEN ROUND(((SUM(i.total) - COALESCE(SUM(costs.invoice_cost), 0)) / SUM(i.total) * 100), 1)
+                    ELSE 0 
+                END AS profit_margin
+            FROM invoices i
+            LEFT JOIN (
+                SELECT id.invoice_id, SUM(id.quantity * p.purchase_price) AS invoice_cost
+                FROM invoice_details id
+                JOIN products p ON id.product_id = p.product_id
+                GROUP BY id.invoice_id
+            ) AS costs ON i.invoice_id = costs.invoice_id
+            WHERE i.order_date = '{specific_date}';
 
         - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
         - For time periods:
