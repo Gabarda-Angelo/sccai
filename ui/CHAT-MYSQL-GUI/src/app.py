@@ -457,7 +457,6 @@ def clear_chat():
     st.session_state.chat_history = [
         AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
     ]
-    st.session_state.selected_query = ""  # Reset selected query on chat clear
     st.success("Chat history cleared. Starting a new conversation!")
     st.rerun()
 
@@ -538,7 +537,7 @@ def main():
                             # Inject JavaScript to set the chat input value
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
                             </script>
                             """
                             components.html(js_code, height=0)
@@ -558,7 +557,7 @@ def main():
                             # Inject JavaScript to set the chat input value
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
                             </script>
                             """
                             components.html(js_code, height=0)
@@ -578,7 +577,7 @@ def main():
                             # Inject JavaScript to set the chat input value
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
                             </script>
                             """
                             components.html(js_code, height=0)
@@ -599,21 +598,13 @@ def main():
                             # Inject JavaScript to set the chat input value
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q}";
+                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
                             </script>
                             """
                             components.html(js_code, height=0)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
-                st.session_state.selected_query = ""  # Clear the selected query after submission
-                # Clear the chat input field using JavaScript
-                js_code = """
-                <script>
-                document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "";
-                </script>
-                """
-                components.html(js_code, height=0)
                 handle_query(user_query, agent)
         else:
             st.error("Access restricted. Please contact an Admin.")
