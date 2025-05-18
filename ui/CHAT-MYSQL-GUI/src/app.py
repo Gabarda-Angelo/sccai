@@ -286,7 +286,63 @@ class AISQLAgent:
             logging.error(f"Response generation error: {str(e)}")
             return f"Error generating response: {str(e)}. Please try again."
 
-# Handle user query with enhanced error handling and data presentation
+# Helper function to generate visualizations
+def generate_visualization(df, query_lower, specific_date):
+    if df.empty:
+        return
+    plt.figure(figsize=(10, 6))
+    
+    # Best-selling products or top products by revenue (bar chart)
+    if "best-selling" in query_lower or "top" in query_lower or "products" in query_lower:
+        if 'product_name' in df.columns and ('total_sold' in df.columns or 'total_revenue' in df.columns):
+            x = df['product_name']
+            y_col = 'total_sold' if 'total_sold' in df.columns else 'total_revenue'
+            y = df[y_col].astype(float)
+            plt.bar(x, y, color='skyblue')
+            plt.xlabel('Product Name')
+            plt.ylabel('Quantity Sold' if y_col == 'total_sold' else 'Revenue (₱)')
+            plt.title('Best-Selling Products' if 'best-selling' in query_lower else 'Top Products by Revenue')
+            plt.xticks(rotation=45, ha='right')
+            if y_col == 'total_revenue':
+                plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'₱{x:,.2f}'))
+    
+    # Sales or revenue trend (line chart)
+    elif "trend" in query_lower or "daily" in query_lower:
+        if 'order_date' in df.columns and 'total_revenue' in df.columns:
+            df['order_date'] = pd.to_datetime(df['order_date'])
+            df = df.sort_values('order_date')
+            plt.plot(df['order_date'], df['total_revenue'].astype(float), marker='o', color='teal')
+            plt.xlabel('Date')
+            plt.ylabel('Revenue (₱)')
+            plt.title('Daily Sales Trend' if 'daily' in query_lower else 'Revenue Trend')
+            plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'₱{x:,.2f}'))
+            plt.xticks(rotation=45)
+            plt.grid(True)
+    
+    # Employee performance (bar chart)
+    elif "employee" in query_lower and ('total_sales' in df.columns or 'total_revenue' in df.columns):
+        if 'first_name' in df.columns and ('total_sales' in df.columns or 'total_revenue' in df.columns):
+            df['employee_name'] = df['first_name'] + ' ' + df['last_name']
+            x = df['employee_name']
+            y_col = 'total_sales' if 'total_sales' in df.columns else 'total_revenue'
+            y = df[y_col].astype(float)
+            plt.bar(x, y, color='lightgreen')
+            plt.xlabel('Employee Name')
+            plt.ylabel('Sales (₱)')
+            plt.title('Employee Sales Performance')
+            plt.xticks(rotation=45, ha='right')
+            plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'₱{x:,.2f}'))
+    
+    else:
+        plt.close()
+        return
+    
+    plt.tight_layout()
+    st.markdown("### Visualization")
+    st.pyplot(plt)
+    plt.close()
+
+# Handle user query with enhanced error handling, data presentation, and visualization
 def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
@@ -366,6 +422,8 @@ def handle_query(query: str, agent: AISQLAgent):
                         st.download_button("Download Full Data", df.to_csv(index=False), "full_data.csv")
                     else:
                         st.dataframe(df, use_container_width=True)
+                    # Generate visualization for applicable queries
+                    generate_visualization(df, query_lower, specific_date)
             else:
                 st.warning("No data returned from the query.")
                 natural_response = "No data found. This may be due to missing records or an invalid time frame. Try a different question."
@@ -526,7 +584,7 @@ def main():
             with st.sidebar:
                 st.image("ui/CHAT-MYSQL-GUI/src/img/logo.png", use_container_width=True)
                 st.markdown(f"Logged in as **{st.session_state.user['first_name']} {st.session_state.user['last_name']}** ({st.session_state.user['role']})")
-                st.checkbox("Debug Mode", key="debug_mode", value=st.session_state.debug_mode)
+                st.checkbox(" Bees Mode", key="debug_mode", value=st.session_state.debug_mode)
                 if st.button("Logout"):
                     st.session_state.authenticated = False
                     st.session_state.user = None
