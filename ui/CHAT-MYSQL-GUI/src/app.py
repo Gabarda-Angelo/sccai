@@ -458,6 +458,10 @@ def clear_chat():
     st.success("Chat history cleared. Starting a new conversation!")
     st.rerun()
 
+# Helper function to handle query button clicks
+def handle_query_button(query, agent):
+    handle_query(query, agent)
+
 # Main application
 def main():
     schema = """
@@ -529,10 +533,8 @@ def main():
                         "What is the average transaction value this month?"
                     ]
                     for q in queries:
-                        st.markdown(
-                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
-                            unsafe_allow_html=True
-                        )
+                        if st.button(q, key=f"sales_{q}"):
+                            handle_query_button(q, agent)
                 with st.expander("📦 Inventory Management"):
                     queries = [
                         "Which products are below the reorder level?",
@@ -543,10 +545,8 @@ def main():
                         "Which products have the highest stock levels?"
                     ]
                     for q in queries:
-                        st.markdown(
-                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
-                            unsafe_allow_html=True
-                        )
+                        if st.button(q, key=f"inventory_{q}"):
+                            handle_query_button(q, agent)
                 with st.expander("👥 Employee Performance"):
                     queries = [
                         "Who is currently logged in?",
@@ -557,10 +557,8 @@ def main():
                         "Who processed the most invoices this week?"
                     ]
                     for q in queries:
-                        st.markdown(
-                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
-                            unsafe_allow_html=True
-                        )
+                        if st.button(q, key=f"employee_{q}"):
+                            handle_query_button(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
                         "What are the admin overview metrics for this month?",
@@ -572,10 +570,8 @@ def main():
                         "What is the breakdown of payment types this month?"
                     ]
                     for q in queries:
-                        st.markdown(
-                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
-                            unsafe_allow_html=True
-                        )
+                        if st.button(q, key=f"financial_{q}"):
+                            handle_query_button(q, agent)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
