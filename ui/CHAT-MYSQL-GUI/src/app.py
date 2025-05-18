@@ -530,9 +530,18 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button onclick="const input = parent.document.querySelector('textarea[data-testid=\\'stChatInput\\']'); input.value = {json.dumps(q)}; input.dispatchEvent(new Event('input', {{ bubbles: true }})); input.focus();">{q}</button>''',
+                            f'''<button 
+                                onclick="
+                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
+                                    input.value = {json.dumps(q)};
+                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    input.focus();
+                                ">
+                                {q}
+                            </button>''',
                             unsafe_allow_html=True
                         )
+
 
                 with st.expander("📦 Inventory Management"):
                     queries = [
@@ -545,9 +554,18 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button onclick="const input = parent.document.querySelector('textarea[data-testid=\\'stChatInput\\']'); input.value = {json.dumps(q)}; input.dispatchEvent(new Event('input', {{ bubbles: true }})); input.focus();">{q}</button>''',
+                            f'''<button 
+                                onclick="
+                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
+                                    input.value = {json.dumps(q)};
+                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    input.focus();
+                                ">
+                                {q}
+                            </button>''',
                             unsafe_allow_html=True
                         )
+
 
                 with st.expander("👥 Employee Performance"):
                     queries = [
@@ -560,9 +578,18 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button onclick="const input = parent.document.querySelector('textarea[data-testid=\\'stChatInput\\']'); input.value = {json.dumps(q)}; input.dispatchEvent(new Event('input', {{ bubbles: true }})); input.focus();">{q}</button>''',
+                            f'''<button 
+                                onclick="
+                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
+                                    input.value = {json.dumps(q)};
+                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    input.focus();
+                                ">
+                                {q}
+                            </button>''',
                             unsafe_allow_html=True
                         )
+
 
                 with st.expander("💰 Financial Insights"):
                     queries = [
@@ -576,9 +603,18 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button onclick="const input = parent.document.querySelector('textarea[data-testid=\\'stChatInput\\']'); input.value = {json.dumps(q)}; input.dispatchEvent(new Event('input', {{ bubbles: true }})); input.focus();">{q}</button>''',
+                            f'''<button 
+                                onclick="
+                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
+                                    input.value = {json.dumps(q)};
+                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    input.focus();
+                                ">
+                                {q}
+                            </button>''',
                             unsafe_allow_html=True
                         )
+
 
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
