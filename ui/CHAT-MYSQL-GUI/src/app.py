@@ -276,7 +276,7 @@ class AISQLAgent:
             logging.error(f"Response generation error: {str(e)}")
             return f"Error generating response: {str(e)}. Please try again."
 
-# Handle user query with enhanced error handling and data presentation
+# Handle user query with l enhanced error handling and data presentation
 def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
@@ -322,7 +322,6 @@ def handle_query(query: str, agent: AISQLAgent):
                     st.write(f"**API Status Code**: {debug_info['status_code']}")
                     st.write(f"**API Data**: ```json\n{debug_info['api_data']}\n```")
 
-            
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
@@ -458,7 +457,6 @@ def clear_chat():
     st.session_state.chat_history = [
         AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
     ]
-    st.session_state.selected_query = ""
     st.success("Chat history cleared. Starting a new conversation!")
     st.rerun()
 
@@ -535,7 +533,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Do not call handle_query here to only populate the input field
+                            st.rerun()
                 with st.expander("📦 Inventory Management"):
                     queries = [
                         "Which products are below the reorder level?",
@@ -548,7 +546,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"inv_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Do not call handle_query here to only populate the input field
+                            st.rerun()
                 with st.expander("👥 Employee Performance"):
                     queries = [
                         "Who is currently logged in?",
@@ -561,7 +559,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"emp_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Do not call handle_query here to only populate the input field
+                            st.rerun()
                 with st.expander("💰 Financial Insights"):
                     queries = [
                         "What are the admin overview metrics for this month?",
@@ -575,11 +573,11 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Do not call handle_query here to only populate the input field
+                            st.rerun()
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...", value=st.session_state.selected_query)
+            st.session_state.selected_query = ""  # Reset after populating
             if user_query:
-                st.session_state.selected_query = ""  # Clear the selected query after submission
                 handle_query(user_query, agent)
         else:
             st.error("Access restricted. Please contact an Admin.")
