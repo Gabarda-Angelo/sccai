@@ -530,17 +530,14 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button 
-                                onclick="
-                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
-                                    input.value = {json.dumps(q)};
-                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                    input.focus();
-                                ">
+                            f"""
+                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
                                 {q}
-                            </button>''',
+                            </button>
+                            """,
                             unsafe_allow_html=True
                         )
+
 
 
                 with st.expander("📦 Inventory Management"):
@@ -554,17 +551,14 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button 
-                                onclick="
-                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
-                                    input.value = {json.dumps(q)};
-                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                    input.focus();
-                                ">
+                            f"""
+                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
                                 {q}
-                            </button>''',
+                            </button>
+                            """,
                             unsafe_allow_html=True
                         )
+
 
 
                 with st.expander("👥 Employee Performance"):
@@ -578,17 +572,14 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button 
-                                onclick="
-                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
-                                    input.value = {json.dumps(q)};
-                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                    input.focus();
-                                ">
+                            f"""
+                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
                                 {q}
-                            </button>''',
+                            </button>
+                            """,
                             unsafe_allow_html=True
                         )
+
 
 
                 with st.expander("💰 Financial Insights"):
@@ -603,17 +594,14 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'''<button 
-                                onclick="
-                                    const input = parent.document.querySelector('textarea[data-testid=stChatInput]');
-                                    input.value = {json.dumps(q)};
-                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                    input.focus();
-                                ">
+                            f"""
+                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
                                 {q}
-                            </button>''',
+                            </button>
+                            """,
                             unsafe_allow_html=True
                         )
+
 
 
             display_chat_history()
