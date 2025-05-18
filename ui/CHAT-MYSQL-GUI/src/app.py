@@ -253,7 +253,7 @@ class AISQLAgent:
         - Use - for lists, ₱ for currency, % for percentages. 
         - Format numbers: currency as ₱X,XXX.XX, percentages as XX.XX%.
         - There should be no customer name data included; only the employee's name should be provided in the output response.
-        - The row number should always start from 1, not 0.
+        - The row number should always start from 1, not 0. Use the 'row_number' field in the results, which starts from 1, for any enumeration.
         - Parse JSON fields into readable format.
         - Ensure calculations match the data exactly (e.g., revenue, profit).
         - Keep concise (<250 words).
