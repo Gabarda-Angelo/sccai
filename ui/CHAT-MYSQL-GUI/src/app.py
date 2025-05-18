@@ -535,7 +535,7 @@ def main():
                     clear_chat()
                 with st.expander("📈 Sales Performance", expanded=True):
                     queries = [
-                        "What are the best-selling products this month?",
+                        "What are the best-selling products in our shop?",
                         "What is the total revenue for today?",
                         "What is the daily sales trend for this month?",
                         "What is the revenue trend compared to last month?",
