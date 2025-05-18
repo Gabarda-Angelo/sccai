@@ -418,6 +418,8 @@ if "debug_sql" not in st.session_state:
     st.session_state.debug_sql = st.secrets.get("DEBUG_SQL", "true").lower() == "true"
 if "debug_api" not in st.session_state:
     st.session_state.debug_api = st.secrets.get("DEBUG_API", "true").lower() == "true"
+if "selected_query" not in st.session_state:
+    st.session_state.selected_query = ""
 
 # Authentication function
 def authenticate(email, password):
@@ -455,6 +457,7 @@ def clear_chat():
     st.session_state.chat_history = [
         AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
     ]
+    st.session_state.selected_query = ""  # Reset selected query on chat clear
     st.success("Chat history cleared. Starting a new conversation!")
     st.rerun()
 
@@ -530,6 +533,7 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
+                            st.session_state.selected_query = q
                             handle_query(q, agent)
                 with st.expander("📦 Inventory Management"):
                     queries = [
@@ -542,6 +546,7 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"inv_{uuid.uuid4()}"):
+                            st.session_state.selected_query = q
                             handle_query(q, agent)
                 with st.expander("👥 Employee Performance"):
                     queries = [
@@ -554,6 +559,7 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"emp_{uuid.uuid4()}"):
+                            st.session_state.selected_query = q
                             handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
@@ -567,10 +573,12 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
+                            st.session_state.selected_query = q
                             handle_query(q, agent)
             display_chat_history()
-            user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
+            user_query = st.chat_input("Ask about sales, inventory, employees, or financials...", value=st.session_state.selected_query)
             if user_query:
+                st.session_state.selected_query = ""  # Clear the selected query after submission
                 handle_query(user_query, agent)
         else:
             st.error("Access restricted. Please contact an Admin.")
