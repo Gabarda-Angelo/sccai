@@ -530,16 +530,9 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f"""
-                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
-                                {q}
-                            </button>
-                            """,
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
                             unsafe_allow_html=True
                         )
-
-
-
                 with st.expander("📦 Inventory Management"):
                     queries = [
                         "Which products are below the reorder level?",
@@ -551,16 +544,9 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f"""
-                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
-                                {q}
-                            </button>
-                            """,
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); trunk.value = {json.dumps(q)}; input.focus();">{q}</button>',
                             unsafe_allow_html=True
                         )
-
-
-
                 with st.expander("👥 Employee Performance"):
                     queries = [
                         "Who is currently logged in?",
@@ -572,16 +558,9 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f"""
-                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
-                                {q}
-                            </button>
-                            """,
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
                             unsafe_allow_html=True
                         )
-
-
-
                 with st.expander("💰 Financial Insights"):
                     queries = [
                         "What are the admin overview metrics for this month?",
@@ -594,16 +573,9 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f"""
-                            <button onclick="const input = parent.document.querySelector(&quot;textarea[data-testid=stChatInput]&quot;); input.value = {json.dumps(q)}; input.dispatchEvent(new Event(&quot;input&quot;, {{ bubbles: true }})); input.focus();">
-                                {q}
-                            </button>
-                            """,
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
                             unsafe_allow_html=True
                         )
-
-
-
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
