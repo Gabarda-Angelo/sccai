@@ -534,16 +534,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Inject JavaScript to set the chat input value and simulate Enter key press
-                            js_code = f"""
-                            <script>
-                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
-                            input.value = "{q.replace('"', '\\"')}";
-                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
-                            input.dispatchEvent(event);
-                            </script>
-                            """
-                            components.html(js_code, height=0)
+                            handle_query(q, agent)
                 with st.expander("📦 Inventory Management"):
                     queries = [
                         "Which products are below the reorder level?",
@@ -556,16 +547,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"inv_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Inject JavaScript to set the chat input value and simulate Enter key press
-                            js_code = f"""
-                            <script>
-                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
-                            input.value = "{q.replace('"', '\\"')}";
-                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
-                            input.dispatchEvent(event);
-                            </script>
-                            """
-                            components.html(js_code, height=0)
+                            handle_query(q, agent)
                 with st.expander("👥 Employee Performance"):
                     queries = [
                         "Who is currently logged in?",
@@ -578,16 +560,7 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"emp_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Inject JavaScript to set the chat input value and simulate Enter key press
-                            js_code = f"""
-                            <script>
-                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
-                            input.value = "{q.replace('"', '\\"')}";
-                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
-                            input.dispatchEvent(event);
-                            </script>
-                            """
-                            components.html(js_code, height=0)
+                            handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
                         "What are the admin overview metrics for this month?",
@@ -601,21 +574,14 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            # Inject JavaScript to set the chat input value and simulate Enter key press
-                            js_code = f"""
-                            <script>
-                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
-                            input.value = "{q.replace('"', '\\"')}";
-                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
-                            input.dispatchEvent(event);
-                            </script>
-                            """
-                            components.html(js_code, height=0)
+                            handle_query(q, agent)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
                 st.session_state.selected_query = ""
                 handle_query(user_query, agent)
+            # Display the selected query as a placeholder in the chat input field
+            st.markdown(f"**Selected Query:** {st.session_state.selected_query if st.session_state.selected_query else 'None'}")
         else:
             st.error("Access restricted. Please contact an Admin.")
             if st.button("Logout"):
