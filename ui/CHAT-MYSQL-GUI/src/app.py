@@ -78,8 +78,8 @@ class AISQLAgent:
           JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
 
-        - For profit on a '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>': generate:
-                    SELECT 
+        - For profit on a '<DATE>'?:
+          SELECT 
             (SELECT SUM(total) FROM invoices WHERE order_date = '<DATE>') - 
             COALESCE(
                 (SELECT SUM(id.quantity * p.purchase_price) 
@@ -89,26 +89,26 @@ class AISQLAgent:
                 WHERE i.order_date = '<DATE>'), 
                 0
             ) AS profit;
-        - For profit margin on '<DATE>'?", use the following format, substituting the desired date in place of '<DATE>':
-            SELECT 
-                CASE 
-                    WHEN SUM(total) > 0 
-                    THEN ROUND(
-                        ((SUM(total) - COALESCE((
-                            SELECT SUM(id.quantity * p.purchase_price)
-                            FROM invoice_details id
-                            JOIN invoices i2 ON id.invoice_id = i2.invoice_id
-                            JOIN products p ON id.product_id = p.product_id
-                            WHERE i2.order_date = '<DATE>'
-                        ), 0)) / SUM(total) * 100),
-                        1
-                    )
-                    ELSE 0 
-                END AS profit_margin
-            FROM invoices
-            WHERE order_date = '<DATE>';
 
-        
+        - For profit margin on '<DATE>'?:
+          SELECT 
+              CASE 
+                  WHEN SUM(total) > 0 
+                  THEN ROUND(
+                      ((SUM(total) - COALESCE((
+                          SELECT SUM(id.quantity * p.purchase_price)
+                          FROM invoice_details id
+                          JOIN invoices i2 ON id.invoice_id = i2.invoice_id
+                          JOIN products p ON id.product_id = p.product_id
+                          WHERE i2.order_date = '<DATE>'
+                      ), 0)) / SUM(total) * 100),
+                      1
+                  )
+                  ELSE 0 
+              END AS profit_margin
+          FROM invoices
+          WHERE order_date = '<DATE>';
+
         - For best-selling products:
           SELECT p.product_id, p.product_name, SUM(id.quantity) AS total_sold, MAX(id.unit_price) AS max_price, SUM(id.total_price) AS total_revenue
           FROM invoice_details id
@@ -117,33 +117,43 @@ class AISQLAgent:
           WHERE CONCAT(i.order_date, ' ', i.order_time) BETWEEN (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices) AND '{current_sg_datetime}'
           GROUP BY p.product_id, p.product_name
           ORDER BY total_sold DESC, p.product_id ASC
-          LIMIT 10;  
-        
+          LIMIT 10;
+
+        - For top 5 products by revenue this week:
+          SELECT p.product_id, p.product_name, SUM(id.total_price) AS total_revenue
+          FROM invoice_details id
+          INNER JOIN products p ON id.product_id = p.product_id
+          INNER JOIN invoices i ON id.invoice_id = i.invoice_id
+          WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
+          GROUP BY p.product_id, p.product_name
+          ORDER BY total_revenue DESC, p.product_id ASC
+          LIMIT 5;
+
         - For combined financial metrics on a '{specific_date}':
-            SELECT 
-                SUM(i.total) AS total_revenue,
-                COALESCE(SUM(costs.invoice_cost), 0) AS total_cost,
-                SUM(i.total) - COALESCE(SUM(costs.invoice_cost), 0) AS profit,
-                CASE 
-                    WHEN SUM(i.total) > 0 
-                    THEN ROUND(((SUM(i.total) - COALESCE(SUM(costs.invoice_cost), 0)) / SUM(i.total) * 100), 1)
-                    ELSE 0 
-                END AS profit_margin
-            FROM invoices i
-            LEFT JOIN (
-                SELECT id.invoice_id, SUM(id.quantity * p.purchase_price) AS invoice_cost
-                FROM invoice_details id
-                JOIN products p ON id.product_id = p.product_id
-                GROUP BY id.invoice_id
-            ) AS costs ON i.invoice_id = costs.invoice_id
-            WHERE i.order_date = '{specific_date}';
+          SELECT 
+              SUM(i.total) AS total_revenue,
+              COALESCE(SUM(costs.invoice_cost), 0) AS total_cost,
+              SUM(i.total) - COALESCE(SUM(costs.invoice_cost), 0) AS profit,
+              CASE 
+                  WHEN SUM(i.total) > 0 
+                  THEN ROUND(((SUM(i.total) - COALESCE(SUM(costs.invoice_cost), 0)) / SUM(i.total) * 100), 1)
+                  ELSE 0 
+              END AS profit_margin
+          FROM invoices i
+          LEFT JOIN (
+              SELECT id.invoice_id, SUM(id.quantity * p.purchase_price) AS invoice_cost
+              FROM invoice_details id
+              JOIN products p ON id.product_id = p.product_id
+              GROUP BY id.invoice_id
+          ) AS costs ON i.invoice_id = costs.invoice_id
+          WHERE i.order_date = '{specific_date}';
 
         - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
         - For time periods:
           - Today: WHERE i.order_date = '{current_sg_date}'
           - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
           - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
-          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 CENTER)
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
           - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
         - For low stock:
           SELECT product_name, stock, reorder_level
@@ -281,6 +291,7 @@ def handle_query(query: str, agent: AISQLAgent):
     st.session_state.chat_history.append(HumanMessage(content=query))
     with st.chat_message("Human", avatar="dist/img/Human.png"):
         st.markdown(query)
+    debug_info = {}
     with st.spinner("Analyzing your query..."):
         try:
             singapore_tz = pytz.timezone('Asia/Singapore')
@@ -312,15 +323,6 @@ def handle_query(query: str, agent: AISQLAgent):
                 raise ValueError(f"API error: {api_response} (Status: {status_code})")
 
             natural_response = agent.generate_response(query, data, st.session_state.chat_history)
-
-            if st.session_state.debug_mode:
-                with st.expander("Debug Info", expanded=False):
-                    st.markdown("### Debug Info")
-                    st.write(f"**Raw Response**: {debug_info['raw_response']}")
-                    st.write(f"**Cleaned Query**: ```sql\n{debug_info['cleaned_query']}\n```")
-                    st.write(f"**API Response**: {debug_info['api_response']}")
-                    st.write(f"**API Status Code**: {debug_info['status_code']}")
-                    st.write(f"**API Data**: ```json\n{debug_info['api_data']}\n```")
 
             if data and isinstance(data, list) and len(data) >= 1:
                 df = pd.DataFrame(data)
@@ -370,39 +372,47 @@ def handle_query(query: str, agent: AISQLAgent):
         except ValueError as ve:
             natural_response = f"Query error: {str(ve)}. Please try rephrasing your question."
             logging.error(natural_response)
-            if st.session_state.debug_mode:
-                with st.expander("Debug Info", expanded=False):
-                    st.markdown("### Debug Info")
-                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
-                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
-                    st.write(f"**API Response**: {str(ve)}")
-                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
-                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
+            debug_info.update({
+                "raw_response": raw_response if 'raw_response' in locals() else 'N/A',
+                "cleaned_query": sql_query if 'sql_query' in locals() else 'N/A',
+                "api_response": str(ve),
+                "status_code": status_code if 'status_code' in locals() else 'N/A',
+                "api_data": json.dumps(data, indent=2) if 'data' in locals() else 'No data'
+            })
         except requests.exceptions.RequestException as re:
             natural_response = f"API error: {str(re)}. Please check your connection or try again later."
             logging.error(natural_response)
-            if st.session_state.debug_mode:
-                with st.expander("Debug Info", expanded=False):
-                    st.markdown("### Debug Info")
-                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
-                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
-                    st.write(f"**API Response**: {str(re)}")
-                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
-                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
+            debug_info.update({
+                "raw_response": raw_response if 'raw_response' in locals() else 'N/A',
+                "cleaned_query": sql_query if 'sql_query' in locals() else 'N/A',
+                "api_response": str(re),
+                "status_code": status_code if 'status_code' in locals() else 'N/A',
+                "api_data": json.dumps(data, indent=2) if 'data' in locals() else 'No data'
+            })
         except Exception as e:
             natural_response = f"An unexpected error occurred: {str(e)}. Please contact support."
             logging.error(natural_response)
-            if st.session_state.debug_mode:
-                with st.expander("Debug Info", expanded=False):
-                    st.markdown("### Debug Info")
-                    st.write(f"**Raw Response**: {raw_response if 'raw_response' in locals() else 'N/A'}")
-                    st.write(f"**Cleaned Query**: ```sql\n{sql_query if 'sql_query' in locals() else 'N/A'}\n```")
-                    st.write(f"**API Response**: {str(e)}")
-                    st.write(f"**API Status Code**: {status_code if 'status_code' in locals() else 'N/A'}")
-                    st.write(f"**API Data**: {json.dumps(data, indent=2) if 'data' in locals() else 'No data'}")
-        st.session_state.chat_history.append(AIMessage(content=natural_response))
-        with st.chat_message("AI", avatar="dist/img/ai.png"):
-            st.markdown(natural_response)
+            debug_info.update({
+                "raw_response": raw_response if 'raw_response' in locals() else 'N/A',
+                "cleaned_query": sql_query if 'sql_query' in locals() else 'N/A',
+                "api_response": str(e),
+                "status_code": status_code if 'status_code' in locals() else 'N/A',
+                "api_data": json.dumps(data, indent=2) if 'data' in locals() else 'No data'
+            })
+
+    # Display debug info outside the spinner context using a container
+    if st.session_state.debug_mode and debug_info:
+        with st.container():
+            st.markdown("### Debug Info")
+            st.write(f"**Raw Response**: {debug_info['raw_response']}")
+            st.write(f"**Cleaned Query**: ```sql\n{debug_info['cleaned_query']}\n```")
+            st.write(f"**API Response**: {debug_info['api_response']}")
+            st.write(f"**API Status Code**: {debug_info['status_code']}")
+            st.write(f"**API Data**: ```json\n{debug_info['api_data']}\n```")
+
+    st.session_state.chat_history.append(AIMessage(content=natural_response))
+    with st.chat_message("AI", avatar="dist/img/ai.png"):
+        st.markdown(natural_response)
 
 # Initialize session state
 if "authenticated" not in st.session_state:
@@ -472,7 +482,7 @@ def main():
     - categories: category_id (PK, int), category_name (varchar), created_at (datetime), updated_at (datetime)
     - employees: employee_id (PK, int), first_name (varchar), last_name (varchar), email (varchar), password_hash (varchar), role (varchar, Owner/Admin/Cashier), created_at (datetime), updated_at (datetime)
     - void_logs: void_id (PK, int), invoice_id (FK to invoices, int), void_type (varchar), details (json), status (varchar), created_at (datetime), updated_at (datetime)
-    - inventory_logs: log_id (PK, int), product_id (FK to LOCKED), adjustment_type (varchar), quantity (int), created_at (datetime), updated_at (datetime)
+    - inventory_logs: log_id (PK, int), product_id (FK to products, int), adjustment_type (varchar), quantity (int), created_at (datetime), updated_at (datetime)
     - user_logins: log_id (PK, int), employee_id (FK to employees, int), login_time (datetime), logout_time (datetime), created_at (datetime), updated_at (datetime)
     - discount_logs: discount_id (PK, int), invoice_id (FK to invoices, int), discount_amount (decimal), created_at (datetime), updated_at (datetime)
     - admin_logs: adminlogs_id (PK, int), admin_id (FK to employees, int), action_type (varchar), details (json), approved_by_owner (int), created_at (datetime), updated_at (datetime)
@@ -486,7 +496,7 @@ def main():
         "employees": ["employee_id", "first_name", "last_name", "email", "password_hash", "role", "created_at", "updated_at"],
         "void_logs": ["void_id", "invoice_id", "void_type", "details", "status", "created_at", "updated_at"],
         "inventory_logs": ["log_id", "product_id", "adjustment_type", "quantity", "created_at", "updated_at"],
-        "user_logins": ["log_id", "employee_id", "login_time", "logout_time", "created_at", "updated_at","ip_address"],
+        "user_logins": ["log_id", "employee_id", "login_time", "logout_time", "created_at", "updated_at", "ip_address"],
         "discount_logs": ["discount_id", "invoice_id", "discount_amount", "created_at", "updated_at"],
         "admin_logs": ["adminlogs_id", "admin_id", "action_type", "details", "approved_by_owner", "created_at", "updated_at"],
         "sync_log": ["log_id", "table_name", "record_id", "action", "timestamp", "synced"]
