@@ -253,8 +253,8 @@ class AISQLAgent:
         """
         query_lower = user_query.lower()
         
-        # Handle invoice details queries
-        if "sales invoice details" in query_lower and data and isinstance(data, list) and 'invoice_id' in data[0]:
+        # Handle invoice details queries (including "sales invoice details" and "details happens on")
+        if ("sales invoice details" in query_lower or "details happens on" in query_lower) and data and isinstance(data, list) and 'invoice_id' in data[0]:
             try:
                 # Extract date from query
                 date_pattern = r'on (\w+ \d{1,2}, \d{4})'
@@ -263,6 +263,8 @@ class AISQLAgent:
 
                 # Group data by invoice_id
                 invoice_totals = {}
+                employee_info = None
+                total_cost = 0.0
                 for row in data:
                     invoice_id = row['invoice_id']
                     if invoice_id not in invoice_totals:
@@ -270,29 +272,49 @@ class AISQLAgent:
                             'total': float(row['total']),
                             'subtotal': float(row['subtotal']),
                             'discount': float(row['discount']),
+                            'paid': float(row.get('paid', row['total'])),
+                            'payment_type': row.get('payment_type', 'Unknown'),
                             'items': []
                         }
                     invoice_totals[invoice_id]['items'].append({
                         'product_name': row['product_name'],
                         'quantity': int(row['quantity']),
                         'unit_price': float(row['unit_price']),
-                        'total_price': float(row['total_price'])
+                        'total_price': float(row['total_price']),
+                        'purchase_price': float(row.get('purchase_price', 0))
                     })
+                    # Calculate cost for profit
+                    total_cost += float(row['quantity']) * float(row.get('purchase_price', 0))
+                    # Get employee info (assume consistent across rows)
+                    if not employee_info and 'first_name' in row and 'employee_id' in row:
+                        employee_info = {
+                            'first_name': row['first_name'],
+                            'employee_id': row['employee_id']
+                        }
 
-                # Calculate total revenue
+                # Calculate totals
                 total_revenue = sum(invoice['total'] for invoice in invoice_totals.values())
-                
+                total_profit = total_revenue - total_cost
+                total_paid = sum(invoice['paid'] for invoice in invoice_totals.values())
+                total_due = sum(invoice['total'] - invoice['paid'] for invoice in invoice_totals.values())
+                payment_types = set(invoice['payment_type'] for invoice in invoice_totals.values())
+                payment_type_str = payment_types.pop() if len(payment_types) == 1 else "multiple methods"
+
                 # Generate response
-                response = f"Sales Invoice Details on {date_str}\n\n"
-                response += f"On {date_str}, there were **{len(invoice_totals)}** sales invoices with a total revenue of **₱{total_revenue:,.2f}**.\n\n"
-                response += "Here are the details of each invoice:\n\n"
+                response = f"On {date_str}, "
+                if employee_info:
+                    response += f"{employee_info['first_name']}, an employee with ID {employee_info['employee_id']}, "
+                response += f"processed **{len(invoice_totals)}** orders with a total revenue of **₱{total_revenue:,.2f}**.\n\n"
+                response += "Here are the details of each order:\n\n"
                 
-                for invoice_id, invoice in invoice_totals.items():
-                    response += f"**Invoice {invoice_id}**:\n"
+                for idx, (invoice_id, invoice) in enumerate(invoice_totals.items(), 1):
+                    response += f"**Order {idx}**:\n"
                     for item in invoice['items']:
-                        response += f"- {item['product_name']} ({item['quantity']} unit{'s' if item['quantity'] != 1 else ''}, ₱{item['unit_price']:,.2f} each) = ₱{item['total_price']:,.2f}\n"
-                    response += f"Subtotal: ₱{invoice['subtotal']:,.2f}, Discount: ₱{invoice['discount']:,.2f}, Total: ₱{invoice['total']:,.2f}\n\n"
+                        response += f"- {item['product_name']}, quantity: {item['quantity']}, total price: ₱{item['total_price']:,.2f}\n"
                 
+                response += f"The total profit for these orders is **₱{total_profit:,.2f}**, with a payment of **₱{total_paid:,.2f}** "
+                response += f"and {'no due amount' if total_due == 0 else f'a due amount of ₱{total_due:,.2f}'}."
+                response += f" All orders were paid in {payment_type_str.lower()}.\n\n"
                 response += "Would you like more details or to explore another aspect?"
                 return response
             except Exception as e:
