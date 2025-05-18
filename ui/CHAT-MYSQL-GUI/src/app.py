@@ -569,19 +569,6 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"employee_{q}"):
                             handle_query_button(q, agent)
-                with st.expander("💰 Financial Insights"):
-                    queries = [
-                        "What are the admin overview metrics for this month?",
-                        "What is the total amount due from unpaid invoices?",
-                        "What is the total discount given this month?",
-                        "What is the profit margin for SCC SHIRT this year?",
-                        "What is the highest revenue day this month?",
-                        "What is the total profit for this month?",
-                        "What is the breakdown of payment types this month?"
-                    ]
-                    for q in queries:
-                        if st.button(q, key=f"financial_{q}"):
-                            handle_query_button(q, agent)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
