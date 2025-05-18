@@ -1,3 +1,4 @@
+
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
@@ -197,8 +198,9 @@ class AISQLAgent:
                 if not any(func in col for func in ["SUM(", "COUNT(", "AVG(", "MAX(", "MIN("]) and col not in group_by_columns:
                     raise ValueError(f"Column {col} in SELECT must be in GROUP BY or aggregated")
         table_alias_map = {}
-        table_matches = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)?\b', query_upper, re.IGNORECASE)
-        for table, alias in table_matches:
+        table_matches = re.finditer(r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)?\b', query_upper, re.IGNORECASE)
+        for match in table_matches:
+            table, alias = match.groups()
             if alias:
                 table_alias_map[alias] = table
             else:
@@ -326,32 +328,151 @@ def handle_query(query: str, agent: AISQLAgent):
                 df = pd.DataFrame(data)
                 query_lower = query.lower()
 
-                if "total revenue" in query_lower and "profit" in query_lower:
-                    if 'total_revenue' in df.columns and 'profit' in df.columns:
-                        total_revenue = float(df['total_revenue'].iloc[0])
-                        profit = float(df['profit'].iloc[0])
-                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
-                        natural_response = f"For {readable_date}, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
-                        st.markdown("### Financial Summary")
-                        st.write(f"**Total Revenue**: ₱{total_revenue:,.2f}")
-                        st.write(f"**Profit**: ₱{profit:,.2f}")
-                        st.download_button("Download Financial Data", df.to_csv(index=False), "financial_data.csv")
-                elif "total revenue" in query_lower:
-                    if 'total_revenue' in df.columns:
-                        total_revenue = float(df['total_revenue'].iloc[0])
-                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
-                        natural_response = f"The total revenue on {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
-                        st.markdown("### Total Revenue")
-                        st.write(f"**₱{total_revenue:,.2f}**")
-                        st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
-                elif "profit" in query_lower:
-                    if 'profit' in df.columns:
-                        profit = float(df['profit'].iloc[0])
-                        readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
-                        natural_response = f"The profit on {readable_date} was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
-                        st.markdown("### Profit")
-                        st.write(f"**₱{profit:,.2f}**")
-                        st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
+                # Chart generation for specific query types
+                if "best-selling products" in query_lower and 'product_name' in df.columns and 'total_sold' in df.columns:
+                    st.markdown("### Best-Selling Products")
+                    chart_data = {
+                        "type": "bar",
+                        "data": {
+                            "labels": df['product_name'].tolist()[:10],  # Top 10 products
+                            "datasets": [{
+                                "label": "Total Sold",
+                                "data": df['total_sold'].tolist()[:10],
+                                "backgroundColor": ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac"],
+                                "borderColor": ["#3b5a7f", "#b86a20", "#a73f40", "#568986", "#42783a", "#b19a36", "#805876", "#c1757d", "#745943", "#8c8279"],
+                                "borderWidth": 1
+                            }]
+                        },
+                        "options": {
+                            "scales": {
+                                "y": {"beginAtZero": True, "title": {"display": True, "text": "Quantity Sold"}},
+                                "x": {"title": {"display": True, "text": "Product"}}
+                            },
+                            "plugins": {"legend": {"display": False}}
+                        }
+                    }
+                    st.markdown("#### Sales by Product")
+                    st.write("```chartjs\n" + json.dumps(chart_data, indent=2) + "\n```")
+
+                elif "daily sales trend" in query_lower and 'order_date' in df.columns and 'total_revenue' in df.columns:
+                    df['order_date'] = pd.to_datetime(df['order_date']).dt.strftime('%Y-%m-%d')
+                    st.markdown("### Daily Sales Trend")
+                    chart_data = {
+                        "type": "line",
+                        "data": {
+                            "labels": df['order_date'].tolist(),
+                            "datasets": [{
+                                "label": "Daily Revenue",
+                                "data": df['total_revenue'].tolist(),
+                                "fill": False,
+                                "borderColor": "#4e79a7",
+                                "backgroundColor": "#4e79a7",
+                                "tension": 0.1
+                            }]
+                        },
+                        "options": {
+                            "scales": {
+                                "y": {"beginAtZero": True, "title": {"display": True, "text": "Revenue (₱)"}},
+                                "x": {"title": {"display": True, "text": "Date"}}
+                            },
+                            "plugins": {"legend": {"display": True}}
+                        }
+                    }
+                    st.markdown("#### Revenue Over Time")
+                    st.write("```chartjs\n" + json.dumps(chart_data, indent=2) + "\n```")
+
+                elif "total revenue" in query_lower and "profit" in query_lower and 'total_revenue' in df.columns and 'profit' in df.columns:
+                    total_revenue = float(df['total_revenue'].iloc[0])
+                    profit = float(df['profit'].iloc[0])
+                    readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                    natural_response = f"For {readable_date}, the total revenue was **₱{total_revenue:,.2f}** and the profit was **₱{profit:,.2f}**. Would you like a detailed breakdown?"
+                    st.markdown("### Financial Summary")
+                    chart_data = {
+                        "type": "bar",
+                        "data": {
+                            "labels": ["Total Revenue", "Profit"],
+                            "datasets": [{
+                                "label": "Financial Metrics",
+                                "data": [total_revenue, profit],
+                                "backgroundColor": ["#4e79a7", "#59a14f"],
+                                "borderColor": ["#3b5a7f", "#42783a"],
+                                "borderWidth": 1
+                            }]
+                        },
+                        "options": {
+                            "scales": {
+                                "y": {"beginAtZero": True, "title": {"display": True, "text": "Amount (₱)"}},
+                                "x": {"title": {"display": True, "text": "Metric"}}
+                            },
+                            "plugins": {"legend": {"display": False}}
+                        }
+                    }
+                    st.markdown("#### Revenue and Profit")
+                    st.write("```chartjs\n" + json.dumps(chart_data, indent=2) + "\n```")
+                    st.write(f"**Total Revenue**: ₱{total_revenue:,.2f}")
+                    st.write(f"**Profit**: ₱{profit:,.2f}")
+                    st.download_button("Download Financial Data", df.to_csv(index=False), "financial_data.csv")
+
+                elif "total revenue" in query_lower and 'total_revenue' in df.columns:
+                    total_revenue = float(df['total_revenue'].iloc[0])
+                    readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                    natural_response = f"The total revenue on {readable_date} was **₱{total_revenue:,.2f}**. Would you like to see a breakdown by product?"
+                    st.markdown("### Total Revenue")
+                    chart_data = {
+                        "type": "bar",
+                        "data": {
+                            "labels": [readable_date],
+                            "datasets": [{
+                                "label": "Revenue",
+                                "data": [total_revenue],
+                                "backgroundColor": "#4e79a7",
+                                "borderColor": "#3b5a7f",
+                                "borderWidth": 1
+                            }]
+                        },
+                        "options": {
+                            "scales": {
+                                "y": {"beginAtZero": True, "title": {"display": True, "text": "Revenue (₱)"}},
+                                "x": {"title": {"display": True, "text": "Date"}}
+                            },
+                            "plugins": {"legend": {"display": False}}
+                        }
+                    }
+                    st.markdown("#### Revenue")
+                    st.write("```chartjs\n" + json.dumps(chart_data, indent=2) + "\n```")
+                    st.write(f"**₱{total_revenue:,.2f}**")
+                    st.download_button("Download Revenue Data", df.to_csv(index=False), "revenue.csv")
+
+                elif "profit" in query_lower and 'profit' in df.columns:
+                    profit = float(df['profit'].iloc[0])
+                    readable_date = datetime.datetime.strptime(specific_date, '%Y-%m-%d').strftime('%B %d, %Y')
+                    natural_response = f"The profit on {readable_date} was **₱{profit:,.2f}**. Would you like more details or to explore another aspect?"
+                    st.markdown("### Profit")
+                    chart_data = {
+                        "type": "bar",
+                        "data": {
+                            "labels": [readable_date],
+                            "datasets": [{
+                                "label": "Profit",
+                                "data": [profit],
+                                "backgroundColor": "#59a14f",
+                                "borderColor": "#42783a",
+                                "borderWidth": 1
+                            }]
+                        },
+                        "options": {
+                            "scales": {
+                                "y": {"beginAtZero": True, "title": {"display": True, "text": "Profit (₱)"}},
+                                "x": {"title": {"display": True, "text": "Date"}}
+                            },
+                            "plugins": {"legend": {"display": False}}
+                        }
+                    }
+                    st.markdown("#### Profit")
+                    st.write("```chartjs\n" + json.dumps(chart_data, indent=2) + "\n```")
+                    st.write(f"**₱{profit:,.2f}**")
+                    st.download_button("Download Profit Data", df.to_csv(index=False), "profit.csv")
+
                 else:
                     for col in df.columns:
                         if df[col].dtype in ['int64', 'float64']:
@@ -468,7 +589,7 @@ def main():
     - categories: category_id (PK, int), category_name (varchar), created_at (datetime), updated_at (datetime)
     - employees: employee_id (PK, int), first_name (varchar), last_name (varchar), email (varchar), password_hash (varchar), role (varchar, Owner/Admin/Cashier), created_at (datetime), updated_at (datetime)
     - void_logs: void_id (PK, int), invoice_id (FK to invoices, int), void_type (varchar), details (json), status (varchar), created_at (datetime), updated_at (datetime)
-    - inventory_logs: log_id (PK, int), product_id (FK to LOCKED), adjustment_type (varchar), quantity (int), created_at (datetime), updated_at (datetime)
+    - inventory_logs: log_id (PK, int), product_id (FK to products, int), adjustment_type (varchar), quantity (int), created_at (datetime), updated_at (datetime)
     - user_logins: log_id (PK, int), employee_id (FK to employees, int), login_time (datetime), logout_time (datetime), created_at (datetime), updated_at (datetime)
     - discount_logs: discount_id (PK, int), invoice_id (FK to invoices, int), discount_amount (decimal), created_at (datetime), updated_at (datetime)
     - admin_logs: adminlogs_id (PK, int), admin_id (FK to employees, int), action_type (varchar), details (json), approved_by_owner (int), created_at (datetime), updated_at (datetime)
@@ -544,7 +665,7 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); trunk.value = {json.dumps(q)}; input.focus();">{q}</button>',
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
                             unsafe_allow_html=True
                         )
                 with st.expander("👥 Employee Performance"):
