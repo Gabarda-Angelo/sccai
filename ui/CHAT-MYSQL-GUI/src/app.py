@@ -468,7 +468,7 @@ def main():
     - categories: category_id (PK, int), category_name (varchar), created_at (datetime), updated_at (datetime)
     - employees: employee_id (PK, int), first_name (varchar), last_name (varchar), email (varchar), password_hash (varchar), role (varchar, Owner/Admin/Cashier), created_at (datetime), updated_at (datetime)
     - void_logs: void_id (PK, int), invoice_id (FK to invoices, int), void_type (varchar), details (json), status (varchar), created_at (datetime), updated_at (datetime)
-    - inventory_logs: log_id (PK, int), product_id (FK to products, int), adjustment_type (varchar), quantity (int), created_at (datetime), updated_at (datetime)
+    - inventory_logs: log_id (PK, int), product_id (FK to LOCKED), adjustment_type (varchar), quantity (int), created_at (datetime), updated_at (datetime)
     - user_logins: log_id (PK, int), employee_id (FK to employees, int), login_time (datetime), logout_time (datetime), created_at (datetime), updated_at (datetime)
     - discount_logs: discount_id (PK, int), invoice_id (FK to invoices, int), discount_amount (decimal), created_at (datetime), updated_at (datetime)
     - admin_logs: adminlogs_id (PK, int), admin_id (FK to employees, int), action_type (varchar), details (json), approved_by_owner (int), created_at (datetime), updated_at (datetime)
@@ -529,8 +529,10 @@ def main():
                         "What is the average transaction value this month?"
                     ]
                     for q in queries:
-                        if st.button(q, key=f"sales_{uuid.uuid4()}"):
-                            handle_query(q, agent)
+                        st.markdown(
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
+                            unsafe_allow_html=True
+                        )
                 with st.expander("📦 Inventory Management"):
                     queries = [
                         "Which products are below the reorder level?",
@@ -541,8 +543,10 @@ def main():
                         "Which products have the highest stock levels?"
                     ]
                     for q in queries:
-                        if st.button(q, key=f"inv_{uuid.uuid4()}"):
-                            handle_query(q, agent)
+                        st.markdown(
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); trunk.value = {json.dumps(q)}; input.focus();">{q}</button>',
+                            unsafe_allow_html=True
+                        )
                 with st.expander("👥 Employee Performance"):
                     queries = [
                         "Who is currently logged in?",
@@ -553,8 +557,10 @@ def main():
                         "Who processed the most invoices this week?"
                     ]
                     for q in queries:
-                        if st.button(q, key=f"emp_{uuid.uuid4()}"):
-                            handle_query(q, agent)
+                        st.markdown(
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
+                            unsafe_allow_html=True
+                        )
                 with st.expander("💰 Financial Insights"):
                     queries = [
                         "What are the admin overview metrics for this month?",
@@ -566,8 +572,10 @@ def main():
                         "What is the breakdown of payment types this month?"
                     ]
                     for q in queries:
-                        if st.button(q, key=f"fin_{uuid.uuid4()}"):
-                            handle_query(q, agent)
+                        st.markdown(
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
+                            unsafe_allow_html=True
+                        )
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
