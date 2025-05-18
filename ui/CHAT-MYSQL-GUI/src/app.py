@@ -457,6 +457,7 @@ def clear_chat():
     st.session_state.chat_history = [
         AIMessage(content="Hello! I'm AcaSquad AI. Ask me anything about your SCC School Store.")
     ]
+    st.session_state.selected_query = ""
     st.success("Chat history cleared. Starting a new conversation!")
     st.rerun()
 
@@ -533,11 +534,13 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            handle_query(q, agent)
-                            # Inject JavaScript to set the chat input value
+                            # Inject JavaScript to set the chat input value and simulate Enter key press
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
+                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
+                            input.value = "{q.replace('"', '\\"')}";
+                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
+                            input.dispatchEvent(event);
                             </script>
                             """
                             components.html(js_code, height=0)
@@ -553,11 +556,13 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"inv_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            handle_query(q, agent)
-                            # Inject JavaScript to set the chat input value
+                            # Inject JavaScript to set the chat input value and simulate Enter key press
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
+                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
+                            input.value = "{q.replace('"', '\\"')}";
+                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
+                            input.dispatchEvent(event);
                             </script>
                             """
                             components.html(js_code, height=0)
@@ -573,11 +578,13 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"emp_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            handle_query(q, agent)
-                            # Inject JavaScript to set the chat input value
+                            # Inject JavaScript to set the chat input value and simulate Enter key press
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
+                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
+                            input.value = "{q.replace('"', '\\"')}";
+                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
+                            input.dispatchEvent(event);
                             </script>
                             """
                             components.html(js_code, height=0)
@@ -594,17 +601,20 @@ def main():
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
                             st.session_state.selected_query = q
-                            handle_query(q, agent)
-                            # Inject JavaScript to set the chat input value
+                            # Inject JavaScript to set the chat input value and simulate Enter key press
                             js_code = f"""
                             <script>
-                            document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]').value = "{q.replace('"', '\\"')}";
+                            var input = document.querySelector('input[aria-label="Ask about sales, inventory, employees, or financials..."]');
+                            input.value = "{q.replace('"', '\\"')}";
+                            var event = new KeyboardEvent('keydown', {{'key': 'Enter', 'keyCode': 13}});
+                            input.dispatchEvent(event);
                             </script>
                             """
                             components.html(js_code, height=0)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
+                st.session_state.selected_query = ""
                 handle_query(user_query, agent)
         else:
             st.error("Access restricted. Please contact an Admin.")
