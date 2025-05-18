@@ -98,7 +98,7 @@ class AISQLAgent:
                             SELECT SUM(id.quantity * p.purchase_price)
                             FROM invoice_details id
                             JOIN invoices i2 ON id.invoice_id = i2.invoice_id
-                            JOIN家长 ON id.product_id = p.product_id
+                            JOIN products p ON id.product_id = p.product_id
                             WHERE i2.order_date = '<DATE>'
                         ), 0)) / SUM(total) * 100),
                         1
@@ -530,8 +530,7 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"sales_{uuid.uuid4()}"):
-                            with st.spinner("Processing your query..."):
-                                handle_query(q, agent)
+                            handle_query(q, agent)
                 with st.expander("📦 Inventory Management"):
                     queries = [
                         "Which products are below the reorder level?",
@@ -543,8 +542,7 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"inv_{uuid.uuid4()}"):
-                            with st.spinner("Processing your query..."):
-                                handle_query(q, agent)
+                            handle_query(q, agent)
                 with st.expander("👥 Employee Performance"):
                     queries = [
                         "Who is currently logged in?",
@@ -556,8 +554,7 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"emp_{uuid.uuid4()}"):
-                            with st.spinner("Processing your query..."):
-                                handle_query(q, agent)
+                            handle_query(q, agent)
                 with st.expander("💰 Financial Insights"):
                     queries = [
                         "What are the admin overview metrics for this month?",
@@ -570,8 +567,7 @@ def main():
                     ]
                     for q in queries:
                         if st.button(q, key=f"fin_{uuid.uuid4()}"):
-                            with st.spinner("Processing your query..."):
-                                handle_query(q, agent)
+                            handle_query(q, agent)
             display_chat_history()
             user_query = st.chat_input("Ask about sales, inventory, employees, or financials...")
             if user_query:
