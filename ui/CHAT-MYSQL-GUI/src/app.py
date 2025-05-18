@@ -544,7 +544,7 @@ def main():
                     ]
                     for q in queries:
                         st.markdown(
-                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); trunk.value = {json.dumps(q)}; input.focus();">{q}</button>',
+                            f'<button onclick="var input = document.querySelector(\'div[data-testid=\\\'stChatInput\\\'] input\'); input.value = {json.dumps(q)}; input.focus();">{q}</button>',
                             unsafe_allow_html=True
                         )
                 with st.expander("👥 Employee Performance"):
