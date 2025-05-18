@@ -66,7 +66,7 @@ class AISQLAgent:
         - Use appropriate JOINs (INNER JOIN for required matches, LEFT JOIN for optional data).
         - For aggregations, ensure all non-aggregated columns in SELECT are in GROUP BY.
         - Alias all computed columns clearly (e.g., SUM(id.quantity) AS total_sold).
-         - For total revenue on a '{specific_date}':
+        - For total revenue on a '{specific_date}':
           SELECT SUM(total) AS total_revenue
           FROM invoices
           WHERE order_date = '{specific_date}';
@@ -128,12 +128,13 @@ class AISQLAgent:
           LEFT JOIN invoice_details id ON i.invoice_id = id.invoice_id
           LEFT JOIN products p ON id.product_id = p.product_id
           WHERE i.order_date = '{specific_date}';
+
         - For specific products (if provided), use WHERE p.product_name LIKE '%{product_name}%' or p.product_id = 'id'.
         - For time periods:
           - Today: WHERE i.order_date = '{current_sg_date}'
           - This week: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 7 DAY)
           - This month: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 MONTH)
-          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 YEAR)
+          - This year: WHERE i.order_date >= DATE_SUB('{current_sg_date}', INTERVAL 1 CENTER)
           - All time: WHERE CONCAT(i.order_date, ' ', i.order_time) >= (SELECT MIN(CONCAT(order_date, ' ', order_time)) FROM invoices)
         - For low stock:
           SELECT product_name, stock, reorder_level
@@ -249,77 +250,6 @@ class AISQLAgent:
         - Keep concise (<250 words).
         - Suggest follow-up: "Would you like more details or to explore another aspect?"
         """
-        query_lower = user_query.lower()
-        
-        # Handle invoice details queries (including "sales invoice details" and "details happens on")
-        if ("sales invoice details" in query_lower or "details happens on" in query_lower) and data and isinstance(data, list) and 'invoice_id' in data[0]:
-            try:
-                # Extract date from query
-                date_pattern = r'on (\w+ \d{1,2}, \d{4})'
-                match = re.search(date_pattern, query_lower)
-                date_str = match.group(1) if match else "the specified date"
-
-                # Group data by invoice_id
-                invoice_totals = {}
-                employee_info = None
-                total_cost = 0.0
-                for row in data:
-                    invoice_id = row['invoice_id']
-                    if invoice_id not in invoice_totals:
-                        invoice_totals[invoice_id] = {
-                            'total': float(row['total']),
-                            'subtotal': float(row['subtotal']),
-                            'discount': float(row['discount']),
-                            'paid': float(row.get('paid', row['total'])),
-                            'payment_type': row.get('payment_type', 'Unknown'),
-                            'items': []
-                        }
-                    invoice_totals[invoice_id]['items'].append({
-                        'product_name': row['product_name'],
-                        'quantity': int(row['quantity']),
-                        'unit_price': float(row['unit_price']),
-                        'total_price': float(row['total_price']),
-                        'purchase_price': float(row.get('purchase_price', 0))
-                    })
-                    # Calculate cost for profit
-                    total_cost += float(row['quantity']) * float(row.get('purchase_price', 0))
-                    # Get employee info (assume consistent across rows)
-                    if not employee_info and 'first_name' in row and 'employee_id' in row:
-                        employee_info = {
-                            'first_name': row['first_name'],
-                            'employee_id': row['employee_id']
-                        }
-
-                # Calculate totals
-                total_revenue = sum(invoice['total'] for invoice in invoice_totals.values())
-                total_profit = total_revenue - total_cost
-                total_paid = sum(invoice['paid'] for invoice in invoice_totals.values())
-                total_due = sum(invoice['total'] - invoice['paid'] for invoice in invoice_totals.values())
-                payment_types = set(invoice['payment_type'] for invoice in invoice_totals.values())
-                payment_type_str = payment_types.pop() if len(payment_types) == 1 else "multiple methods"
-
-                # Generate response
-                response = f"On {date_str}, "
-                if employee_info:
-                    response += f"{employee_info['first_name']}, an employee with ID {employee_info['employee_id']}, "
-                response += f"processed **{len(invoice_totals)}** orders with a total revenue of **₱{total_revenue:,.2f}**.\n\n"
-                response += "Here are the details of each order:\n\n"
-                
-                for idx, (invoice_id, invoice) in enumerate(invoice_totals.items(), 1):
-                    response += f"**Order {idx}**:\n"
-                    for item in invoice['items']:
-                        response += f"- {item['product_name']}, quantity: {item['quantity']}, total price: ₱{item['total_price']:,.2f}\n"
-                
-                response += f"The total profit for these orders is **₱{total_profit:,.2f}**, with a payment of **₱{total_paid:,.2f}** "
-                response += f"and {'no due amount' if total_due == 0 else f'a due amount of ₱{total_due:,.2f}'}."
-                response += f" All orders were paid in {payment_type_str.lower()}.\n\n"
-                response += "Would you like more details or to explore another aspect?"
-                return response
-            except Exception as e:
-                logging.error(f"Invoice details response generation error: {str(e)}")
-                return f"Error processing invoice details: {str(e)}. Please try again."
-        
-        # Fallback to original LLM-based response for other queries
         chain = (
             RunnablePassthrough.assign(response=lambda _: json.dumps(data, indent=2))
             | ChatPromptTemplate.from_template(response_template)
